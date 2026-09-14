@@ -40,9 +40,16 @@ type TokenAuth struct {
 
 // SSHAuth is the narrow root-authenticated path used only for the handful
 // of Proxmox config fields no API token can set (args, and similar), and/or
-// for hookscript deployment. User and PublicKey are not secret.
+// for hookscript deployment. User, PublicKey, and HostKeyFingerprint are not
+// secret.
 type SSHAuth struct {
-	User          string `toml:"user"`
-	PublicKey     string `toml:"public_key"`
-	PrivateKeyEnc string `toml:"private_key_enc"`
+	User      string `toml:"user"`
+	PublicKey string `toml:"public_key"`
+	// HostKeyFingerprint pins the target's SSH host key, captured on first
+	// connect (trust-on-first-use) during bootstrap and verified on every
+	// subsequent connection. Without it, the SSH client has no way to
+	// detect a MITM'd connection on later invocations other than trusting
+	// the network every time.
+	HostKeyFingerprint string `toml:"host_key_fingerprint"`
+	PrivateKeyEnc      string `toml:"private_key_enc"`
 }

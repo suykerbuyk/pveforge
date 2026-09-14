@@ -106,6 +106,14 @@ func resolveRosterPath(cmd *cobra.Command, args []string) (string, error) {
 	if len(args) == 1 && args[0] != "" {
 		return args[0], nil
 	}
+	return resolveRosterPathFromFlagOrEnv(cmd)
+}
+
+// resolveRosterPathFromFlagOrEnv is resolveRosterPath without the
+// positional-argument step, shared with commands (like `bootstrap`) whose
+// own positional argument means something else (a target id, not a roster
+// path).
+func resolveRosterPathFromFlagOrEnv(cmd *cobra.Command) (string, error) {
 	flag, err := cmd.Flags().GetString("roster")
 	if err != nil {
 		return "", fmt.Errorf("read --roster flag: %w", err)

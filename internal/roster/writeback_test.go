@@ -437,6 +437,183 @@ node = "pve-10"
 	}
 }
 
+func TestWriteSSHAuth_WritesHostKeyFingerprint(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+	err := WriteSSHAuth(path, "qa-pve-01", SSHWrite{
+		User:                "root",
+		PublicKey:           "ssh-ed25519 AAAA... pveforge@qa-pve-01",
+		HostKeyFingerprint:  "SHA256:abcdefg1234567890",
+		PrivateKeyPlaintext: []byte("ssh-priv-key-material"),
+	}, "test-passphrase")
+	if err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	tg := r.Find("qa-pve-01")
+	if tg.SSH == nil || tg.SSH.HostKeyFingerprint != "SHA256:abcdefg1234567890" {
+		t.Fatalf("host key fingerprint not written correctly: %+v", tg.SSH)
+	}
+}
+
+func TestWriteSSHAuth_RotationPreservesHostKeyFingerprint(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+	err := WriteSSHAuth(path, "qa-pve-01", SSHWrite{
+		User:                "root",
+		PublicKey:           "ssh-ed25519 AAAA... old",
+		HostKeyFingerprint:  "SHA256:original-fingerprint",
+		PrivateKeyPlaintext: []byte("old-key"),
+	}, "test-passphrase")
+	if err != nil {
+		t.Fatalf("WriteSSHAuth (initial): %v", err)
+	}
+
+	err = WriteSSHAuth(path, "qa-pve-01", SSHWrite{
+		User:                "root",
+		PublicKey:           "ssh-ed25519 AAAA... new",
+		HostKeyFingerprint:  "SHA256:rotated-fingerprint",
+		PrivateKeyPlaintext: []byte("new-key"),
+	}, "test-passphrase")
+	if err != nil {
+		t.Fatalf("WriteSSHAuth (rotation): %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	tg := r.Find("qa-pve-01")
+	if tg.SSH == nil || tg.SSH.HostKeyFingerprint != "SHA256:rotated-fingerprint" {
+		t.Fatalf("host key fingerprint not updated on rotation: %+v", tg.SSH)
+	}
+	if strings.Contains(string(got), "original-fingerprint") {
+		t.Fatal("old host key fingerprint was not replaced")
+	}
+}
+
+func TestAppendTarget_NewRoster(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.toml")
+	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
+		t.Fatalf("write empty roster: %v", err)
+	}
+
+	err := AppendTarget(path, Target{
+		ID:   "qa-pve-01",
+		Host: "qa-pve-01.example.com",
+		Node: "qa-pve-01",
+	})
+	if err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(r.Targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(r.Targets))
+	}
+	tg := r.Find("qa-pve-01")
+	if tg == nil || tg.Host != "qa-pve-01.example.com" || tg.Node != "qa-pve-01" {
+		t.Fatalf("unexpected target: %+v", tg)
+	}
+	if tg.Token != nil || tg.SSH != nil {
+		t.Fatalf("freshly appended target should have no auth: %+v", tg)
+	}
+}
+
+func TestAppendTarget_PreservesExistingTargets(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+
+	err := AppendTarget(path, Target{
+		ID:      "qa-pve-03",
+		Host:    "qa-pve-03.example.com",
+		Node:    "qa-pve-03",
+		APIPort: 8007,
+	})
+	if err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if !strings.HasPrefix(string(got), fixtureTwoTargets) {
+		t.Fatalf("existing roster bytes were altered.\nwant prefix:\n%s\ngot:\n%s", fixtureTwoTargets, got)
+	}
+
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	if len(r.Targets) != 3 {
+		t.Fatalf("want 3 targets, got %d", len(r.Targets))
+	}
+	a := r.Find("qa-pve-01")
+	if a == nil || a.Token != nil || a.SSH != nil {
+		t.Fatalf("qa-pve-01 should be untouched: %+v", a)
+	}
+	b := r.Find("qa-pve-02")
+	if b == nil || b.Token != nil || b.SSH != nil {
+		t.Fatalf("qa-pve-02 should be untouched: %+v", b)
+	}
+	c := r.Find("qa-pve-03")
+	if c == nil || c.Host != "qa-pve-03.example.com" || c.APIPort != 8007 {
+		t.Fatalf("qa-pve-03 not appended correctly: %+v", c)
+	}
+}
+
+func TestAppendTarget_DuplicateID(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+	err := AppendTarget(path, Target{
+		ID:   "qa-pve-01",
+		Host: "duplicate.example.com",
+		Node: "dup",
+	})
+	if err == nil {
+		t.Fatal("expected error for duplicate target id")
+	}
+}
+
+func TestAppendTarget_MissingRequiredFields(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+	cases := []Target{
+		{Host: "h", Node: "n"},
+		{ID: "x", Node: "n"},
+		{ID: "x", Host: "h"},
+	}
+	for i, tg := range cases {
+		if err := AppendTarget(path, tg); err == nil {
+			t.Fatalf("case %d: expected error for missing required field: %+v", i, tg)
+		}
+	}
+}
+
+func TestAppendTarget_RejectsAuthSubtables(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+	err := AppendTarget(path, Target{
+		ID:    "qa-pve-03",
+		Host:  "qa-pve-03.example.com",
+		Node:  "qa-pve-03",
+		Token: &TokenAuth{ID: "x", SecretEnc: "y"},
+	})
+	if err == nil {
+		t.Fatal("expected error when appending a target that already carries auth subtables")
+	}
+}
+
 func TestWriteTokenAuth_DuplicateTargetID(t *testing.T) {
 	const fixture = `[[targets]]
 id = "dup"

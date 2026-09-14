@@ -1,0 +1,514 @@
+// Package bootstrap implements pveforge's "nothing exists yet" -> "fully
+// token-authenticated roster entry" flow (PRD §3.2), plus the token
+// creation/ACL-grant validation this task's own research findings flagged
+// as a silent-failure risk if skipped.
+//
+// Orchestration logic here (Run and its helpers) depends only on the
+// SSHTransport and APIValidator interfaces below, not on internal/sshexec
+// or internal/pve directly — those two packages do real network I/O, and
+// keeping them behind small interfaces is what makes this package's own
+// tests fast, deterministic, and free of any live-host dependency. The
+// concrete adapters wiring the real packages to these interfaces live in
+// deps.go; cmd/pveforge/bootstrap.go is the only other caller of those
+// constructors.
+package bootstrap
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
+)
+
+// RunResult is one remote command's outcome, mirroring sshexec.Result —
+// duplicated here (rather than imported) so this package's core logic
+// doesn't need to depend on sshexec's concrete type for it.
+type RunResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+// SSHSession is a live, already-authenticated remote command-execution
+// session — what Client.Run(ctx, cmd) gives bootstrap once a Dial has
+// succeeded.
+type SSHSession interface {
+	Run(ctx context.Context, cmd string) (RunResult, error)
+	Close() error
+}
+
+// SSHTransport is the subset of SSH transport capability the bootstrap
+// flow needs, narrowed to an interface so tests can fake it without any
+// real network connection. NewSSHTransport (deps.go) provides the
+// production implementation, backed by internal/sshexec.
+//
+// The two connection methods below express deliberately different trust
+// models, not just different call signatures — see Run's doc comment for
+// which one applies when:
+type SSHTransport interface {
+	// InstallPubkeyViaPassword connects to addr as user via password auth,
+	// idempotently installs authorizedKeyLine into authorized_keys, and
+	// returns the host key fingerprint captured trust-on-first-use during
+	// that connection. Used ONLY for a target's true first bootstrap (no
+	// SSH auth persisted yet) — every later Run must not touch password
+	// auth or TOFU again.
+	InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authorizedKeyLine string) (hostKeyFingerprint string, err error)
+
+	// DialWithKey connects to addr as user using privateKeyPEM, verifying
+	// the host key against hostKeyFingerprint (pinned, per
+	// sshexec.PinnedHostKeyCallback). Used immediately after
+	// InstallPubkeyViaPassword, pinned against the fingerprint that call
+	// just captured — proves the freshly installed key actually works
+	// before anything is persisted.
+	DialWithKey(ctx context.Context, addr, user string, privateKeyPEM []byte, hostKeyFingerprint string) (SSHSession, error)
+
+	// ReconnectWithPinnedKey connects using a keypair and host key
+	// fingerprint already persisted from a PRIOR successful bootstrap of
+	// this target — no password auth, no TOFU capture. Unlike DialWithKey
+	// right after a fresh TOFU capture (where the fingerprint being
+	// checked against is whatever was just presented, so it can't
+	// meaningfully fail), a mismatch here is a REAL security check: it
+	// means whatever now answers at this network address presented a
+	// different host key than the one this target was pinned to. That
+	// must be a hard stop, never a silent re-pin — see Run's doc comment.
+	ReconnectWithPinnedKey(ctx context.Context, addr, user string, privateKeyPEM []byte, hostKeyFingerprint string) (SSHSession, error)
+}
+
+// APIConfig is the subset of pve.ClientConfig APIValidator needs.
+type APIConfig struct {
+	Host        string
+	APIPort     int
+	InsecureTLS bool
+	TokenID     string
+	TokenSecret string
+}
+
+// APIValidator is the subset of pve's capability bootstrap needs to prove
+// a freshly created token actually has working grants. NewAPIValidator
+// (deps.go) provides the production implementation, backed by internal/pve.
+type APIValidator interface {
+	ValidateTokenGrants(ctx context.Context, cfg APIConfig, expectNode string) error
+}
+
+// Options configures one bootstrap run against a single target.
+type Options struct {
+	TargetID    string
+	Host        string
+	Node        string
+	APIPort     int
+	InsecureTLS bool
+	SSHPort     int // 0 => 22
+
+	// PVEUsername is a PAM/realm username, e.g. "root@pam". Only @pam (or
+	// bare, defaulting to pam) realm users are supported — anything else
+	// has no corresponding SSH-reachable Linux system account.
+	PVEUsername string
+	PVEPassword string
+
+	// TokenID is the token's own name (not including the userid prefix),
+	// e.g. "pveforge" -> full token id "root@pam!pveforge".
+	TokenID string
+	// ACLPath and ACLRole scope the freshly created token's grant.
+	// Defaults: "/" and "PVEVMAdmin" (see applyDefaults).
+	ACLPath string
+	ACLRole string
+
+	RosterPath string
+	Passphrase string
+}
+
+// Result reports what Run did.
+type Result struct {
+	HostKeyFingerprint string
+	// TokenID is the full "userid!tokenname" of the token that was
+	// created and persisted.
+	TokenID string
+}
+
+// Run executes the full bootstrap flow: establish an SSH connection to the
+// target (see the connection-strategy branch below), create a scoped API
+// token (and grant its ACL) over that connection via pveum, validate the
+// token's grants actually work, then persist the token to the roster.
+//
+// Connection strategy, and why it's a hard branch rather than "try
+// password, fall back if that fails": once a target has SSH auth
+// persisted from a prior successful bootstrap, that keypair and its host
+// key fingerprint are proof of a specific, already-verified identity for
+// this target. Re-running password auth + trust-on-first-use every time
+// would blindly re-trust and silently re-pin whatever key the network
+// address presents NOW — which is exactly wrong the one time it matters:
+// a network path that has started pointing somewhere else (DNS/IP reuse,
+// a rebuilt or compromised box) would be silently accepted and re-pinned,
+// after which the standing SSH vector trusts the new key for everything.
+// So:
+//   - Target already has SSH auth + a pinned fingerprint on file:
+//     reconnect directly with that keypair via ReconnectWithPinnedKey.
+//     A mismatch (or any other failure) is a hard stop — see that
+//     method's doc comment — never a fallback to password auth.
+//   - Target has no SSH auth yet (true first bootstrap): generate a
+//     fresh keypair, install it via password auth + TOFU capture
+//     (InstallPubkeyViaPassword), then prove it works with DialWithKey.
+//
+// Either way, once a session is established, SSH auth is persisted to the
+// roster IMMEDIATELY if it's new (before the token/ACL/validate steps that
+// are far more likely to fail transiently — a network drop, an ACL role
+// typo, propagation delay). This is what makes a retry after a partial
+// failure land in the "already has SSH auth" branch above instead of
+// generating a brand-new keypair — and therefore orphaning the
+// previously-installed one in authorized_keys — on every retry.
+//
+// The token itself is always deleted-and-recreated rather than reused
+// (Proxmox never re-displays a token secret after creation, so an existing
+// token whose secret pveforge doesn't already have on disk is
+// unrecoverable — treating every run as "mint a fresh token" sidesteps
+// that rather than trying to detect and resume a partial prior run).
+func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValidator) (*Result, error) {
+	applyDefaults(&opts)
+	defaultHostNodeFromRoster(&opts)
+	if err := validateOptions(&opts); err != nil {
+		return nil, err
+	}
+	sshUser, err := pamLocalUser(opts.PVEUsername)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureTargetExists(opts); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+
+	addr := fmt.Sprintf("%s:%d", opts.Host, opts.SSHPort)
+
+	existing, err := loadExistingSSHAuth(opts)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+
+	var session SSHSession
+	var hostKeyFP string
+
+	if existing != nil {
+		session, err = transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — this needs deliberate operator reconciliation; pveforge will not silently re-trust and re-pin a different host key", opts.TargetID, err)
+		}
+		defer func() { _ = session.Close() }()
+		hostKeyFP = existing.HostKeyFingerprint
+	} else {
+		keypair, genErr := sshexec.GenerateEd25519Keypair(fmt.Sprintf("pveforge@%s", opts.TargetID))
+		if genErr != nil {
+			return nil, fmt.Errorf("bootstrap %s: generate keypair: %w", opts.TargetID, genErr)
+		}
+
+		hostKeyFP, err = transport.InstallPubkeyViaPassword(ctx, addr, sshUser, opts.PVEPassword, keypair.AuthorizedKeyLine)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap %s: install pubkey: %w", opts.TargetID, err)
+		}
+
+		session, err = transport.DialWithKey(ctx, addr, sshUser, keypair.PrivateKeyPEM, hostKeyFP)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap %s: connect with fresh key: %w", opts.TargetID, err)
+		}
+		defer func() { _ = session.Close() }()
+
+		// Persist immediately — proven to work, and this is what makes a
+		// later failure in this same Run (token creation, ACL grant,
+		// validation) safe to retry without generating a second keypair.
+		if err := roster.WriteSSHAuth(opts.RosterPath, opts.TargetID, roster.SSHWrite{
+			User:                sshUser,
+			PublicKey:           keypair.AuthorizedKeyLine,
+			HostKeyFingerprint:  hostKeyFP,
+			PrivateKeyPlaintext: keypair.PrivateKeyPEM,
+		}, opts.Passphrase); err != nil {
+			return nil, fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err)
+		}
+	}
+
+	fullTokenID := opts.PVEUsername + "!" + opts.TokenID
+	tokenSecret, err := createToken(ctx, session, opts.PVEUsername, opts.TokenID)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap %s: create token: %w", opts.TargetID, err)
+	}
+	if err := grantACL(ctx, session, fullTokenID, opts.ACLPath, opts.ACLRole); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: grant acl: %w", opts.TargetID, err)
+	}
+
+	if err := api.ValidateTokenGrants(ctx, APIConfig{
+		Host:        opts.Host,
+		APIPort:     opts.APIPort,
+		InsecureTLS: opts.InsecureTLS,
+		TokenID:     fullTokenID,
+		TokenSecret: tokenSecret,
+	}, opts.Node); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+
+	if err := roster.WriteTokenAuth(opts.RosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         fullTokenID,
+		SecretPlaintext: []byte(tokenSecret),
+	}, opts.Passphrase); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: persist token auth: %w", opts.TargetID, err)
+	}
+
+	return &Result{HostKeyFingerprint: hostKeyFP, TokenID: fullTokenID}, nil
+}
+
+// defaultHostNodeFromRoster fills opts.Host/opts.Node from the roster's
+// already-recorded values for opts.TargetID, when the target already
+// exists there and the caller left Host and/or Node blank. This is what
+// makes --host/--node genuinely optional on a retry against an
+// already-created target — matching cmd/pveforge/bootstrap.go's own flag
+// help text ("required unless the target already exists in the roster")
+// — rather than that text describing a fallback that nothing actually
+// implements. A true first bootstrap, where the target has no roster
+// record yet, still requires both explicitly: there is nothing to fall
+// back to, and validateOptions (called right after this) still enforces
+// that.
+//
+// Errors are swallowed here deliberately — this is a best-effort
+// convenience lookup, not the place real roster problems should surface.
+// A bad/missing roster path either leaves Host/Node blank (caught moments
+// later by validateOptions with a clear message) or, for an existing
+// roster with real problems, gets its own clearer error from
+// ensureTargetExists right afterward.
+func defaultHostNodeFromRoster(opts *Options) {
+	if opts.RosterPath == "" || opts.TargetID == "" {
+		return
+	}
+	if opts.Host != "" && opts.Node != "" {
+		return
+	}
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil {
+		return
+	}
+	if opts.Host == "" {
+		opts.Host = tg.Host
+	}
+	if opts.Node == "" {
+		opts.Node = tg.Node
+	}
+}
+
+func applyDefaults(opts *Options) {
+	if opts.SSHPort == 0 {
+		opts.SSHPort = 22
+	}
+	if opts.ACLPath == "" {
+		opts.ACLPath = "/"
+	}
+	if opts.ACLRole == "" {
+		opts.ACLRole = "PVEVMAdmin"
+	}
+	if opts.PVEUsername == "" {
+		opts.PVEUsername = "root@pam"
+	}
+}
+
+func validateOptions(opts *Options) error {
+	switch {
+	case opts.TargetID == "":
+		return fmt.Errorf("bootstrap: target id is required")
+	case opts.Host == "":
+		return fmt.Errorf("bootstrap: host is required")
+	case opts.Node == "":
+		return fmt.Errorf("bootstrap: node is required")
+	case opts.PVEPassword == "":
+		return fmt.Errorf("bootstrap: PVE password is required")
+	case opts.TokenID == "":
+		return fmt.Errorf("bootstrap: token id is required")
+	case opts.RosterPath == "":
+		return fmt.Errorf("bootstrap: roster path is required")
+	case opts.Passphrase == "":
+		return fmt.Errorf("bootstrap: roster passphrase is required")
+	}
+	return nil
+}
+
+// pamLocalUser derives the SSH-login username from a PVE PAM/realm
+// username. Only @pam (or a bare username, assumed pam) is accepted: a
+// PVE realm user backed by LDAP/AD or a non-PAM authentication source has
+// no corresponding Linux system account to SSH into.
+func pamLocalUser(pveUsername string) (string, error) {
+	name, realm, found := strings.Cut(pveUsername, "@")
+	if !found {
+		return pveUsername, nil
+	}
+	if realm != "pam" {
+		return "", fmt.Errorf("pve username %q: only @pam realm users have a corresponding SSH-reachable system account, got @%s", pveUsername, realm)
+	}
+	return name, nil
+}
+
+// ensureTargetExists appends a bare (auth-free) [[targets]] entry for
+// opts.TargetID if the roster doesn't already have one, so `pveforge
+// bootstrap` is a one-command entry point starting from a roster that
+// merely exists (created via `pveforge roster init`) but has no entry for
+// this target yet.
+func ensureTargetExists(opts Options) error {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return fmt.Errorf("load roster %s (create it first with `pveforge roster init`): %w", opts.RosterPath, err)
+	}
+	if r.Find(opts.TargetID) != nil {
+		return nil
+	}
+	return roster.AppendTarget(opts.RosterPath, roster.Target{
+		ID:          opts.TargetID,
+		Host:        opts.Host,
+		Node:        opts.Node,
+		APIPort:     opts.APIPort,
+		InsecureTLS: opts.InsecureTLS,
+	})
+}
+
+// existingSSHAuth is what a prior successful bootstrap already proved and
+// persisted for a target: a working keypair and the host key fingerprint
+// it was pinned to.
+type existingSSHAuth struct {
+	PrivateKeyPEM      []byte
+	HostKeyFingerprint string
+}
+
+// loadExistingSSHAuth returns opts.TargetID's persisted SSH auth,
+// decrypted with opts.Passphrase, or nil if this target has no SSH auth
+// with a pinned host key fingerprint yet — i.e. this is its true first
+// bootstrap. A target whose SSH auth exists but (unexpectedly) has no
+// fingerprint on file is treated the same as "none yet": Run's own
+// first-bootstrap path always writes a keypair and its fingerprint
+// together (see Run), so this only happens for roster state this task's
+// own code never produced, and re-bootstrapping (rather than reconnecting
+// with an unpinned keypair) is the safer default.
+//
+// Deliberately decrypts ONLY tg.SSH.PrivateKeyEnc via roster.DecryptString
+// — never tg.Resolve, which unconditionally also decrypts Token.SecretEnc
+// (see roster.Target.Resolve). This call has no use for the token secret,
+// and a target can have both auth types persisted; an unrelated
+// Token-decrypt failure (corruption, format drift, anything) must not
+// block a perfectly good SSH reconnect that doesn't even touch that data.
+//
+// Called after ensureTargetExists, so opts.TargetID is guaranteed to exist
+// in the roster by the time this runs.
+func loadExistingSSHAuth(opts Options) (*existingSSHAuth, error) {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return nil, fmt.Errorf("load roster %s: %w", opts.RosterPath, err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil {
+		return nil, fmt.Errorf("target %q not found in roster", opts.TargetID)
+	}
+	if tg.SSH == nil || tg.SSH.HostKeyFingerprint == "" {
+		return nil, nil
+	}
+	privateKeyPEM, err := roster.DecryptString(tg.SSH.PrivateKeyEnc, opts.Passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt existing ssh keypair for %q: %w", opts.TargetID, err)
+	}
+	return &existingSSHAuth{
+		PrivateKeyPEM:      privateKeyPEM,
+		HostKeyFingerprint: tg.SSH.HostKeyFingerprint,
+	}, nil
+}
+
+// createToken ensures a fresh scoped API token exists for userID/tokenID,
+// deleting any existing token by that name first. Proxmox never
+// re-displays a token's secret after creation, so an existing token whose
+// secret pveforge doesn't already have on disk is unrecoverable and must
+// be replaced rather than reused — this is what makes a bootstrap run that
+// died between token creation and roster persistence safe to retry.
+//
+// NOTE: the exact `pveum user token add/remove` command syntax and its
+// --output-format json response shape are reproduced here from PVE
+// documentation/convention, not independently verified against a live
+// host in this implementation session (no live PVE access was available)
+// — the same empirical-verification gap flagged for the root-only-fields
+// registry. parseTokenSecret is deliberately lenient about the response
+// shape (see its comment) to reduce the blast radius if the assumption is
+// wrong, but this still needs a manual live-host check before being
+// trusted in production.
+func createToken(ctx context.Context, session SSHSession, userID, tokenID string) (secret string, err error) {
+	// Best-effort cleanup of a token left over from a prior partial run.
+	// Errors ignored deliberately: "no such token" is the expected/common
+	// case, and pveum's exit status for that isn't being pattern-matched
+	// here to avoid coupling to CLI text that may vary across PVE
+	// versions.
+	_, _ = session.Run(ctx, fmt.Sprintf("pveum user token remove %s %s", sshexec.ShellQuote(userID), sshexec.ShellQuote(tokenID)))
+
+	res, err := session.Run(ctx, fmt.Sprintf("pveum user token add %s %s --privsep 1 --output-format json",
+		sshexec.ShellQuote(userID), sshexec.ShellQuote(tokenID)))
+	if err != nil {
+		return "", fmt.Errorf("run pveum user token add: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("pveum user token add exited %d: %s", res.ExitCode, res.Stderr)
+	}
+	return parseTokenSecret(res.Stdout)
+}
+
+// parseTokenSecret extracts the token secret from `pveum user token add
+// --output-format json`'s stdout. It tries the CLI's typical bare-value
+// shape ({"value": "..."}) first, then falls back to the REST-API-style
+// {"data": {"value": "..."}} envelope in case the installed pveum wraps it
+// the same way the HTTP API does — deliberately lenient rather than
+// asserting one shape, given this hasn't been checked against a live host
+// (see createToken's doc comment). Either way, it fails loudly rather than
+// silently returning the wrong string if neither shape matches.
+//
+// The failure branch deliberately never echoes stdout: a response that
+// fails to parse as either expected shape is exactly the case most likely
+// to actually contain the real secret under a differently-shaped response
+// than assumed, and this task's own standing rule is that no secret
+// material ever appears in an error string. Only bounded, non-secret
+// information is reported instead — the parsed top-level JSON key names,
+// or (if it isn't even a JSON object) the byte length.
+func parseTokenSecret(stdout string) (string, error) {
+	var direct struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &direct); err == nil && direct.Value != "" {
+		return direct.Value, nil
+	}
+	var enveloped struct {
+		Data struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &enveloped); err == nil && enveloped.Data.Value != "" {
+		return enveloped.Data.Value, nil
+	}
+
+	var generic map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &generic); err == nil {
+		keys := make([]string, 0, len(generic))
+		for k := range generic {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return "", fmt.Errorf(`parse pveum token add output: no "value" field found (top-level keys: %v)`, keys)
+	}
+	return "", fmt.Errorf("parse pveum token add output: unexpected output shape (%d bytes, not a JSON object)", len(stdout))
+}
+
+// grantACL grants role at path to the token identified by fullTokenID
+// (userid!tokenname). Same live-host-verification caveat as createToken
+// applies to the exact `pveum acl modify` flag names.
+func grantACL(ctx context.Context, session SSHSession, fullTokenID, path, role string) error {
+	cmd := fmt.Sprintf("pveum acl modify %s --tokens %s --roles %s",
+		sshexec.ShellQuote(path), sshexec.ShellQuote(fullTokenID), sshexec.ShellQuote(role))
+	res, err := session.Run(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("run pveum acl modify: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("pveum acl modify exited %d: %s", res.ExitCode, res.Stderr)
+	}
+	return nil
+}

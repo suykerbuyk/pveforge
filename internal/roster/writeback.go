@@ -23,6 +23,7 @@ type TokenWrite struct {
 type SSHWrite struct {
 	User                string
 	PublicKey           string
+	HostKeyFingerprint  string
 	PrivateKeyPlaintext []byte
 }
 
@@ -64,9 +65,123 @@ func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase string) error {
 	fields := []field{
 		{key: "user", value: w.User},
 		{key: "public_key", value: w.PublicKey},
+		{key: "host_key_fingerprint", value: w.HostKeyFingerprint},
 		{key: "private_key_enc", value: keyEnc, literal: true},
 	}
 	return spliceSubtable(path, targetID, "ssh", fields)
+}
+
+// AppendTarget appends a new [[targets]] block for t to the roster at path,
+// with no auth subtables — the starting point for a target `pveforge
+// bootstrap` has not yet run against. It errors if a target with the same
+// id already exists; use WriteTokenAuth/WriteSSHAuth to add credentials to
+// it afterward.
+func AppendTarget(path string, t Target) error {
+	if t.ID == "" {
+		return fmt.Errorf("append target: id is required")
+	}
+	if t.Host == "" {
+		return fmt.Errorf("append target %q: host is required", t.ID)
+	}
+	if t.Node == "" {
+		return fmt.Errorf("append target %q: node is required", t.ID)
+	}
+	if t.Token != nil || t.SSH != nil {
+		return fmt.Errorf("append target %q: must not carry auth subtables; use WriteTokenAuth/WriteSSHAuth after appending", t.ID)
+	}
+
+	lock := flock.New(path + ".lock")
+	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	locked, err := lock.TryLockContext(lockCtx, 100*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("lock roster %s: %w", path, err)
+	}
+	if !locked {
+		return fmt.Errorf("lock roster %s: timed out waiting for another pveforge process", path)
+	}
+	defer lock.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read roster %s: %w", path, err)
+	}
+
+	blocks, err := findTargetBlocks(data)
+	if err != nil {
+		return fmt.Errorf("append target %q: %w", t.ID, err)
+	}
+	for _, b := range blocks {
+		if b.id == t.ID {
+			return fmt.Errorf("append target %q: a target with this id already exists", t.ID)
+		}
+	}
+
+	newData := appendTargetBlock(data, t)
+
+	if err := verifyAppendOnly(data, newData, t.ID); err != nil {
+		return fmt.Errorf("safety check failed, roster left untouched: %w", err)
+	}
+
+	if err := atomicWrite(path, newData); err != nil {
+		return fmt.Errorf("write roster %s: %w", path, err)
+	}
+	return nil
+}
+
+// appendTargetBlock renders t as a new [[targets]] block and appends it to
+// the end of data.
+func appendTargetBlock(data []byte, t Target) []byte {
+	var b strings.Builder
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteString("\n")
+	}
+	if len(data) > 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("[[targets]]\n")
+	b.WriteString(field{key: "id", value: t.ID}.render())
+	b.WriteString(field{key: "host", value: t.Host}.render())
+	b.WriteString(field{key: "node", value: t.Node}.render())
+	if t.APIPort != 0 {
+		b.WriteString(fmt.Sprintf("api_port = %d\n", t.APIPort))
+	}
+	if t.InsecureTLS {
+		b.WriteString("insecure_tls = true\n")
+	}
+	return append(append([]byte{}, data...), []byte(b.String())...)
+}
+
+// verifyAppendOnly re-decodes both the original and appended bytes and
+// asserts that every original target is byte-for-byte unchanged in its
+// decoded form, and that exactly one new target (targetID) was added at the
+// end. Mirrors verifyOnlyIntendedChange's role for spliceSubtable: the
+// safety net that catches a rendering bug before anything is written.
+func verifyAppendOnly(oldData, newData []byte, targetID string) error {
+	oldRoster, err := Decode(oldData)
+	if err != nil {
+		return fmt.Errorf("original roster no longer parses (unexpected): %w", err)
+	}
+	newRoster, err := Decode(newData)
+	if err != nil {
+		return fmt.Errorf("appended roster does not parse: %w", err)
+	}
+	if len(newRoster.Targets) != len(oldRoster.Targets)+1 {
+		return fmt.Errorf("target count changed by %d, want +1", len(newRoster.Targets)-len(oldRoster.Targets))
+	}
+	for i := range oldRoster.Targets {
+		if !targetDeepEqual(oldRoster.Targets[i], newRoster.Targets[i]) {
+			return fmt.Errorf("existing target %q was modified", oldRoster.Targets[i].ID)
+		}
+	}
+	last := newRoster.Targets[len(newRoster.Targets)-1]
+	if last.ID != targetID {
+		return fmt.Errorf("appended target has id %q, want %q", last.ID, targetID)
+	}
+	if last.Token != nil || last.SSH != nil {
+		return fmt.Errorf("appended target %q unexpectedly carries auth subtables", targetID)
+	}
+	return nil
 }
 
 // field is one key/value pair to write into a subtable. Non-literal values
