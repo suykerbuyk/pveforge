@@ -1,0 +1,48 @@
+// Package roster loads and edits the pveforge target roster: a TOML file
+// listing Proxmox hosts and, once bootstrapped, their auth credentials. Only
+// credential values are secret; everything else stays plaintext so the file
+// remains diffable and reviewable in source control.
+package roster
+
+// DefaultPath is the roster file location pveforge uses when neither
+// --roster nor PVEFORGE_ROSTER override it.
+const DefaultPath = "pveforge.toml"
+
+// PassphraseEnvVar names the environment variable holding the roster's
+// master passphrase. Per the project's standing no-secrets-on-cli rule,
+// there is deliberately no flag for this.
+const PassphraseEnvVar = "PVEFORGE_ROSTER_PASSPHRASE"
+
+// Roster is the top-level roster document.
+type Roster struct {
+	Targets []Target `toml:"targets"`
+}
+
+// Target describes one Proxmox host/cluster entry. Token and SSH are nil
+// until the auth-bootstrap flow has run for this target.
+type Target struct {
+	ID          string     `toml:"id"`
+	Host        string     `toml:"host"`
+	Node        string     `toml:"node"`
+	APIPort     int        `toml:"api_port"`
+	InsecureTLS bool       `toml:"insecure_tls"`
+	Token       *TokenAuth `toml:"token"`
+	SSH         *SSHAuth   `toml:"ssh"`
+}
+
+// TokenAuth is the primary auth path: a Proxmox API token. ID is the token's
+// name (e.g. "pveforge@pve!automation") and is not secret. SecretEnc is the
+// age-armored, encrypted token secret.
+type TokenAuth struct {
+	ID        string `toml:"id"`
+	SecretEnc string `toml:"secret_enc"`
+}
+
+// SSHAuth is the narrow root-authenticated path used only for the handful
+// of Proxmox config fields no API token can set (args, and similar), and/or
+// for hookscript deployment. User and PublicKey are not secret.
+type SSHAuth struct {
+	User          string `toml:"user"`
+	PublicKey     string `toml:"public_key"`
+	PrivateKeyEnc string `toml:"private_key_enc"`
+}

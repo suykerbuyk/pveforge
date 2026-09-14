@@ -144,22 +144,28 @@ that fills that gap as its own product, not as a bolt-on to any one consumer.
   concession — operator confirmed (2026-09-13) this is expected to be a
   standing capability, since more such fields may surface over time as device
   requirements grow.
-  - **Design question, not yet resolved:** does this path stay as a retained,
-    narrowly-scoped SSH/password credential invoked directly by the binary at
-    the moment such a field needs setting, or does it move entirely to a
-    **Proxmox `hookscript`** — a script that runs locally on the hypervisor as
-    root, invoked by `qm`'s own lifecycle mechanism (pre-start/post-start/
-    pre-stop/post-stop), entirely outside the API's auth layer? A hookscript
-    is *already* required regardless (see §3.4 — bridge port-isolation state
-    does not survive VM stop/start and must be reapplied every boot), so
-    piggybacking the args-class-field logic onto that same mechanism avoids
-    introducing a second root-auth code path. Whether a hookscript can be
-    *deployed* itself via the API (Proxmox's storage `snippets` content type
-    is API-uploadable) or needs SFTP/SCP is an open, cheap-to-answer question
-    that determines whether SSH is needed only once, ever (at bootstrap), or
-    as a standing capability.
-- **SSH is never a Tier-1 operational dependency.** It is scoped to bootstrap
-  (§3.2) and, pending the question above, possibly to hookscript deployment.
+  - **Resolved (operator, 2026-09-13):** this path is retained as a standing,
+    narrowly-scoped SSH/password-authenticated command-execution vector,
+    invoked directly by the binary at the moment such a field needs setting —
+    not moved entirely to hookscript injection. Reason: some required
+    operations (specific networking setups, and `qm set`-class operations not
+    yet exposed by the REST API) are only reachable via `pvesh` or equivalent
+    root-level tooling on the hypervisor itself, invoked on demand — a
+    hookscript's event-triggered model (pre-start/post-start/pre-stop/
+    post-stop) cannot serve an arbitrary, operator-initiated mutation issued
+    at any time. **This is in addition to, not instead of, the hookscript
+    mechanism** — §3.4's bridge port-isolation case still needs a hookscript,
+    since that state must be reapplied automatically on every boot without a
+    live `pveforge` invocation driving it. The two mechanisms solve different
+    problems and both are needed: hookscript for automatic re-application at
+    VM lifecycle transitions, standing SSH for on-demand root-only operations.
+- **SSH is a permanently-retained Tier-2 execution vector, not a bootstrap-only
+  concession.** REST API (token-authenticated) remains the default and
+  preferred path for everything it covers (§0.1, finding 1). SSH/`pvesh` is
+  reserved for the specific, narrow class of operations confirmed to have no
+  REST equivalent — but for that class, it is a standing capability the
+  binary may invoke at any time, not a one-time bootstrap or hookscript-
+  deployment mechanism only.
 
 ### 3.2 Bootstrap
 
@@ -199,13 +205,30 @@ mutate and report what changed. A `--force` flag bypasses the no-op and
 re-applies unconditionally. Acknowledged limitation: some state genuinely
 cannot be inspected before the mutating action (accepted, not a design flaw).
 
-**Concurrency note, not yet resolved:** check-then-act has a real TOCTOU race
-if two invocations target the same object concurrently (a realistic scenario
-— the originating investigation's environment already runs multiple
-concurrent orchestration agents against shared Proxmox hosts). Whether
-`pveforge` needs its own locking discipline, or leans on Proxmox's own
-per-VM config lock (`qm set --lock`), or simply documents "single invocation
-at a time per object" as a stated constraint, is open.
+**Concurrency, resolved (operator, 2026-09-13):** `pveforge` implements its own
+serialization discipline rather than relying only on documentation or on
+Proxmox's own optimistic-concurrency primitives. Motivation, confirmed real
+rather than hypothetical: the originating environment (this project's own
+vibe-palace multi-agent workflow) already runs multiple concurrent
+orchestration agents against shared hosts, each potentially pursuing
+different objectives against overlapping or identical properties — a
+materially different threat model from single-script sequential execution.
+Mandate:
+
+- **All mutating operations are always blocked and serialized** — never two
+  concurrent mutations in flight against the framework at once, full stop.
+- **A pending mutation takes priority over a pending read.** A read that
+  would otherwise run next yields to a mutation waiting behind it.
+- Exact scope/granularity (per-object, per-target/host, per-process, or
+  needing to reach across separate `pveforge` invocations/machines
+  entirely) is this area's own design task —
+  `pveforge-idempotent-mutation-engine` — to size properly, not assumed
+  here. Proxmox's own config `digest` field (see that task's recorded
+  research findings) remains valuable as defense-in-depth against a write
+  from outside `pveforge` entirely (e.g. a concurrent GUI edit), but does not
+  by itself satisfy the always-serialize-and-prioritize-writers mandate above
+  — it only detects a lost race after the fact, it doesn't prevent or order
+  one.
 
 **Standing example already known to need this exact mechanism:** Linux bridge
 port isolation (`bridge link set dev <tap> isolated on`) does not survive a
@@ -236,7 +259,10 @@ This splits into two layers with very different cost:
   *this* layer self-describing is a real, hand-authored engineering task
   (tractable via Go struct tags/reflection, akin to how `kubectl explain` or
   a Cobra command tree can be introspected), not something inherited for
-  free. Size it as its own deliverable.
+  free. **Owned by `pveforge-object-model-get-set` /
+  `pveforge-discoverability-schema`** (operator, 2026-09-13) — not a separate
+  deliverable, since those tasks already own the write-side semantic layer
+  and the introspection layer respectively.
 
 ### 3.6 I/O
 
@@ -283,16 +309,24 @@ roster or Ansible inventory plays.
 
 ## 6. Open questions (tracked here until resolved, not assumed)
 
-1. Does the args-class-field workaround retain a standing SSH/password
-   credential, or move entirely to hookscript injection? Depends on whether
-   hookscripts are API-uploadable (Proxmox storage `snippets` content type)
-   or need SFTP.
+1. ~~Does the args-class-field workaround retain a standing SSH/password
+   credential, or move entirely to hookscript injection?~~ **Resolved
+   (operator, 2026-09-13, §3.1): both.** Standing SSH/password credential
+   retained for on-demand root-only/`pvesh`-only operations; hookscript still
+   separately required for the boot-persistence case (§3.4).
 2. Which other config fields, beyond `args`, are actually root-only on our
    target PVE version? (`rng`, `affinity`, `hugepages` are reported
    elsewhere, not independently verified.)
-3. Concurrency/locking discipline for idempotent mutations against a
-   concurrently-used host (§3.4).
-4. Scope and shape of the hand-authored discoverability schema for the
-   bespoke device-model layer (§3.5) — a real design task, not yet sized.
+3. ~~Concurrency/locking discipline for idempotent mutations against a
+   concurrently-used host (§3.4).~~ **Resolved in principle (operator,
+   2026-09-13, §3.4): `pveforge` always serializes mutations, with mutation
+   priority over reads.** Exact locking granularity remains
+   `pveforge-idempotent-mutation-engine`'s own design work.
+4. ~~Scope and shape of the hand-authored discoverability schema for the
+   bespoke device-model layer (§3.5) — a real design task, not yet sized.~~
+   **Resolved (operator, 2026-09-13): folded into
+   `pveforge-object-model-get-set` / `pveforge-discoverability-schema`**
+   rather than sized as a standalone task — those tasks already own this
+   layer of the architecture.
 5. Multi-operator secret access (`age` recipients vs. a single passphrase) —
    deferred past v1.
