@@ -2,6 +2,8 @@ package idempotent
 
 import (
 	"context"
+	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -28,6 +30,27 @@ type fakeClient struct {
 	lastField     string
 	lastValue     string
 	lastDigest    string
+	casCalls      []casCall
+
+	// setFieldPlainErrs/setFieldPlainCalls track the unconditional
+	// (non-CAS) SetVMConfigField — VMFieldsEnsure's own tests (unlike
+	// VMTagEnsure's) exercise this, for root-only fields and the
+	// PVE-rejects-as-root-only fallback.
+	setFieldPlainErrs  []error
+	setFieldPlainCalls int
+	lastPlainField     string
+	lastPlainValue     string
+
+	// rawRequestResults is indexed by call number the same way as
+	// getVMResults — VMFieldsEnsure.readConfig calls RawRequest once per
+	// Read and once more per REST-CAS field write in Apply (a fresh
+	// digest for each), so a test scripting a multi-field batch scripts
+	// one entry per expected call.
+	rawRequestResults []json.RawMessage
+	rawRequestErr     error
+	rawRequestCalls   int
+	lastRawMethod     string
+	lastRawPath       string
 }
 
 func (f *fakeClient) Node() string { return f.node }
@@ -47,17 +70,55 @@ func (f *fakeClient) GetVM(_ context.Context, _ string, _ int) (*proxmox.Virtual
 	return f.getVMResults[idx], nil
 }
 
+// casCall is one recorded SetVMConfigFieldCAS invocation — casCalls holds
+// full history (not just the last, unlike lastField/lastValue/lastDigest
+// above) so a test can prove what digest EACH of several field writes in
+// one Apply used, not just the final one.
+type casCall struct {
+	field, value, digest string
+}
+
 func (f *fakeClient) SetVMConfigFieldCAS(_ context.Context, vmid int, field, value, expectDigest string) error {
 	f.lastVMID = vmid
 	f.lastField = field
 	f.lastValue = value
 	f.lastDigest = expectDigest
+	f.casCalls = append(f.casCalls, casCall{field: field, value: value, digest: expectDigest})
 	idx := f.setFieldCalls
 	f.setFieldCalls++
 	if idx < len(f.setFieldErrs) {
 		return f.setFieldErrs[idx]
 	}
 	return nil
+}
+
+func (f *fakeClient) SetVMConfigField(_ context.Context, vmid int, field, value string) error {
+	f.lastVMID = vmid
+	f.lastPlainField = field
+	f.lastPlainValue = value
+	idx := f.setFieldPlainCalls
+	f.setFieldPlainCalls++
+	if idx < len(f.setFieldPlainErrs) {
+		return f.setFieldPlainErrs[idx]
+	}
+	return nil
+}
+
+func (f *fakeClient) RawRequest(_ context.Context, method, path string, _ url.Values) (json.RawMessage, error) {
+	f.lastRawMethod = method
+	f.lastRawPath = path
+	idx := f.rawRequestCalls
+	f.rawRequestCalls++
+	if f.rawRequestErr != nil {
+		return nil, f.rawRequestErr
+	}
+	if len(f.rawRequestResults) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	if idx >= len(f.rawRequestResults) {
+		idx = len(f.rawRequestResults) - 1
+	}
+	return f.rawRequestResults[idx], nil
 }
 
 func testRosterPath(t *testing.T) string {

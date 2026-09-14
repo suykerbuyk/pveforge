@@ -2,7 +2,9 @@ package idempotent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	proxmox "github.com/luthermonson/go-proxmox"
@@ -11,12 +13,19 @@ import (
 )
 
 // Client is the subset of *pve.RoutedClient a VM-config-mutating Op
-// needs: a typed read (for Tags and the config Digest) and the
-// digest-aware routed write. Defined here, not as the concrete
-// *pve.RoutedClient, so this package's own tests use a lightweight
-// in-package fake instead of pve's network/SSH test harness —
-// *pve.RoutedClient satisfies this interface structurally (see
+// needs: a typed read (for Tags and the config Digest), the digest-aware
+// routed write, and (as of VMFieldsEnsure, pveforge-vm-set-unlocked) the
+// unconditional plain write and the raw REST passthrough. Defined here,
+// not as the concrete *pve.RoutedClient, so this package's own tests use
+// a lightweight in-package fake instead of pve's network/SSH test harness
+// — *pve.RoutedClient satisfies this interface structurally (see
 // compat_test.go).
+//
+// SetVMConfigField and RawRequest are unused by VMTagEnsure — this
+// interface is widened for VMFieldsEnsure's sake (see vmfields.go) rather
+// than declaring a third near-identical Client-shaped interface
+// alongside this one and BridgeIsolationClient. Costs VMTagEnsure
+// nothing: it simply never calls the added methods.
 type Client interface {
 	// GetVM fetches vmid's current status and config on node.
 	GetVM(ctx context.Context, node string, vmid int) (*proxmox.VirtualMachine, error)
@@ -29,6 +38,30 @@ type Client interface {
 	// pve.RoutedClient.SetVMConfigFieldCAS's own doc comment on the
 	// root-only-field asymmetry).
 	SetVMConfigFieldCAS(ctx context.Context, vmid int, field, value, expectDigest string) error
+	// SetVMConfigField sets one VM config field unconditionally (no CAS
+	// guard), routing over REST or the standing SSH vector as
+	// sshexec.RootOnlyFields dictates. VMFieldsEnsure uses this both for
+	// a field already known root-only (skipping CAS entirely — see
+	// VMFieldsEnsure.Apply's own doc comment on why
+	// SetVMConfigFieldCAS's local refusal for such a field can't be used
+	// as the detection signal) and as BridgeIsolationEnsure's existing
+	// fallback for a field PVE itself rejects as root-only that isn't
+	// yet in the registry.
+	SetVMConfigField(ctx context.Context, vmid int, field, value string) error
+	// RawRequest issues method against path on this client's own PVE
+	// host, returning PVE's response unwrapped from its transport
+	// envelope but otherwise unreshaped (internal/pve.RawRequest's own
+	// doc comment). VMFieldsEnsure uses this — not GetVM — to read a VM's
+	// CURRENT config field values: go-proxmox's typed
+	// VirtualMachineConfig only models a fixed, curated subset of PVE's
+	// actual config keys (confirmed by reading its source), so it cannot
+	// answer "what is field X's current value" for an arbitrary
+	// caller-supplied field name the way vm set's raw, schema-free write
+	// side (PRD §3.3) already requires on the write side. A raw GET of
+	// the same /config endpoint the write side already targets is the
+	// only mechanism that's correct for ANY field PVE actually has, known
+	// to go-proxmox's struct or not.
+	RawRequest(ctx context.Context, method, path string, params url.Values) (json.RawMessage, error)
 }
 
 // VMTagEnsure is the idempotent-mutation-engine's proof case (per

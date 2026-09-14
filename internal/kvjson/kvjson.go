@@ -87,7 +87,7 @@ func renderKV(w io.Writer, compact []byte) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		val, err := kvScalar(flat[k])
+		val, err := Scalar(flat[k])
 		if err != nil {
 			return fmt.Errorf("render: field %q: %w", k, err)
 		}
@@ -98,12 +98,19 @@ func renderKV(w io.Writer, compact []byte) error {
 	return nil
 }
 
-// kvScalar renders one JSON value as a single line for key=value output:
-// a JSON string is unquoted; anything else (number, bool, null, a nested
-// object/array) is rendered as its own compact JSON text — already
+// Scalar renders one JSON value as a single comparable/displayable
+// string: a JSON string is unquoted; anything else (number, bool, null, a
+// nested object/array) is rendered as its own compact JSON text — already
 // single-line, since it came from a compact (non-indented) marshal — good
 // enough for a nested field like go-proxmox's CPUInfo/RootFS structs
-// without inventing a nested key=value dialect.
+// without inventing a nested key=value dialect. Exported (not just
+// Render's own KV-mode helper) because internal/idempotent's
+// VMFieldsEnsure needs the identical coercion to compare a raw PVE config
+// field's current JSON-typed value against a caller-supplied plain-string
+// wanted value (e.g. PVE's own "cores" comes back as a JSON number, not a
+// string, but a CLI caller always types "cores=4") — reusing this rather
+// than re-deriving the same non-obvious null-handling logic in a second
+// package.
 //
 // null is checked for explicitly, before attempting the string-unmarshal
 // below: per encoding/json, unmarshaling the JSON literal null into a
@@ -114,7 +121,7 @@ func renderKV(w io.Writer, compact []byte) error {
 // agree on what a field's value is (JSON mode correctly shows
 // `"field": null`). Same class of bug ParseJSONFields below already
 // guards against for the parse direction.
-func kvScalar(raw json.RawMessage) (string, error) {
+func Scalar(raw json.RawMessage) (string, error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "null" {
 		return "null", nil

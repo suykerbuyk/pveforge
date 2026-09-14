@@ -2,6 +2,7 @@ package kvjson
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -89,7 +90,7 @@ type testWithNullable struct {
 }
 
 // TestRender_KV_NullFieldRendersAsLiteralNull guards against the defect
-// where kvScalar relied on json.Unmarshal(raw, &s) succeeding (a
+// where Scalar relied on json.Unmarshal(raw, &s) succeeding (a
 // documented no-op for JSON null unmarshaled into a non-pointer string,
 // per encoding/json) to detect "not a string" — which made a null field
 // render identically to a genuinely empty string ("field=" either way),
@@ -189,6 +190,41 @@ func TestRender_MarshalFailure(t *testing.T) {
 	// A channel cannot be marshaled to JSON.
 	if err := Render(&buf, JSON, make(chan int)); err == nil {
 		t.Fatal("expected a marshal error")
+	}
+}
+
+// TestScalar is a direct table test of Scalar — previously covered only
+// indirectly through Render's own KV-mode tests. Exported (not just an
+// internal Render helper) since internal/idempotent's VMFieldsEnsure now
+// also depends on its exact coercion rules to compare a raw PVE config
+// field's current JSON-typed value against a caller-supplied plain-string
+// wanted value.
+func TestScalar(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"string", `"web-01"`, "web-01"},
+		{"empty string", `""`, ""},
+		{"number", `4`, "4"},
+		{"float", `1.5`, "1.5"},
+		{"bool true", `true`, "true"},
+		{"bool false", `false`, "false"},
+		{"null", `null`, "null"},
+		{"nested object", `{"a":1}`, `{"a":1}`},
+		{"nested array", `[1,2]`, `[1,2]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := Scalar(json.RawMessage(c.raw))
+			if err != nil {
+				t.Fatalf("Scalar(%s): %v", c.raw, err)
+			}
+			if got != c.want {
+				t.Errorf("Scalar(%s) = %q, want %q", c.raw, got, c.want)
+			}
+		})
 	}
 }
 
