@@ -62,6 +62,7 @@ func newVMGetCmd() *cobra.Command {
 		}
 		return kvjson.Render(cmd.OutOrStdout(), format, vm)
 	}
+	markSafe(cmd)
 	return cmd
 }
 
@@ -140,5 +141,6 @@ invocation have already been applied and are not rolled back.`,
 	addRosterFlag(cmd)
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of field=value pairs (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of field=value pairs (values must be JSON strings)")
+	markMutating(cmd)
 	return cmd
 }

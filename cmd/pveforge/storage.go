@@ -55,5 +55,6 @@ func newStorageGetCmd() *cobra.Command {
 		}
 		return kvjson.Render(cmd.OutOrStdout(), format, storage)
 	}
+	markSafe(cmd)
 	return cmd
 }

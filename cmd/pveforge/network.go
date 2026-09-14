@@ -55,5 +55,6 @@ func newNetworkGetCmd() *cobra.Command {
 		}
 		return kvjson.Render(cmd.OutOrStdout(), format, nw)
 	}
+	markSafe(cmd)
 	return cmd
 }

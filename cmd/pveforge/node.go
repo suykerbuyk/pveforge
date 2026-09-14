@@ -55,5 +55,6 @@ func newNodeGetCmd() *cobra.Command {
 		}
 		return kvjson.Render(cmd.OutOrStdout(), format, node)
 	}
+	markSafe(cmd)
 	return cmd
 }

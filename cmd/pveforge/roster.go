@@ -60,6 +60,16 @@ func newRosterInitCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing roster file")
+	// destructive, not mutating: without --force this refuses to touch an
+	// existing file, but WITH --force it overwrites the roster wholesale —
+	// including every target's already-persisted encrypted token/SSH
+	// credentials — with the blank rosterTemplate above. That's exactly
+	// the "restore-overwrite" case docs/prd.md §3.5 Layer 3 names as
+	// destructive: irreversible (no backup, no confirmation prompt) and
+	// its blast radius is every target in the file at once, not just one.
+	// The command's own worst-case behavior sets its tier; --force being
+	// opt-in doesn't change what happens once it's used.
+	markDestructive(cmd)
 	return cmd
 }
 
@@ -94,6 +104,7 @@ func newRosterValidateCmd() *cobra.Command {
 			return nil
 		},
 	}
+	markSafe(cmd)
 	return cmd
 }
 

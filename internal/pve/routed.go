@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path"
 	"time"
 
@@ -127,6 +128,25 @@ func (c *RoutedClient) GetNetworkInterfaces(ctx context.Context, node string, if
 // which is what cmd/pveforge's discover commands actually hold.
 func (c *RoutedClient) APIDocTree(ctx context.Context) (json.RawMessage, error) {
 	return c.rest.APIDocTree(ctx)
+}
+
+// RawRequest issues a raw PVE REST call — see Client.RawRequest's own doc
+// comment. A thin pass-through, deliberately: pveforge-raw-api-escape-
+// hatch's own recorded design (vault task pveforge-raw-api-escape-hatch,
+// "Locking design") scopes this to plain REST only, with NO standing-SSH
+// root-only-field fallback the way SetVMConfigField has — that fallback is
+// keyed to individual VM CONFIG FIELD NAMES (sshexec.RootOnlyFields), and
+// a raw passthrough's --data params are opaque key=value pairs with no
+// guarantee they even target a VM config write at all, let alone which of
+// possibly several fields in one call might be root-only. Building that
+// generalization was explicitly out of this task's scope ("no new
+// transport"); a root-only rejection surfaces as PVE's own verbatim error
+// text instead (RawRequest's own doc comment on why that text is
+// preserved) — which is itself useful signal telling the caller to reach
+// for the dedicated `vm set` command instead, since THAT command has the
+// fallback this one deliberately doesn't.
+func (c *RoutedClient) RawRequest(ctx context.Context, method, path string, params url.Values) (json.RawMessage, error) {
+	return c.rest.RawRequest(ctx, method, path, params)
 }
 
 // SetVMConfigField sets one VM config field on this target's VM, routing

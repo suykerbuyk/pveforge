@@ -86,6 +86,7 @@ func newDiscoverVMCmd() *cobra.Command {
 		}
 		return runDiscoverPath(cmd, args[0], path, resolveFormat)
 	}
+	markSafe(cmd)
 	return cmd
 }
 
@@ -118,6 +119,7 @@ func newDiscoverNodeCmd() *cobra.Command {
 		// and the one Client.GetNode itself actually calls.
 		return runDiscoverPath(cmd, args[0], "/nodes/{node}/status", resolveFormat)
 	}
+	markSafe(cmd)
 	return cmd
 }
 
@@ -139,6 +141,7 @@ func newDiscoverStorageCmd() *cobra.Command {
 		}
 		return runDiscoverPath(cmd, args[0], path, resolveFormat)
 	}
+	markSafe(cmd)
 	return cmd
 }
 
@@ -170,6 +173,7 @@ func newDiscoverNetworkCmd() *cobra.Command {
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		return runDiscoverPath(cmd, args[0], "/nodes/{node}/network/{iface}", resolveFormat)
 	}
+	markSafe(cmd)
 	return cmd
 }
 
@@ -192,5 +196,6 @@ func newDiscoverDeviceCmd() *cobra.Command {
 		}
 		return kvjson.Render(cmd.OutOrStdout(), format, schema)
 	}
+	markSafe(cmd)
 	return cmd
 }

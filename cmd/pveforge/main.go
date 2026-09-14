@@ -30,5 +30,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newStorageCmd())
 	root.AddCommand(newNetworkCmd())
 	root.AddCommand(newDiscoverCmd())
+	root.AddCommand(newAPICmd())
+	root.AddCommand(newSchemaCmd())
 	return root
 }

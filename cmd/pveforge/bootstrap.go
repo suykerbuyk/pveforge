@@ -78,6 +78,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&aclPath, "acl-path", "/", "ACL path to grant the new token")
 	cmd.Flags().StringVar(&aclRole, "acl-role", "PVEVMAdmin", "ACL role to grant the new token")
 
+	markMutating(cmd)
 	return cmd
 }
 
