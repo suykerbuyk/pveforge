@@ -29,5 +29,6 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newNodeCmd())
 	root.AddCommand(newStorageCmd())
 	root.AddCommand(newNetworkCmd())
+	root.AddCommand(newDiscoverCmd())
 	return root
 }

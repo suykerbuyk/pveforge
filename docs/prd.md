@@ -124,7 +124,7 @@ that fills that gap as its own product, not as a bolt-on to any one consumer.
   Proxmox only, at least through v1.
 - An MCP server, an AI-agent-only interface, or anything that cannot be
   invoked deterministically and non-interactively from a shell script or
-  `make` target. Machine- and AI-readable discoverability (§5) is a *format*
+  `make` target. Machine- and AI-readable discoverability (§3.5) is a *format*
   requirement, not an *interaction-model* requirement — `pveforge` must work
   identically whether invoked by a human, a cron job, CI, or an agent, with
   zero non-determinism introduced by any of them.
@@ -166,6 +166,13 @@ that fills that gap as its own product, not as a bolt-on to any one consumer.
   REST equivalent — but for that class, it is a standing capability the
   binary may invoke at any time, not a one-time bootstrap or hookscript-
   deployment mechanism only.
+- **Planned, not yet built (`pveforge-raw-api-escape-hatch`):** a raw
+  `pveforge api get/post/put/delete <path> [--data key=value ...]`
+  passthrough for any PVE REST path with no dedicated command yet —
+  complementing §3.5's `discover` (learn the shape, then poke it directly).
+  Idea surfaced by reviewing `davegallant/pvectl` (GPL-3.0 — read for the
+  idea only, its code was never used). Open design question before this is
+  built: see §6, item 6.
 
 ### 3.2 Bootstrap
 
@@ -244,25 +251,77 @@ without static documentation — by a human, a script, or an AI, with no
 distinction in interface between them (this is a schema-introspection
 requirement, not an agent-interaction-model concern; see §2).
 
-This splits into two layers with very different cost:
+This splits into three layers: two shipped, one planned.
 
-- **The generic Proxmox object model (nodes, VMs, storage, network, users,
-  ...) can largely inherit Proxmox's own introspection for free.** Proxmox's
-  REST API already supports `OPTIONS` requests on every path, returning full
-  parameter schema, types, defaults, and enums — this is the exact mechanism
-  `pvesh` itself is built on (a generic walker, not per-object hardcoding).
-  `pveforge` should expose/proxy this schema rather than hand-author a
-  parallel one.
-- **`pveforge`'s own bespoke semantic layer (the NVMe/BMC/PCIe device-model
-  abstractions, the hookscript-backed isolation state, etc.) is invisible to
-  Proxmox's schema** — to Proxmox, `args:` is just an opaque string. Making
-  *this* layer self-describing is a real, hand-authored engineering task
-  (tractable via Go struct tags/reflection, akin to how `kubectl explain` or
-  a Cobra command tree can be introspected), not something inherited for
-  free. **Owned by `pveforge-object-model-get-set` /
-  `pveforge-discoverability-schema`** (operator, 2026-09-13) — not a separate
-  deliverable, since those tasks already own the write-side semantic layer
-  and the introspection layer respectively.
+**Layer 1 — PVE's own generic object model (nodes, VMs, storage, network).**
+`pveforge` proxies PVE's own schema rather than hand-authoring a parallel
+one that could drift from PVE's real (version-dependent) shape — but the
+mechanism is **not** Proxmox's HTTP `OPTIONS` method. That was the original
+plan, and it does not work:
+
+- **Verified false, 2026-09-14, against a live 2-node PVE 9.2.11 cluster:**
+  PVE's API daemon rejects the HTTP `OPTIONS` method unconditionally, for
+  every path, before auth or routing ever runs — a hardcoded server-side
+  restriction (its method allowlist has no `OPTIONS` entry at all), not a
+  permissions or path issue. Confirmed live across five distinct paths (a
+  real object's config, a nonexistent object's config, a status endpoint, a
+  node-level path, a cluster-level path): all five returned an identical
+  `HTTP 501 method 'OPTIONS' not available`, independent of whether the
+  path's object id was real.
+- **The actual mechanism, also verified live:** PVE's own `pvesh usage` and
+  its web API-viewer are both ultimately built from a static, **unauthenticated**
+  JavaScript asset pveproxy itself serves at `/pve-docs/api-viewer/apidoc.js`
+  (part of the `pve-docs` package; ~4.3MB on a 9.2.11 host, same
+  scheme/host/port as the REST API). Its body is
+  `const apiSchema = [ ... ];` followed by unrelated UI code that is not
+  itself valid JSON — `pveforge` fetches this file and extracts just the
+  embedded JSON array. Each array element describes one PVE API path as a
+  literal **templated** string (e.g. `/nodes/{node}/qemu/{vmid}/config` — a
+  placeholder segment name, never a real object id, so no runtime path
+  substitution is ever needed to look up a schema), with an `info` object
+  keyed by HTTP method, itself split into `parameters` (request-side
+  fields) and `returns` (response-side fields) — a caller needing "what
+  fields can I set or read here" needs both, since which half carries the
+  more complete field list varies by endpoint.
+- **Because this is an unversioned doc-generation artifact, not a REST
+  contract,** its exact format could change between PVE releases without
+  notice. `pveforge` MUST fail loudly (a clear, named error identifying
+  what broke) rather than silently returning an empty or partial schema if
+  the expected marker, bracket structure, JSON shape, or a duplicate
+  templated path is encountered — masking a future format drift as "no
+  schema for this path" is explicitly the wrong failure mode here.
+- **CLI noun → PVE path grammar** (`pveforge discover <noun> <target-id>`,
+  purely a schema read — no object needs to exist, since paths are
+  templated):
+
+  | Noun | Default path | `--verb status` path |
+  |---|---|---|
+  | `vm` | `/nodes/{node}/qemu/{vmid}/config` | `/nodes/{node}/qemu/{vmid}/status/current` |
+  | `node` | `/nodes/{node}/status` (bare `/nodes/{node}` is only the index/listing endpoint and carries no real fields) | — |
+  | `storage` | `/storage/{storage}` (cluster-wide config) | `/nodes/{node}/storage/{storage}/status` (per-node runtime status) |
+  | `network` | `/nodes/{node}/network/{iface}` | — |
+  | `device` | *(no PVE call at all — Layer 2, below)* | — |
+
+**Layer 2 — `pveforge`'s own bespoke device-semantic layer** (the NVMe/BMC/
+PCIe device-model abstractions) is invisible to Proxmox's schema — to
+Proxmox, `args:` is just an opaque string. Making this layer self-describing
+is hand-authored (currently just `device.NVMeDrive`; revisit the convention
+once a second resolver exists, not before) and reachable via
+`pveforge discover device <type>`, purely locally — no roster, network
+call, or live host needed. Owned by `pveforge-object-model-get-set` /
+`pveforge-discoverability-schema` (operator, 2026-09-13; both landed).
+
+**Layer 3 — `pveforge`'s own command surface, planned, not yet built
+(`pveforge-cli-self-schema`).** Layers 1–2 describe *PVE's* object model;
+nothing today describes *pveforge's own* CLI surface for a calling agent
+without parsing `--help` text. Planned: a `pveforge schema` command
+printing the full command tree (names, flags, short descriptions) as JSON,
+with every runnable command annotated `safe`/`mutating`/`destructive` —
+letting a calling agent decide which subcommands are safe to run freely
+versus which need §3.4's idempotent-mutation-engine guarantees or human
+confirmation, without hardcoded per-command knowledge. (Idea surfaced by
+reviewing `davegallant/pvectl`, GPL-3.0 — read for the idea only, its code
+was never used.)
 
 ### 3.6 I/O
 
@@ -330,3 +389,10 @@ roster or Ansible inventory plays.
    layer of the architecture.
 5. Multi-operator secret access (`age` recipients vs. a single passphrase) —
    deferred past v1.
+6. Whether `pveforge api post/put` (planned, `pveforge-raw-api-escape-hatch`,
+   §3.1) gets §3.4's idempotent-mutation-engine locking for object types the
+   engine already models, or an explicit unsafe/no-locking posture for paths
+   it doesn't cover. Not cosmetic: a raw passthrough that silently bypasses
+   locking would undercut this project's whole multi-agent-safety premise
+   (§3.4) for exactly the paths it's meant to reach. Must be resolved before
+   that task is implemented, not while.

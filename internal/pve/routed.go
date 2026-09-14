@@ -2,6 +2,7 @@ package pve
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path"
 	"time"
@@ -115,6 +116,17 @@ func (c *RoutedClient) GetNetworkInterface(ctx context.Context, node, iface stri
 
 func (c *RoutedClient) GetNetworkInterfaces(ctx context.Context, node string, ifaceType ...string) (proxmox.NodeNetworks, error) {
 	return c.rest.GetNetworkInterfaces(ctx, node, ifaceType...)
+}
+
+// APIDocTree fetches this target's PVE host's own static API-doc schema
+// tree — see Client.APIDocTree's own doc comment. A thin pass-through
+// like the typed getters above: schema discovery can never hit a
+// root-only field, so there is nothing for RoutedClient to route: it
+// always goes over REST. This is what makes *RoutedClient satisfy
+// internal/discover.Client (structurally — no explicit assertion needed),
+// which is what cmd/pveforge's discover commands actually hold.
+func (c *RoutedClient) APIDocTree(ctx context.Context) (json.RawMessage, error) {
+	return c.rest.APIDocTree(ctx)
 }
 
 // SetVMConfigField sets one VM config field on this target's VM, routing

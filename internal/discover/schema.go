@@ -3,15 +3,24 @@
 // exposes should be walkable top-down without static documentation.
 //
 // Layer 1, PVE's own generic object model (nodes, VMs, storage,
-// network), is exposed by proxying Proxmox's own OPTIONS-method
-// introspection (the same mechanism pvesh itself is built on) — see
-// PVEObjectSchema and pve.Client.OptionsSchema. Deliberately a
-// passthrough, not a translation into Schema below or any other dialect:
-// PRD §3.5 calls for "expose/proxy this schema rather than
-// hand-authoring a parallel one," and a translation layer would itself
-// be a second, hand-maintained schema representation that could drift
-// from PVE's actual (version-dependent) shape — exactly the risk that
-// instruction exists to avoid.
+// network), is exposed by proxying PVE's own static API-doc schema tree
+// (apidoc.js — the same doc-generation artifact both `pvesh usage` and
+// the web API-viewer are ultimately built from) — see PVEObjectSchema,
+// ParseAPITree, and pve.Client.APIDocTree. Deliberately a passthrough,
+// not a translation into Schema below or any other dialect: PRD §3.5
+// calls for "expose/proxy this schema rather than hand-authoring a
+// parallel one," and a translation layer would itself be a second,
+// hand-maintained schema representation that could drift from PVE's
+// actual (version-dependent) shape — exactly the risk that instruction
+// exists to avoid.
+//
+// Layer 1 was originally designed around a live per-path HTTP OPTIONS
+// request instead (mirroring what was assumed to be pvesh's own
+// mechanism); that assumption was verified FALSE against a live PVE
+// 9.2.11 cluster on 2026-09-14 — PVE's API daemon rejects HTTP OPTIONS
+// unconditionally, for every path, before auth or routing ever runs. See
+// pve.Client.APIDocTree's doc comment for the full evidence and the
+// corrected mechanism this package now uses instead.
 //
 // Layer 2, pveforge's own bespoke device-semantic resolvers (currently
 // just device.NVMeDrive), is invisible to Proxmox's schema — to Proxmox,

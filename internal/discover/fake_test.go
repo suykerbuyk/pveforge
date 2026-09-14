@@ -12,13 +12,11 @@ type fakeClient struct {
 	result json.RawMessage
 	err    error
 
-	calls    int
-	lastPath string
+	calls int
 }
 
-func (f *fakeClient) OptionsSchema(_ context.Context, path string) (json.RawMessage, error) {
+func (f *fakeClient) APIDocTree(_ context.Context) (json.RawMessage, error) {
 	f.calls++
-	f.lastPath = path
 	if f.err != nil {
 		return nil, f.err
 	}
