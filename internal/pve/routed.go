@@ -3,6 +3,7 @@ package pve
 import (
 	"context"
 	"fmt"
+	"path"
 	"time"
 
 	proxmox "github.com/luthermonson/go-proxmox"
@@ -189,6 +190,130 @@ func (c *RoutedClient) setViaSSH(ctx context.Context, vmid int, field, value str
 		// SSH channel over a dead client fails NewSession every time,
 		// self-healing never happens). Discarding it here means the next
 		// call's c.ssh == nil check redials from scratch.
+		_ = c.ssh.Close()
+		c.ssh = nil
+	}
+	return err
+}
+
+// UploadSnippet writes content to PVE's "snippets" storage content type on
+// storageID, as filename — e.g. so a VM's VirtualMachineConfig.Hookscript
+// can point at "<storageID>:snippets/<filename>".
+//
+// Proxmox's REST API has NO upload endpoint for the snippets content type
+// (unlike iso/vztmpl/import — confirmed directly in go-proxmox's own
+// source: its Storage.upload's validContent allowlist excludes "snippets",
+// with a doc comment stating there is no REST upload path for it as of PVE
+// 9.x; snippets must be written to the storage's filesystem path directly).
+// This necessarily goes over the standing SSH vector, not REST: it
+// resolves storageID's configured filesystem path via REST
+// (Client.GetStorageConfigPath), then writes the file directly via
+// sshexec.Client.WriteFile.
+//
+// filename is restricted to a safe character set (see
+// isSafeSnippetFilename) before being joined onto the resolved storage
+// path — it is software-generated today (an idempotent.Op's own naming
+// scheme, not free-form user input), but a stray '/' or ".." must not be
+// able to escape the snippets directory.
+//
+// Concurrency: the underlying sshexec.Client.WriteFile provides atomic
+// REPLACEMENT of remotePath, not atomic SERIALIZATION of concurrent
+// writers to the SAME remotePath (see its own doc comment) — UploadSnippet
+// adds no locking of its own on top of that. This is safe today because
+// its one real caller, idempotent.BridgeIsolationEnsure.Apply, always runs
+// under idempotent.Run's internal/lock.Mutation held for the whole
+// read-compare-mutate cycle, keyed by VMID — two calls that could target
+// the same filename (which is itself derived from VMID) are therefore
+// already serialized before either reaches here. A future caller invoking
+// UploadSnippet OUTSIDE that lock would need its own serialization for the
+// same guarantee.
+func (c *RoutedClient) UploadSnippet(ctx context.Context, storageID, filename string, content []byte) error {
+	if !isSafeSnippetFilename(filename) {
+		return fmt.Errorf("upload snippet: filename %q is empty or contains unsafe characters", filename)
+	}
+
+	basePath, err := c.rest.GetStorageConfigPath(ctx, storageID)
+	if err != nil {
+		return fmt.Errorf("upload snippet %q: %w", filename, err)
+	}
+	remotePath := path.Join(basePath, "snippets", filename)
+
+	if err := c.withSSH(ctx, func(ssh *sshexec.Client) error {
+		return ssh.WriteFile(ctx, remotePath, content, "0755")
+	}); err != nil {
+		return fmt.Errorf("upload snippet %q: %w", filename, err)
+	}
+	return nil
+}
+
+// isSafeSnippetFilename reports whether s is non-empty, contains only a
+// small safe character set (no path separator, so it can never introduce
+// an extra directory component when joined onto the snippets path), and
+// isn't exactly "." or ".." (which, even without any '/' of their own,
+// would resolve to the snippets directory itself or its parent once
+// path.Join cleans the result).
+func isSafeSnippetFilename(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// TapLinkState reports one VM network interface's live tap-device
+// bridge-port state (see sshexec.Client.TapLinkState) — only meaningful
+// while the owning VM is actually running; see sshexec.TapLinkState's own
+// doc comment on its Exists field for the expected not-running case.
+func (c *RoutedClient) TapLinkState(ctx context.Context, tap string) (sshexec.TapLinkState, error) {
+	var state sshexec.TapLinkState
+	err := c.withSSH(ctx, func(ssh *sshexec.Client) error {
+		var innerErr error
+		state, innerErr = ssh.TapLinkState(ctx, tap)
+		return innerErr
+	})
+	return state, err
+}
+
+// SetBridgePortIsolated immediately sets or clears tap's live bridge-port
+// isolation flag (see sshexec.Client.SetBridgePortIsolated) — affects only
+// the CURRENT boot's ephemeral tap device; it does not persist across a
+// VM restart on its own (that's what a hookscript pointed at an
+// UploadSnippet-deployed script is for).
+func (c *RoutedClient) SetBridgePortIsolated(ctx context.Context, tap string, isolated bool) error {
+	return c.withSSH(ctx, func(ssh *sshexec.Client) error {
+		return ssh.SetBridgePortIsolated(ctx, tap, isolated)
+	})
+}
+
+// withSSH ensures c.ssh is dialed, then runs fn against it — discarding
+// the connection and forcing a redial next time if fn's failure indicates
+// the connection itself is no longer usable, per sshConnectionHealthy's
+// own doc comment on why that's checked independently of fn's own error
+// (which might just be a normal remote-command failure on an otherwise
+// healthy connection). The same self-healing behavior setViaSSH has always
+// had for SetVMConfigField, factored out here so UploadSnippet/
+// TapLinkState/SetBridgePortIsolated share it instead of each
+// reimplementing it. setViaSSH itself is deliberately left as its own
+// separate, already-tested implementation rather than rewritten on top of
+// this — no functional reason it couldn't be, just minimizing churn to
+// working code this task doesn't need to touch.
+func (c *RoutedClient) withSSH(ctx context.Context, fn func(ssh *sshexec.Client) error) error {
+	if c.ssh == nil {
+		if err := c.dialSSH(ctx); err != nil {
+			return err
+		}
+	}
+	err := fn(c.ssh)
+	if err != nil && !c.sshConnectionHealthy() {
 		_ = c.ssh.Close()
 		c.ssh = nil
 	}

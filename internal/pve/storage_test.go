@@ -179,6 +179,73 @@ func TestGetStorages_RequiresNode(t *testing.T) {
 	}
 }
 
+func TestGetStorageConfigPath_Success(t *testing.T) {
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/storage/local" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"storage":"local","type":"dir","path":"/var/lib/vz"}}`))
+	})
+	c := testClient(t, srv)
+
+	path, err := c.GetStorageConfigPath(context.Background(), "local")
+	if err != nil {
+		t.Fatalf("GetStorageConfigPath: %v", err)
+	}
+	if path != "/var/lib/vz" {
+		t.Errorf("path = %q, want /var/lib/vz", path)
+	}
+}
+
+// TestGetStorageConfigPath_NoPath covers a storage type with no
+// filesystem-path concept at all (e.g. LVM/ZFS-backed storage, which
+// cannot host the "snippets" content type in the first place) — PVE
+// returns no "path" field for these, and GetStorageConfigPath must fail
+// loudly rather than silently returning an empty path a caller might
+// path.Join onto and write into an unintended location.
+func TestGetStorageConfigPath_NoPath(t *testing.T) {
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"storage":"local-lvm","type":"lvmthin"}}`))
+	})
+	c := testClient(t, srv)
+
+	if _, err := c.GetStorageConfigPath(context.Background(), "local-lvm"); err == nil {
+		t.Fatal("expected an error for a storage with no configured path")
+	}
+}
+
+func TestGetStorageConfigPath_RequiresStorageID(t *testing.T) {
+	c := testClient(t, newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not reach the network when storage id validation fails locally")
+	}))
+	if _, err := c.GetStorageConfigPath(context.Background(), ""); err == nil {
+		t.Fatal("expected error for empty storage id")
+	}
+}
+
+// TestGetStorageConfigPath_EscapesStorageIDInURL mirrors
+// vmconfig_test.go's TestSetVMConfigField_EscapesNodeInURL.
+func TestGetStorageConfigPath_EscapesStorageIDInURL(t *testing.T) {
+	var gotEscapedPath string
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"path":"/var/lib/vz"}}`))
+	})
+	c := testClient(t, srv)
+
+	if _, err := c.GetStorageConfigPath(context.Background(), "weird storage/name"); err != nil {
+		t.Fatalf("GetStorageConfigPath: %v", err)
+	}
+	want := "/storage/weird%20storage%2Fname"
+	if gotEscapedPath != want {
+		t.Fatalf("expected the storage id to be escaped on the wire, got %q, want %q", gotEscapedPath, want)
+	}
+}
+
 func TestGetStorageVolumes_Success(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/nodes/qa-pve-01/storage/local-lvm/content" {

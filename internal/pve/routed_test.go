@@ -610,3 +610,206 @@ func TestRoutedClient_SetVMConfigFieldCAS_RootOnlyField_Refuses(t *testing.T) {
 		t.Fatal("refusing a root-only CAS request must never dial SSH either")
 	}
 }
+
+func TestRoutedClient_UploadSnippet_Success(t *testing.T) {
+	fs := newFakeSSHServer(t)
+	var receivedCmd string
+	fs.handleExec = func(cmd string) (string, string, int) {
+		receivedCmd = cmd
+		return "", "", 0
+	}
+	withFakeSSHPort(t, fs)
+
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/storage/local" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"storage":"local","type":"dir","path":"/var/lib/vz"}}`))
+	}))
+	defer restSrv.Close()
+
+	tg := bootstrappedTarget(t, fs, "roster-pass")
+	// Built via NewClient (BaseURLOverride), not NewClientForTarget:
+	// UploadSnippet's storage-path lookup goes through c.pc.Get, which
+	// uses go-proxmox's own internal base URL set at construction time —
+	// patching rest.baseURL after the fact (as other tests in this file do,
+	// for the raw-HTTP write path only) would not reach it. See
+	// TestRoutedClient_TypedReadForwarding's identical note.
+	rest := testClient(t, restSrv)
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	if err := rc.UploadSnippet(context.Background(), "local", "hook.sh", []byte("#!/bin/sh\necho hi\n")); err != nil {
+		t.Fatalf("UploadSnippet: %v", err)
+	}
+	if !strings.Contains(receivedCmd, "mkdir -p '/var/lib/vz/snippets'") {
+		t.Errorf("expected the snippets directory to be created, got: %s", receivedCmd)
+	}
+	if !strings.Contains(receivedCmd, "mv '/var/lib/vz/snippets/hook.sh.pveforge-tmp' '/var/lib/vz/snippets/hook.sh'") {
+		t.Errorf("expected an atomic rename into place, got: %s", receivedCmd)
+	}
+}
+
+// TestRoutedClient_UploadSnippet_RejectsUnsafeFilename proves the
+// path-escape guard actually runs, and runs BEFORE any network/SSH
+// activity — no REST or SSH server is configured to respond to anything,
+// so a real request of either kind would fail the test by hanging or
+// erroring rather than by this assertion.
+func TestRoutedClient_UploadSnippet_RejectsUnsafeFilename(t *testing.T) {
+	rest := testClient(t, newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not reach the network when filename validation fails locally")
+	}))
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	cases := []string{"", ".", "..", "../escape.sh", "sub/dir.sh"}
+	for _, name := range cases {
+		if err := rc.UploadSnippet(context.Background(), "local", name, []byte("x")); err == nil {
+			t.Errorf("expected rejection of unsafe filename %q", name)
+		}
+	}
+	if rc.ssh != nil {
+		t.Fatal("expected no ssh connection to have been dialed")
+	}
+}
+
+// TestRoutedClient_UploadSnippet_StoragePathLookupFailure proves a
+// failure resolving the storage's filesystem path (here: a storage type
+// with no "path" field, e.g. LVM/ZFS) is surfaced as an error and never
+// falls through to attempting the SSH write anyway with a garbage path.
+func TestRoutedClient_UploadSnippet_StoragePathLookupFailure(t *testing.T) {
+	fs := newFakeSSHServer(t)
+	fs.handleExec = func(cmd string) (string, string, int) {
+		t.Fatal("should not reach ssh when the storage path lookup fails")
+		return "", "", 0
+	}
+	withFakeSSHPort(t, fs)
+
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"storage":"local-lvm","type":"lvmthin"}}`))
+	}))
+	defer restSrv.Close()
+
+	tg := bootstrappedTarget(t, fs, "roster-pass")
+	// See TestRoutedClient_UploadSnippet_Success for why this must be
+	// built via NewClient(BaseURLOverride), not NewClientForTarget.
+	rest := testClient(t, restSrv)
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	if err := rc.UploadSnippet(context.Background(), "local-lvm", "hook.sh", []byte("x")); err == nil {
+		t.Fatal("expected an error when the storage has no configured path")
+	}
+	if rc.ssh != nil {
+		t.Fatal("expected no ssh connection to have been dialed")
+	}
+}
+
+func TestRoutedClient_TapLinkState_Forwards(t *testing.T) {
+	fs := newFakeSSHServer(t)
+	var receivedCmd string
+	fs.handleExec = func(cmd string) (string, string, int) {
+		receivedCmd = cmd
+		return `[{"ifname":"tap100i0","isolated":true}]` + "\n", "", 0
+	}
+	withFakeSSHPort(t, fs)
+
+	tg := bootstrappedTarget(t, fs, "roster-pass")
+	rest, err := NewClientForTarget(tg, "roster-pass")
+	if err != nil {
+		t.Fatalf("NewClientForTarget: %v", err)
+	}
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	state, err := rc.TapLinkState(context.Background(), "tap100i0")
+	if err != nil {
+		t.Fatalf("TapLinkState: %v", err)
+	}
+	if !state.Exists || !state.Isolated {
+		t.Errorf("state = %+v, want {Exists:true Isolated:true}", state)
+	}
+	if !strings.Contains(receivedCmd, "bridge -j link show dev 'tap100i0'") {
+		t.Errorf("unexpected remote command: %q", receivedCmd)
+	}
+}
+
+func TestRoutedClient_SetBridgePortIsolated_Forwards(t *testing.T) {
+	fs := newFakeSSHServer(t)
+	var receivedCmd string
+	fs.handleExec = func(cmd string) (string, string, int) {
+		receivedCmd = cmd
+		return "", "", 0
+	}
+	withFakeSSHPort(t, fs)
+
+	tg := bootstrappedTarget(t, fs, "roster-pass")
+	rest, err := NewClientForTarget(tg, "roster-pass")
+	if err != nil {
+		t.Fatalf("NewClientForTarget: %v", err)
+	}
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	if err := rc.SetBridgePortIsolated(context.Background(), "tap100i0", true); err != nil {
+		t.Fatalf("SetBridgePortIsolated: %v", err)
+	}
+	if !strings.Contains(receivedCmd, "bridge link set dev 'tap100i0' isolated on") {
+		t.Errorf("unexpected remote command: %q", receivedCmd)
+	}
+}
+
+// TestRoutedClient_WithSSH_RedialsAfterConnectionDrop proves the new
+// shared withSSH helper (UploadSnippet/TapLinkState/SetBridgePortIsolated)
+// has the same discard-dead-connection-and-redial behavior
+// TestRoutedClient_RedialsAfterConnectionDrop already proves for
+// setViaSSH/SetVMConfigField — the two implementations are separate code
+// paths (see withSSH's own doc comment on why it isn't shared with
+// setViaSSH), so nothing else in this suite would catch a regression in
+// this one specifically.
+func TestRoutedClient_WithSSH_RedialsAfterConnectionDrop(t *testing.T) {
+	fs := newFakeSSHServer(t)
+	fs.handleExec = func(cmd string) (string, string, int) {
+		return `[{"ifname":"tap100i0","isolated":false}]` + "\n", "", 0
+	}
+	withFakeSSHPort(t, fs)
+
+	tg := bootstrappedTarget(t, fs, "roster-pass")
+	rest, err := NewClientForTarget(tg, "roster-pass")
+	if err != nil {
+		t.Fatalf("NewClientForTarget: %v", err)
+	}
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	if _, err := rc.TapLinkState(context.Background(), "tap100i0"); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	cachedSSH := rc.ssh
+	if cachedSSH == nil {
+		t.Fatal("expected ssh to be cached after the first call")
+	}
+	if err := cachedSSH.Close(); err != nil {
+		t.Fatalf("Close (simulating a drop): %v", err)
+	}
+
+	if _, err := rc.TapLinkState(context.Background(), "tap100i0"); err == nil {
+		t.Fatal("expected the call over a dead connection to fail")
+	}
+	if rc.ssh != nil {
+		t.Fatal("expected the dead connection to be discarded after the failed call")
+	}
+
+	if _, err := rc.TapLinkState(context.Background(), "tap100i0"); err != nil {
+		t.Fatalf("call after redial should succeed, got: %v", err)
+	}
+	if rc.ssh == nil || rc.ssh == cachedSSH {
+		t.Fatal("expected a fresh ssh connection after redial, not the stale one")
+	}
+}

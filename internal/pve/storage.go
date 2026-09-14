@@ -43,6 +43,32 @@ func (c *Client) GetStorages(ctx context.Context, node string) (proxmox.Storages
 	return storages, nil
 }
 
+// GetStorageConfigPath resolves storageID's configured filesystem base
+// path (e.g. "/var/lib/vz") via the cluster-wide storage CONFIG endpoint —
+// GET /storage/{storageID} — as opposed to GetStorage's per-node runtime
+// STATUS endpoint, which carries no path field at all. Needed by
+// RoutedClient.UploadSnippet to compute where PVE's "snippets" storage
+// content type actually lives on disk, since Proxmox has no REST upload
+// endpoint for that content type (see UploadSnippet's own doc comment).
+//
+// Deliberately calls c.pc.Get directly rather than go-proxmox's own
+// Client.ClusterStorage wrapper, for the same reason as GetNode/GetStorage
+// (see their own doc comments): keeps the returned struct's unexported
+// client field nil.
+func (c *Client) GetStorageConfigPath(ctx context.Context, storageID string) (string, error) {
+	if storageID == "" {
+		return "", fmt.Errorf("get storage config path: storage id is required")
+	}
+	result := &proxmox.ClusterStorage{}
+	if err := c.pc.Get(ctx, fmt.Sprintf("/storage/%s", url.PathEscape(storageID)), result); err != nil {
+		return "", fmt.Errorf("get storage config for %q: %w", storageID, err)
+	}
+	if result.Path == "" {
+		return "", fmt.Errorf("storage %q has no configured filesystem path (not a directory-backed storage type?)", storageID)
+	}
+	return result.Path, nil
+}
+
 // GetStorageVolumes lists the content (volumes: disks, ISOs, backups,
 // templates) on one storage — GET /nodes/{node}/storage/{storage}/content.
 // proxmox.StorageContent is a plain data struct with no client field at

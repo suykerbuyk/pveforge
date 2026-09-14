@@ -11,3 +11,9 @@ import "github.com/suykerbuyk/pveforge/internal/pve"
 // pve.IsDigestConflictError, so this file exists only to pin the
 // interface-satisfaction claim, not to introduce a new dependency.
 var _ Client = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies
+// BridgeIsolationClient (bridgeisolation.go) — a larger, separate
+// interface from Client above (see bridgeisolation.go's own doc comment
+// on why it isn't just Client extended).
+var _ BridgeIsolationClient = (*pve.RoutedClient)(nil)
