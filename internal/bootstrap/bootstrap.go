@@ -161,11 +161,15 @@ type Result struct {
 // generating a brand-new keypair — and therefore orphaning the
 // previously-installed one in authorized_keys — on every retry.
 //
-// The token itself is always deleted-and-recreated rather than reused
-// (Proxmox never re-displays a token secret after creation, so an existing
-// token whose secret pveforge doesn't already have on disk is
-// unrecoverable — treating every run as "mint a fresh token" sidesteps
-// that rather than trying to detect and resume a partial prior run).
+// The token itself is deleted-and-recreated rather than reused UNLESS the
+// reconnect branch finds an already-persisted token that still validates
+// (see trySkipTokenRecreate) — Proxmox never re-displays a token secret
+// after creation, so an existing token whose secret pveforge doesn't
+// already have on disk is unrecoverable, and this is what makes a
+// bootstrap run that died before persisting a fresh token safe to retry.
+// But a token that DOES validate, on a reconnect against an
+// already-healthy target, is left alone rather than destroyed and
+// replaced — see pveforge-bootstrap-skip-token-recreate-when-valid.
 func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValidator) (*Result, error) {
 	applyDefaults(&opts)
 	defaultHostNodeFromRoster(&opts)
@@ -181,6 +185,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	}
 
 	addr := fmt.Sprintf("%s:%d", opts.Host, opts.SSHPort)
+	fullTokenID := opts.PVEUsername + "!" + opts.TokenID
 
 	existing, err := loadExistingSSHAuth(opts)
 	if err != nil {
@@ -197,6 +202,10 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		}
 		defer func() { _ = session.Close() }()
 		hostKeyFP = existing.HostKeyFingerprint
+
+		if res := trySkipTokenRecreate(ctx, opts, api, hostKeyFP, fullTokenID); res != nil {
+			return res, nil
+		}
 	} else {
 		keypair, genErr := sshexec.GenerateEd25519Keypair(fmt.Sprintf("pveforge@%s", opts.TargetID))
 		if genErr != nil {
@@ -227,7 +236,6 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		}
 	}
 
-	fullTokenID := opts.PVEUsername + "!" + opts.TokenID
 	tokenSecret, err := createToken(ctx, session, opts.PVEUsername, opts.TokenID)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap %s: create token: %w", opts.TargetID, err)
@@ -256,17 +264,37 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	return &Result{HostKeyFingerprint: hostKeyFP, TokenID: fullTokenID}, nil
 }
 
-// defaultHostNodeFromRoster fills opts.Host/opts.Node from the roster's
-// already-recorded values for opts.TargetID, when the target already
-// exists there and the caller left Host and/or Node blank. This is what
-// makes --host/--node genuinely optional on a retry against an
-// already-created target — matching cmd/pveforge/bootstrap.go's own flag
-// help text ("required unless the target already exists in the roster")
-// — rather than that text describing a fallback that nothing actually
-// implements. A true first bootstrap, where the target has no roster
-// record yet, still requires both explicitly: there is nothing to fall
-// back to, and validateOptions (called right after this) still enforces
-// that.
+// defaultHostNodeFromRoster fills opts.Host/opts.Node/opts.APIPort/
+// opts.InsecureTLS from the roster's already-recorded values for
+// opts.TargetID, when the target already exists there and the caller left
+// the corresponding field at its zero value. This is what makes
+// --host/--node genuinely optional on a retry against an already-created
+// target — matching cmd/pveforge/bootstrap.go's own flag help text
+// ("required unless the target already exists in the roster") — rather
+// than that text describing a fallback that nothing actually implements.
+// A true first bootstrap, where the target has no roster record yet,
+// still requires Host/Node explicitly: there is nothing to fall back to,
+// and validateOptions (called right after this) still enforces that.
+//
+// APIPort/InsecureTLS get the same treatment for the same underlying
+// reason: a target's API port and TLS posture shouldn't silently drift
+// from what it was originally bootstrapped with just because a retry
+// left those flags at their defaults. Unlike Host/Node, the CLI's own
+// flag help text doesn't promise this fallback for these two — closing
+// the gap anyway per pveforge-bootstrap-skip-token-recreate-when-valid's
+// "Related residual finding," since a target's port/TLS posture is
+// exactly the kind of thing that shouldn't drift unnoticed.
+//
+// Note on InsecureTLS specifically: because it's a plain bool, this
+// cannot distinguish "the operator explicitly wants secure TLS" from
+// "the flag was simply left unset" — both read as the zero value
+// (false). So if a target was originally bootstrapped with
+// --insecure-tls and a later retry omits the flag, this restores the
+// original (insecure) setting rather than hardening it; deliberately
+// forcing a target back to strict TLS currently requires editing the
+// roster directly rather than a bare retry. Accepted tradeoff for the
+// case this function exists to close (silent drift away from what a
+// target was actually bootstrapped with).
 //
 // Errors are swallowed here deliberately — this is a best-effort
 // convenience lookup, not the place real roster problems should surface.
@@ -276,9 +304,6 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 // ensureTargetExists right afterward.
 func defaultHostNodeFromRoster(opts *Options) {
 	if opts.RosterPath == "" || opts.TargetID == "" {
-		return
-	}
-	if opts.Host != "" && opts.Node != "" {
 		return
 	}
 	r, err := roster.Load(opts.RosterPath)
@@ -294,6 +319,12 @@ func defaultHostNodeFromRoster(opts *Options) {
 	}
 	if opts.Node == "" {
 		opts.Node = tg.Node
+	}
+	if opts.APIPort == 0 {
+		opts.APIPort = tg.APIPort
+	}
+	if !opts.InsecureTLS {
+		opts.InsecureTLS = tg.InsecureTLS
 	}
 }
 
@@ -416,6 +447,91 @@ func loadExistingSSHAuth(opts Options) (*existingSSHAuth, error) {
 		PrivateKeyPEM:      privateKeyPEM,
 		HostKeyFingerprint: tg.SSH.HostKeyFingerprint,
 	}, nil
+}
+
+// existingTokenAuth is what a prior successful bootstrap already proved
+// and persisted for a target's API token: its full id and decrypted
+// secret.
+type existingTokenAuth struct {
+	FullTokenID string
+	Secret      string
+}
+
+// loadExistingTokenAuth returns opts.TargetID's persisted token auth,
+// decrypted with opts.Passphrase, or nil if this target has no token auth
+// persisted yet — i.e. there is nothing for trySkipTokenRecreate to check.
+//
+// Deliberately decrypts ONLY tg.Token.SecretEnc via roster.DecryptString —
+// never tg.Resolve, which unconditionally also decrypts SSH.PrivateKeyEnc
+// (see roster.Target.Resolve, and loadExistingSSHAuth's identical
+// reasoning in the other direction). This call has no use for the SSH
+// key, and an unrelated SSH-decrypt failure (corruption, format drift,
+// anything) must not block checking whether the existing token secret
+// still validates.
+//
+// Called after ensureTargetExists, so opts.TargetID is guaranteed to
+// exist in the roster by the time this runs.
+func loadExistingTokenAuth(opts Options) (*existingTokenAuth, error) {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return nil, fmt.Errorf("load roster %s: %w", opts.RosterPath, err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil {
+		return nil, fmt.Errorf("target %q not found in roster", opts.TargetID)
+	}
+	if tg.Token == nil {
+		return nil, nil
+	}
+	secret, err := roster.DecryptString(tg.Token.SecretEnc, opts.Passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt existing token secret for %q: %w", opts.TargetID, err)
+	}
+	return &existingTokenAuth{FullTokenID: tg.Token.ID, Secret: string(secret)}, nil
+}
+
+// trySkipTokenRecreate is the fix for
+// pveforge-bootstrap-skip-token-recreate-when-valid: a reconnect against
+// an already-bootstrapped target used to always delete and recreate a
+// perfectly good, already-working token (see createToken's own doc
+// comment for why that was the original tradeoff). This checks whether
+// the existing persisted token still validates BEFORE createToken/
+// grantACL run at all, so a healthy re-invocation never destroys a
+// working token.
+//
+// Returns a non-nil *Result only on a genuine, provable no-op: the
+// persisted token's id matches wantFullTokenID (what THIS invocation
+// actually requested, opts.PVEUsername+"!"+opts.TokenID — a target can
+// have a persisted token under one name while this run asks for a
+// different one, e.g. --token-id changed between runs, or rotating to a
+// new token name; that is a real "create a different token" request, not
+// a no-op, no matter how healthy the old one still is), AND it decrypted,
+// AND it validated. Every other outcome (no token persisted yet, id
+// mismatch, decrypt failure, validation failure) returns nil, and the
+// caller falls through to the existing mint-fresh-token flow exactly as
+// if this check had never run — a broken, stale, or simply
+// differently-named persisted token must never become a hard failure
+// here, since minting a fresh one is Run's own established, safe recovery
+// path. No roster write happens on the skip path: nothing changed, so
+// there is nothing to persist.
+func trySkipTokenRecreate(ctx context.Context, opts Options, api APIValidator, hostKeyFP, wantFullTokenID string) *Result {
+	tok, err := loadExistingTokenAuth(opts)
+	if err != nil || tok == nil {
+		return nil
+	}
+	if tok.FullTokenID != wantFullTokenID {
+		return nil
+	}
+	if err := api.ValidateTokenGrants(ctx, APIConfig{
+		Host:        opts.Host,
+		APIPort:     opts.APIPort,
+		InsecureTLS: opts.InsecureTLS,
+		TokenID:     tok.FullTokenID,
+		TokenSecret: tok.Secret,
+	}, opts.Node); err != nil {
+		return nil
+	}
+	return &Result{HostKeyFingerprint: hostKeyFP, TokenID: tok.FullTokenID}
 }
 
 // createToken ensures a fresh scoped API token exists for userID/tokenID,

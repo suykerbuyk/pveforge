@@ -86,17 +86,33 @@ func (t *fakeTransport) ReconnectWithPinnedKey(_ context.Context, addr, user str
 
 // fakeValidator is a scriptable APIValidator.
 type fakeValidator struct {
-	err            error
+	err error
+	// errs, if non-empty, overrides err on a per-call basis (0-indexed by
+	// call number; a call beyond len(errs) reuses the last entry) — lets a
+	// test script "first call fails, second call succeeds" for the
+	// skip-recreate-then-fall-through path, without disturbing every
+	// existing single-call test that only sets err.
+	errs           []error
 	calls          int
 	lastCfg        APIConfig
 	lastExpectNode string
+	cfgsByCall     []APIConfig // every cfg passed, in call order
 }
 
 func (v *fakeValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, expectNode string) error {
-	v.calls++
 	v.lastCfg = cfg
 	v.lastExpectNode = expectNode
-	return v.err
+	v.cfgsByCall = append(v.cfgsByCall, cfg)
+	err := v.err
+	if len(v.errs) > 0 {
+		idx := v.calls
+		if idx >= len(v.errs) {
+			idx = len(v.errs) - 1
+		}
+		err = v.errs[idx]
+	}
+	v.calls++
+	return err
 }
 
 func newTestRoster(t *testing.T, contents string) string {
@@ -292,6 +308,56 @@ func TestRun_DefaultsHostNodeFromExistingRosterEntry(t *testing.T) {
 	}
 }
 
+// TestRun_DefaultsAPIPortInsecureTLSFromExistingRosterEntry is the
+// residual finding folded into
+// pveforge-bootstrap-skip-token-recreate-when-valid: a target originally
+// bootstrapped with a non-default --api-port/--insecure-tls must not have
+// those silently drift back to defaults on a retry that leaves the flags
+// unset, the same way --host/--node already don't.
+func TestRun_DefaultsAPIPortInsecureTLSFromExistingRosterEntry(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	if err := roster.AppendTarget(rosterPath, roster.Target{
+		ID:          "qa-pve-01",
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		APIPort:     8007,
+		InsecureTLS: true,
+	}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, "qa-pve-01", roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, "roster-pass"); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+
+	transport := &fakeTransport{session: &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("s"), ExitCode: 0}},
+	}}}
+	validator := &fakeValidator{}
+
+	opts := baseOptions(rosterPath)
+	opts.APIPort = 0
+	opts.InsecureTLS = false
+
+	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if validator.lastCfg.APIPort != 8007 {
+		t.Errorf("expected APIPort to be defaulted from the roster to 8007, validator saw APIPort=%d", validator.lastCfg.APIPort)
+	}
+	if !validator.lastCfg.InsecureTLS {
+		t.Errorf("expected InsecureTLS to be defaulted from the roster to true, validator saw InsecureTLS=%v", validator.lastCfg.InsecureTLS)
+	}
+}
+
 // TestRun_StillRequiresHostNodeForTrueFirstBootstrap guards the other
 // side of the same fix: a target with NO roster record yet has nothing to
 // default Host/Node from, so leaving them blank must still be a clear
@@ -474,6 +540,15 @@ func TestRun_BareUsernameAssumesPam(t *testing.T) {
 	}
 }
 
+// TestRun_IdempotentReRun re-runs bootstrap against a target that fully
+// succeeded the first time, with a validator that accepts anything
+// (fakeValidator{}, err == nil). Per
+// pveforge-bootstrap-skip-token-recreate-when-valid, the second run must
+// find the first run's token still validates and skip recreating it
+// entirely — the roster must still show exactly one target, no "already
+// exists" error, and the ORIGINAL secret must survive untouched (proving
+// trySkipTokenRecreate actually skipped createToken/grantACL on the
+// second run, rather than happening to mint an identical-looking token).
 func TestRun_IdempotentReRun(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	newSession := func(secret string) *fakeSession {
@@ -488,12 +563,15 @@ func TestRun_IdempotentReRun(t *testing.T) {
 		t.Fatalf("first Run: %v", err)
 	}
 
-	// Re-run against the same roster/target: must succeed again and end
-	// up with the SECOND run's fresh secret persisted, not an error about
-	// "already exists".
+	// Re-run against the same roster/target: must succeed again, without
+	// an "already exists" error — and, since the first run's token still
+	// validates, without touching createToken/grantACL at all.
 	transport2 := &fakeTransport{installFingerprint: "SHA256:abc", session: newSession("second-secret")}
 	if _, err := Run(context.Background(), baseOptions(rosterPath), transport2, validator); err != nil {
 		t.Fatalf("second (idempotent) Run: %v", err)
+	}
+	if len(transport2.session.commands) != 0 {
+		t.Fatalf("expected the second run to skip token creation/ACL grant entirely, got commands: %v", transport2.session.commands)
 	}
 
 	r, err := roster.Load(rosterPath)
@@ -508,8 +586,8 @@ func TestRun_IdempotentReRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
-	if string(plaintext) != "second-secret" {
-		t.Fatalf("expected the second run's fresh secret to be persisted, got %q", plaintext)
+	if string(plaintext) != "first-secret" {
+		t.Fatalf("expected the original token to survive untouched (skip-recreate), got %q", plaintext)
 	}
 }
 
@@ -655,6 +733,322 @@ func TestRun_ReconnectMismatch_HardStop_NoSilentRePin(t *testing.T) {
 	tg := r.Find(opts.TargetID)
 	if tg == nil || tg.SSH == nil || tg.SSH.HostKeyFingerprint != "SHA256:original-trusted-fingerprint" {
 		t.Fatalf("roster's pinned fingerprint must be unchanged after a failed reconnect, got: %+v", tg.SSH)
+	}
+}
+
+// TestRun_SkipsTokenRecreateWhenExistingTokenValid is
+// pveforge-bootstrap-skip-token-recreate-when-valid's core case: a
+// reconnect against a target whose persisted token still validates must
+// not touch createToken/grantACL at all — proven here by asserting the
+// SSH session saw zero commands (createToken/grantACL are the only things
+// that ever run a remote command in Run), and that the roster is left
+// byte-for-byte unchanged (a true no-op writes nothing).
+func TestRun_SkipsTokenRecreateWhenExistingTokenValid(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("existing-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	before, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("read roster before Run: %v", err)
+	}
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		// If Run touched these at all, the test's own assertions below
+		// would fail regardless of what these returned — scripted only so
+		// a defect that DOES call them doesn't panic/hang on an
+		// unscripted command.
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("should-never-be-used"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{session: session}
+	validator := &fakeValidator{} // err == nil: existing token "validates"
+
+	res, err := Run(context.Background(), opts, transport, validator)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.TokenID != "root@pam!pveforge" {
+		t.Errorf("expected the existing token id to be returned, got %q", res.TokenID)
+	}
+	if len(session.commands) != 0 {
+		t.Fatalf("expected zero remote commands (no createToken/grantACL), got: %v", session.commands)
+	}
+	if validator.calls != 1 {
+		t.Fatalf("expected exactly one ValidateTokenGrants call (the skip-check), got %d", validator.calls)
+	}
+	if validator.lastCfg.TokenSecret != "existing-secret" {
+		t.Errorf("expected the skip-check to validate using the EXISTING secret, got %q", validator.lastCfg.TokenSecret)
+	}
+
+	after, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("read roster after Run: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("expected a true no-op: roster file must be byte-for-byte unchanged")
+	}
+}
+
+// TestRun_FallsThroughWhenRequestedTokenIDDiffersFromPersisted guards
+// against the defect a second, independent review found in
+// trySkipTokenRecreate: it validated whatever token id was already
+// persisted in the roster without ever comparing it to what THIS
+// invocation actually requested (opts.PVEUsername+"!"+opts.TokenID). A
+// target bootstrapped once with --token-id pveforge, then retried with
+// --token-id pveforge-2 (rotation, or a differently-named admin token),
+// must actually create pveforge-2 — the still-healthy OLD token must
+// never be silently returned as a stand-in "no-op" for a request that
+// asked for a different token by name.
+func TestRun_FallsThroughWhenRequestedTokenIDDiffersFromPersisted(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	// A healthy, persisted token under a DIFFERENT token id than this run
+	// will request.
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("stale-but-still-healthy-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	opts.TokenID = "pveforge-2" // this run asks for a DIFFERENT token name
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("new-token-2-secret"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{session: session}
+	validator := &fakeValidator{} // would happily validate either token — the id mismatch must short-circuit before this is ever asked to
+
+	res, err := Run(context.Background(), opts, transport, validator)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.TokenID != "root@pam!pveforge-2" {
+		t.Fatalf("expected the newly-requested token id to be returned, got %q", res.TokenID)
+	}
+	if len(session.commands) == 0 {
+		t.Fatal("expected createToken/grantACL to run: a token-id mismatch must never be treated as a skippable no-op")
+	}
+	if validator.calls != 1 {
+		t.Fatalf("expected exactly one ValidateTokenGrants call (post-mint only — the id mismatch must short-circuit before any skip-check validation call), got %d", validator.calls)
+	}
+
+	r, err := roster.Load(rosterPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg.Token.ID != "root@pam!pveforge-2" {
+		t.Fatalf("expected the persisted token id to be updated to root@pam!pveforge-2, got %q", tg.Token.ID)
+	}
+	plaintext, err := roster.DecryptString(tg.Token.SecretEnc, opts.Passphrase)
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if string(plaintext) != "new-token-2-secret" {
+		t.Fatalf("expected the newly minted token's secret to be persisted, got %q", plaintext)
+	}
+}
+
+// TestRun_FallsThroughWhenExistingTokenFailsValidation covers the "fails
+// validation" branch of the Proposed fix: the skip-check's own
+// ValidateTokenGrants call fails (e.g. the token was revoked out-of-band),
+// so Run must fall through to the normal mint-fresh-token flow rather than
+// hard-failing — and the freshly minted token (which the second
+// ValidateTokenGrants call accepts) must end up persisted.
+func TestRun_FallsThroughWhenExistingTokenFailsValidation(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("stale-revoked-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("fresh-secret"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{session: session}
+	validator := &fakeValidator{errs: []error{
+		errors.New("token authenticates but appears to have no working grants"), // the skip-check
+		nil, // the post-mint validation
+	}}
+
+	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if validator.calls != 2 {
+		t.Fatalf("expected exactly two ValidateTokenGrants calls (skip-check + post-mint), got %d", validator.calls)
+	}
+	if len(session.commands) == 0 {
+		t.Fatal("expected createToken/grantACL to run after the skip-check failed validation")
+	}
+
+	r, err := roster.Load(rosterPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	plaintext, err := roster.DecryptString(r.Find(opts.TargetID).Token.SecretEnc, opts.Passphrase)
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if string(plaintext) != "fresh-secret" {
+		t.Fatalf("expected the freshly minted token to be persisted, got %q", plaintext)
+	}
+}
+
+// TestRun_FallsThroughWhenExistingTokenUndecryptable covers the "fails to
+// decrypt" branch: the persisted token's secret was encrypted under a
+// different passphrase than the one this Run is using (simulating
+// corrupted/drifted ciphertext, the same technique
+// TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData uses in the other
+// direction). This must fall through to minting a fresh token, not
+// surface a hard decrypt error.
+func TestRun_FallsThroughWhenExistingTokenUndecryptable(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	// Encrypted under a DIFFERENT passphrase than opts.Passphrase.
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("irrelevant"),
+	}, "a-completely-different-passphrase"); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("fresh-secret"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{session: session}
+	validator := &fakeValidator{} // always validates; only the skip-check's decrypt fails
+
+	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(session.commands) == 0 {
+		t.Fatal("expected createToken/grantACL to run when the existing token can't be decrypted")
+	}
+	if validator.calls != 1 {
+		t.Fatalf("expected exactly one ValidateTokenGrants call (the skip-check must not even run when decrypt fails), got %d", validator.calls)
+	}
+
+	r, err := roster.Load(rosterPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	plaintext, err := roster.DecryptString(r.Find(opts.TargetID).Token.SecretEnc, opts.Passphrase)
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if string(plaintext) != "fresh-secret" {
+		t.Fatalf("expected the freshly minted token to be persisted, got %q", plaintext)
+	}
+}
+
+// TestRun_NoSkipCheckWhenNoExistingTokenPersisted covers the "target has
+// SSH auth but no token auth yet" reconnect case (e.g. a prior run that
+// died after persisting SSH auth but before ever creating a token) — the
+// skip-check must find nothing to check and fall straight through,
+// without ever calling ValidateTokenGrants for a skip attempt.
+func TestRun_NoSkipCheckWhenNoExistingTokenPersisted(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	// Deliberately no WriteTokenAuth: no token persisted yet.
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("fresh-secret"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{session: session}
+	validator := &fakeValidator{}
+
+	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if validator.calls != 1 {
+		t.Fatalf("expected exactly one ValidateTokenGrants call (post-mint only, no skip-check), got %d", validator.calls)
+	}
+	if len(session.commands) == 0 {
+		t.Fatal("expected createToken/grantACL to run when no token was persisted yet")
 	}
 }
 
@@ -824,6 +1218,114 @@ func TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData(t *testing.T) {
 	}
 	if string(got.PrivateKeyPEM) != string(kp.PrivateKeyPEM) {
 		t.Fatal("expected the persisted private key to be returned byte-for-byte")
+	}
+}
+
+// TestLoadExistingTokenAuth_NilWhenNoTokenAuthYet exercises
+// loadExistingTokenAuth directly: no token auth persisted yet -> nil
+// (nothing for trySkipTokenRecreate to check).
+func TestLoadExistingTokenAuth_NilWhenNoTokenAuthYet(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: "qa-pve-01", Host: "h", Node: "n"}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	opts := baseOptions(rosterPath)
+
+	got, err := loadExistingTokenAuth(opts)
+	if err != nil {
+		t.Fatalf("loadExistingTokenAuth: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil (no token auth yet), got %+v", got)
+	}
+}
+
+// TestLoadExistingTokenAuth_ReturnsPersistedToken exercises the success
+// path directly: an existing, decryptable token returns its full id and
+// decrypted secret.
+func TestLoadExistingTokenAuth_ReturnsPersistedToken(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("a-real-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	got, err := loadExistingTokenAuth(opts)
+	if err != nil {
+		t.Fatalf("loadExistingTokenAuth: %v", err)
+	}
+	if got == nil || got.FullTokenID != "root@pam!pveforge" || got.Secret != "a-real-secret" {
+		t.Fatalf("expected the persisted token to be returned decrypted, got %+v", got)
+	}
+}
+
+// TestLoadExistingTokenAuth_WrongPassphraseErrors exercises the decrypt-
+// failure path directly: a genuinely wrong passphrase must return an
+// error (trySkipTokenRecreate is what turns this into a graceful
+// fall-through — this unit test just proves the error surfaces here).
+func TestLoadExistingTokenAuth_WrongPassphraseErrors(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("a-real-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	wrongOpts := opts
+	wrongOpts.Passphrase = "wrong-passphrase"
+	if _, err := loadExistingTokenAuth(wrongOpts); err == nil {
+		t.Fatal("expected an error decrypting with the wrong passphrase")
+	}
+}
+
+// TestLoadExistingTokenAuth_IgnoresUndecryptableSSHData is the mirror of
+// TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData: an unrelated
+// SSH-decrypt failure must not block reading the token data, since this
+// call never touches SSH.PrivateKeyEnc at all.
+func TestLoadExistingTokenAuth_IgnoresUndecryptableSSHData(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("a-real-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	// SSH key encrypted under a DIFFERENT passphrase — undecryptable with
+	// opts.Passphrase, simulating corrupted/drifted SSH ciphertext.
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, "a-completely-different-passphrase"); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+
+	got, err := loadExistingTokenAuth(opts)
+	if err != nil {
+		t.Fatalf("loadExistingTokenAuth should succeed using only the token data, got error: %v", err)
+	}
+	if got == nil || got.FullTokenID != "root@pam!pveforge" || got.Secret != "a-real-secret" {
+		t.Fatalf("expected the persisted token to be returned despite undecryptable ssh data, got %+v", got)
 	}
 }
 
