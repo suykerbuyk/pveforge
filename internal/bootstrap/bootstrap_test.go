@@ -1052,6 +1052,118 @@ func TestRun_NoSkipCheckWhenNoExistingTokenPersisted(t *testing.T) {
 	}
 }
 
+// TestRun_PersistsInsecureTLSAgainstExistingBareTarget is the exact
+// pveforge-bootstrap-insecure-tls-not-persisted reproduction: a target
+// that already has a bare [[targets]] roster entry (hand-added per the
+// roster template's own documented convention — id/host/node only, no
+// insecure_tls) never goes through ensureTargetExists's AppendTarget path
+// (it only fires for a target with NO roster entry at all), so
+// --insecure-tls was silently lost the moment bootstrap finished. After
+// this fix, Run must persist it via persistTargetMeta/
+// roster.UpdateTargetFields once bootstrap actually succeeds.
+func TestRun_PersistsInsecureTLSAgainstExistingBareTarget(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	// Bare entry: exactly what an operator hand-adds per the roster
+	// template's own convention — no insecure_tls line at all.
+	if err := roster.AppendTarget(rosterPath, roster.Target{
+		ID:   opts.TargetID,
+		Host: opts.Host,
+		Node: opts.Node,
+	}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	opts.InsecureTLS = true
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("tok-secret"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{installFingerprint: "SHA256:abc", session: session}
+	validator := &fakeValidator{}
+
+	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	r, err := roster.Load(rosterPath)
+	if err != nil {
+		t.Fatalf("Load roster after bootstrap: %v", err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil {
+		t.Fatal("target missing from roster")
+	}
+	if !tg.InsecureTLS {
+		t.Fatalf("expected insecure_tls=true to be persisted into the roster after a successful bootstrap, got %+v", tg)
+	}
+}
+
+// TestRun_RetryWithoutInsecureTLSFlag_DoesNotClearPersistedValue is the
+// drift-prevention case defaultHostNodeFromRoster exists for, now
+// composed with persistTargetMeta: a target already has insecure_tls=true
+// persisted (from a prior bootstrap); this run OMITS --insecure-tls
+// (opts.InsecureTLS left at its zero value, false) and reconnects via the
+// trySkipTokenRecreate fast path. defaultHostNodeFromRoster must restore
+// opts.InsecureTLS to true BEFORE persistTargetMeta ever runs, so the
+// write-back must not — and per this test, does not — silently clear the
+// roster's persisted value back to false.
+func TestRun_RetryWithoutInsecureTLSFlag_DoesNotClearPersistedValue(t *testing.T) {
+	rosterPath := newTestRoster(t, "")
+	opts := baseOptions(rosterPath)
+	if err := roster.AppendTarget(rosterPath, roster.Target{
+		ID:          opts.TargetID,
+		Host:        opts.Host,
+		Node:        opts.Node,
+		InsecureTLS: true,
+	}); err != nil {
+		t.Fatalf("AppendTarget: %v", err)
+	}
+	kp, err := sshexec.GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	if err := roster.WriteSSHAuth(rosterPath, opts.TargetID, roster.SSHWrite{
+		User:                "root",
+		PublicKey:           kp.AuthorizedKeyLine,
+		HostKeyFingerprint:  "SHA256:abc",
+		PrivateKeyPlaintext: kp.PrivateKeyPEM,
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
+		TokenID:         "root@pam!pveforge",
+		SecretPlaintext: []byte("existing-secret"),
+	}, opts.Passphrase); err != nil {
+		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+
+	// This run's own opts explicitly omit --insecure-tls (zero value,
+	// false) — simulating an operator retry that doesn't re-pass the flag.
+	opts.InsecureTLS = false
+
+	session := &fakeSession{byCmd: map[string]fakeRunResult{
+		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("should-never-be-used"), ExitCode: 0}},
+	}}
+	transport := &fakeTransport{session: session}
+	validator := &fakeValidator{} // existing token "validates" -> skip-recreate fast path
+
+	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(session.commands) != 0 {
+		t.Fatalf("expected the skip-recreate fast path (zero remote commands), got: %v", session.commands)
+	}
+
+	r, err := roster.Load(rosterPath)
+	if err != nil {
+		t.Fatalf("Load roster after retry: %v", err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil || !tg.InsecureTLS {
+		t.Fatalf("expected insecure_tls to remain true after a retry that omitted --insecure-tls, got %+v", tg)
+	}
+}
+
 // TestLoadExistingSSHAuth_NilWhenNoSSHAuthYet exercises
 // loadExistingSSHAuth directly: no SSH auth persisted yet -> nil (true
 // first bootstrap).

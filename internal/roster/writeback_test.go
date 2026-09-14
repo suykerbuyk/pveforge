@@ -614,6 +614,328 @@ func TestAppendTarget_RejectsAuthSubtables(t *testing.T) {
 	}
 }
 
+// --- UpdateTargetFields ---------------------------------------------
+
+func TestUpdateTargetFields_AddsInsecureTLSToTargetWithoutIt(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	a := r.Find("qa-pve-01")
+	if a == nil || !a.InsecureTLS {
+		t.Fatalf("expected insecure_tls=true on qa-pve-01, got %+v", a)
+	}
+	if a.Host != "qa-pve-01.example.com" || a.Node != "qa-pve-01" {
+		t.Fatalf("host/node should be unchanged: %+v", a)
+	}
+	if !strings.Contains(string(got), "insecure_tls = true") {
+		t.Fatalf("expected a bare (unquoted) insecure_tls = true line, got:\n%s", got)
+	}
+	// api_port was never set and stays at its zero value: must not gain a
+	// spurious "api_port = 0" line.
+	if strings.Contains(string(got), "api_port") {
+		t.Fatalf("expected no api_port line to be added, got:\n%s", got)
+	}
+
+	b := r.Find("qa-pve-02")
+	if b == nil || b.InsecureTLS {
+		t.Fatalf("qa-pve-02 must be untouched: %+v", b)
+	}
+}
+
+func TestUpdateTargetFields_UpdatesExistingValue(t *testing.T) {
+	const fixture = `[[targets]]
+id   = "qa-pve-01"
+host = "qa-pve-01.example.com"
+node = "qa-pve-01"
+api_port = 8006
+insecure_tls = false
+`
+	path := writeTempRoster(t, fixture)
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		APIPort:     8006,
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if !strings.Contains(string(got), "insecure_tls = true") {
+		t.Fatalf("expected insecure_tls updated to true in place, got:\n%s", got)
+	}
+	if strings.Count(string(got), "insecure_tls") != 1 {
+		t.Fatalf("expected exactly one insecure_tls line (updated in place, not duplicated), got:\n%s", got)
+	}
+
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	a := r.Find("qa-pve-01")
+	if a == nil || !a.InsecureTLS || a.APIPort != 8006 {
+		t.Fatalf("unexpected target after update: %+v", a)
+	}
+}
+
+func TestUpdateTargetFields_ClearsToExplicitFalse(t *testing.T) {
+	const fixture = `[[targets]]
+id   = "qa-pve-01"
+host = "qa-pve-01.example.com"
+node = "qa-pve-01"
+insecure_tls = true
+`
+	path := writeTempRoster(t, fixture)
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host: "qa-pve-01.example.com",
+		Node: "qa-pve-01",
+		// InsecureTLS left at false: wants to clear the previously-set value.
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if !strings.Contains(string(got), "insecure_tls = false") {
+		t.Fatalf("expected insecure_tls rewritten to explicit false, got:\n%s", got)
+	}
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	if a := r.Find("qa-pve-01"); a == nil || a.InsecureTLS {
+		t.Fatalf("expected insecure_tls=false after update, got %+v", a)
+	}
+}
+
+// TestUpdateTargetFields_NoOp_FileUntouched proves the documented no-op
+// contract at the strongest level available: not just "resulting bytes
+// happen to be identical" but that no write (rename) ever occurred at
+// all, by comparing the file's mtime before and after — an atomicWrite
+// always renames a fresh temp file into place, which always advances
+// mtime, even when the new content is byte-identical to the old.
+func TestUpdateTargetFields_NoOp_FileUntouched(t *testing.T) {
+	const fixture = `[[targets]]
+id   = "qa-pve-01"
+host = "qa-pve-01.example.com"
+node = "qa-pve-01"
+api_port = 8006
+insecure_tls = true
+`
+	path := writeTempRoster(t, fixture)
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+	statBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+
+	err = UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		APIPort:     8006,
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	statAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+
+	if string(before) != string(after) {
+		t.Fatalf("expected byte-identical file, before:\n%s\nafter:\n%s", before, after)
+	}
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Errorf("expected mtime unchanged (no rename/write occurred) for a true no-op, before=%v after=%v", statBefore.ModTime(), statAfter.ModTime())
+	}
+}
+
+func TestUpdateTargetFields_UnknownTarget(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+	err := UpdateTargetFields(path, "does-not-exist", TargetMeta{Host: "h", Node: "n"})
+	if err == nil {
+		t.Fatal("expected error for unknown target id")
+	}
+}
+
+func TestUpdateTargetFields_DuplicateTargetID(t *testing.T) {
+	const fixture = `[[targets]]
+id = "dup"
+host = "h1"
+node = "n1"
+
+[[targets]]
+id = "dup"
+host = "h2"
+node = "n2"
+`
+	path := writeTempRoster(t, fixture)
+	err := UpdateTargetFields(path, "dup", TargetMeta{Host: "h1", Node: "n1", InsecureTLS: true})
+	if err == nil {
+		t.Fatal("expected error for ambiguous duplicate target id")
+	}
+}
+
+// TestUpdateTargetFields_PreservesOtherTarget mirrors
+// TestWriteTokenAuth_FirstBootstrap_PreservesOtherTarget: writing to
+// qa-pve-01 must leave qa-pve-02's own block (and the comment preceding
+// it) byte-for-byte untouched.
+func TestUpdateTargetFields_PreservesOtherTarget(t *testing.T) {
+	path := writeTempRoster(t, fixtureTwoTargets)
+
+	secondBlockStart := strings.Index(fixtureTwoTargets, "# a deliberately weird comment")
+	if secondBlockStart < 0 {
+		t.Fatal("fixture anchor not found")
+	}
+	wantSuffix := fixtureTwoTargets[secondBlockStart:]
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if !strings.HasSuffix(string(got), wantSuffix) {
+		t.Fatalf("target #2's block was altered.\nwant suffix:\n%q\ngot file:\n%q", wantSuffix, got)
+	}
+}
+
+// TestUpdateTargetFields_PreservesAuthSubtables is the
+// verifyOnlyIntendedChange-style protection this task called for,
+// adapted to verifyOnlyTargetFieldsChanged: a target with BOTH token and
+// ssh auth already persisted must keep both value-identical (not just
+// "still present") after its top-level fields are updated, and the new
+// field must be inserted BEFORE the first subtable, not after it.
+func TestUpdateTargetFields_PreservesAuthSubtables(t *testing.T) {
+	tokenArmored := sampleArmored(t, "token-secret", "test-passphrase")
+	sshArmored := sampleArmored(t, "ssh-priv-key", "test-passphrase")
+	fixture := `[[targets]]
+id   = "qa-pve-01"
+host = "qa-pve-01.example.com"
+node = "qa-pve-01"
+
+  [targets.token]
+  id         = "pveforge@pve!automation"
+  secret_enc = '''
+` + tokenArmored + `'''
+
+  [targets.ssh]
+  user            = "root"
+  public_key      = "ssh-ed25519 AAAA..."
+  private_key_enc = '''
+` + sshArmored + `'''
+`
+	path := writeTempRoster(t, fixture)
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	gotStr := string(got)
+
+	// The new field must land BEFORE the first subtable header, not after.
+	insecureIdx := strings.Index(gotStr, "insecure_tls")
+	tokenHeaderIdx := strings.Index(gotStr, "[targets.token]")
+	if insecureIdx < 0 || tokenHeaderIdx < 0 || insecureIdx > tokenHeaderIdx {
+		t.Fatalf("expected insecure_tls to be inserted before [targets.token], got:\n%s", gotStr)
+	}
+
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	tg := r.Find("qa-pve-01")
+	if tg == nil || !tg.InsecureTLS {
+		t.Fatalf("insecure_tls not updated: %+v", tg)
+	}
+	if tg.Token == nil || tg.Token.ID != "pveforge@pve!automation" || tg.Token.SecretEnc != tokenArmored {
+		t.Fatalf("token auth changed while updating top-level fields: %+v", tg.Token)
+	}
+	if tg.SSH == nil || tg.SSH.User != "root" || tg.SSH.PrivateKeyEnc != sshArmored {
+		t.Fatalf("ssh auth changed while updating top-level fields: %+v", tg.SSH)
+	}
+}
+
+// TestUpdateTargetFields_TrailingNewlineGuard proves the append-branch's
+// own "insert a leading newline if the insertion point isn't already at a
+// clean line boundary" guard — mirroring applySubtableSplice's identical
+// guard for its own append case — by using a fixture whose last line has
+// no trailing newline at all.
+func TestUpdateTargetFields_TrailingNewlineGuard(t *testing.T) {
+	fixture := "[[targets]]\nid = \"qa-pve-01\"\nhost = \"h\"\nnode = \"n\""
+	path := writeTempRoster(t, fixture)
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{Host: "h", Node: "n", InsecureTLS: true})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if strings.Contains(string(got), "ninsecure_tls") {
+		t.Fatalf("missing newline before appended field, got:\n%q", got)
+	}
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	if tg := r.Find("qa-pve-01"); tg == nil || !tg.InsecureTLS {
+		t.Fatalf("insecure_tls not applied: %+v", tg)
+	}
+}
+
 func TestWriteTokenAuth_DuplicateTargetID(t *testing.T) {
 	const fixture = `[[targets]]
 id = "dup"

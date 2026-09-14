@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -144,10 +145,10 @@ func appendTargetBlock(data []byte, t Target) []byte {
 	b.WriteString(field{key: "host", value: t.Host}.render())
 	b.WriteString(field{key: "node", value: t.Node}.render())
 	if t.APIPort != 0 {
-		b.WriteString(fmt.Sprintf("api_port = %d\n", t.APIPort))
+		b.WriteString(field{key: "api_port", value: strconv.Itoa(t.APIPort), raw: true}.render())
 	}
 	if t.InsecureTLS {
-		b.WriteString("insecure_tls = true\n")
+		b.WriteString(field{key: "insecure_tls", value: strconv.FormatBool(t.InsecureTLS), raw: true}.render())
 	}
 	return append(append([]byte{}, data...), []byte(b.String())...)
 }
@@ -184,19 +185,232 @@ func verifyAppendOnly(oldData, newData []byte, targetID string) error {
 	return nil
 }
 
-// field is one key/value pair to write into a subtable. Non-literal values
-// are rendered as a quoted TOML basic string; literal values (armored
-// ciphertext) are rendered as a multi-line TOML literal string (”'...”')
-// since age armor output is itself multi-line ASCII text.
+// TargetMeta is the payload for UpdateTargetFields: a target's plain
+// (non-secret) connection fields — the same four AppendTarget already
+// writes for a brand-new target (see appendTargetBlock), now updatable in
+// place after the fact.
+type TargetMeta struct {
+	Host        string
+	Node        string
+	APIPort     int
+	InsecureTLS bool
+}
+
+// UpdateTargetFields splices meta's host/node/api_port/insecure_tls onto
+// an EXISTING target's own top-level fields — closing the gap
+// AppendTarget alone leaves: AppendTarget only ever writes these fields
+// once, for a target's first-ever roster entry. A target that already had
+// a bare [[targets]] block before this ran (hand-added per the roster
+// template's own documented convention, or left over from a bootstrap
+// that predates this fix) never gets them written at all, so e.g.
+// `bootstrap --insecure-tls` against such a target silently loses that
+// setting the moment bootstrap finishes — pveforge-bootstrap-insecure-
+// tls-not-persisted.
+//
+// A true no-op — no write, no error — when meta already matches every
+// field currently persisted for targetID: verify-then-skip is cheaper and
+// safer than an unconditional rewrite on every bootstrap run, including
+// the common retry that changed nothing. The comparison against the
+// currently-persisted values happens from the SAME locked read the actual
+// splice below goes on to use — not a separate, earlier, unlocked
+// read-then-decide — so there's no TOCTOU window between deciding a field
+// differs and actually writing it.
+//
+// Only fields that actually differ from what's currently persisted are
+// included in the splice at all: api_port and insecure_tls are OPTIONAL
+// top-level fields (AppendTarget only ever writes them when non-zero —
+// see appendTargetBlock), so a field that's currently absent (decoding to
+// its zero value) and whose wanted value is ALSO the zero value must stay
+// untouched, never gaining a spurious "api_port = 0"/"insecure_tls =
+// false" line. A field that IS currently present but needs to move back
+// to the zero value is written as that explicit zero value in place
+// (e.g. "insecure_tls = false") rather than removing the line — decoded
+// either way, "explicitly false" and "absent" are indistinguishable, and
+// writing the value in place reuses the exact same splice machinery as
+// every other field update instead of needing a separate line-deletion
+// mechanism for a case bootstrap realistically never hits (its own
+// fields only ever move away from their zero value, never back to it).
+func UpdateTargetFields(path, targetID string, meta TargetMeta) error {
+	lock := flock.New(path + ".lock")
+	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	locked, err := lock.TryLockContext(lockCtx, 100*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("lock roster %s: %w", path, err)
+	}
+	if !locked {
+		return fmt.Errorf("lock roster %s: timed out waiting for another pveforge process", path)
+	}
+	defer lock.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read roster %s: %w", path, err)
+	}
+
+	r, err := Decode(data)
+	if err != nil {
+		return fmt.Errorf("update target fields for %q: %w", targetID, err)
+	}
+	current := r.Find(targetID)
+	if current == nil {
+		return fmt.Errorf("update target fields for %q: no such target in roster %s", targetID, path)
+	}
+
+	var fields []field
+	if current.Host != meta.Host {
+		fields = append(fields, field{key: "host", value: meta.Host})
+	}
+	if current.Node != meta.Node {
+		fields = append(fields, field{key: "node", value: meta.Node})
+	}
+	if current.APIPort != meta.APIPort {
+		fields = append(fields, field{key: "api_port", value: strconv.Itoa(meta.APIPort), raw: true})
+	}
+	if current.InsecureTLS != meta.InsecureTLS {
+		fields = append(fields, field{key: "insecure_tls", value: strconv.FormatBool(meta.InsecureTLS), raw: true})
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+
+	newData, err := applyTargetFieldsSplice(data, targetID, fields)
+	if err != nil {
+		return fmt.Errorf("update target fields for %q: %w", targetID, err)
+	}
+
+	if err := verifyOnlyTargetFieldsChanged(data, newData, targetID); err != nil {
+		return fmt.Errorf("safety check failed, roster left untouched: %w", err)
+	}
+
+	if err := atomicWrite(path, newData); err != nil {
+		return fmt.Errorf("write roster %s: %w", path, err)
+	}
+	return nil
+}
+
+// applyTargetFieldsSplice generalizes applySubtableSplice's existing
+// splice-in-place-or-append machinery from a [targets.<subKey>] subtable's
+// byte span to a target block's OWN top-level field span
+// ([block.start, block.ownEnd) — see targetBlock's own doc comment). The
+// two shapes need separate entry points (this function decides where a
+// NEW field is inserted using block.ownEnd rather than a subtable's own
+// end, and never needs the "subtable doesn't exist yet, append a whole
+// header" branch applySubtableSplice has, since a target's top-level
+// field span always exists once the target itself does) — but both reuse
+// the exact same field-lookup (findSubtableFields, which only needs a
+// [start,end) span, not literally a subtable) and edit/applyEdits
+// machinery beneath that split, per this task's own instruction not to
+// invent a parallel raw-rewrite mechanism.
+func applyTargetFieldsSplice(data []byte, targetID string, fields []field) ([]byte, error) {
+	blocks, err := findTargetBlocks(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var match *targetBlock
+	matches := 0
+	for i := range blocks {
+		if blocks[i].id == targetID {
+			matches++
+			match = &blocks[i]
+		}
+	}
+	if matches == 0 {
+		return nil, fmt.Errorf("no target with id %q found in roster", targetID)
+	}
+	if matches > 1 {
+		return nil, fmt.Errorf("ambiguous: %d targets with id %q found in roster", matches, targetID)
+	}
+
+	existing := findSubtableFields(data, subtableSpan{start: match.start, end: match.ownEnd})
+
+	var edits []edit
+	var appendB strings.Builder
+	for _, f := range fields {
+		if r, ok := existing[f.key]; ok {
+			edits = append(edits, edit{Start: r.Offset, End: r.Offset + r.Length, Replacement: []byte(f.renderValue())})
+		} else {
+			appendB.WriteString(f.render())
+		}
+	}
+	if appendB.Len() > 0 {
+		insertAt := match.ownEnd
+		var b strings.Builder
+		if insertAt > 0 && data[insertAt-1] != '\n' {
+			b.WriteString("\n")
+		}
+		b.WriteString(appendB.String())
+		edits = append(edits, edit{Start: insertAt, End: insertAt, Replacement: []byte(b.String())})
+	}
+
+	return applyEdits(data, edits)
+}
+
+// verifyOnlyTargetFieldsChanged mirrors verifyOnlyIntendedChange's role
+// for applyTargetFieldsSplice: re-decodes both the original and spliced
+// bytes and asserts every target OTHER than targetID is byte-identical in
+// decoded form, and that targetID's own id and BOTH auth subtables (this
+// splice never touches either) are unchanged — the safety net catching a
+// splicer bug before anything is written. Deliberately does NOT assert
+// host/node/api_port/insecure_tls are unchanged for targetID: those are
+// exactly what this splice intends to change.
+func verifyOnlyTargetFieldsChanged(oldData, newData []byte, targetID string) error {
+	oldRoster, err := Decode(oldData)
+	if err != nil {
+		return fmt.Errorf("original roster no longer parses (unexpected): %w", err)
+	}
+	newRoster, err := Decode(newData)
+	if err != nil {
+		return fmt.Errorf("spliced roster does not parse: %w", err)
+	}
+	if len(oldRoster.Targets) != len(newRoster.Targets) {
+		return fmt.Errorf("target count changed: %d -> %d", len(oldRoster.Targets), len(newRoster.Targets))
+	}
+	for i := range oldRoster.Targets {
+		ot := oldRoster.Targets[i]
+		nt := newRoster.Targets[i]
+		if ot.ID != nt.ID {
+			return fmt.Errorf("target #%d id changed: %q -> %q", i, ot.ID, nt.ID)
+		}
+		if ot.ID == targetID {
+			if !tokenAuthEqual(ot.Token, nt.Token) {
+				return fmt.Errorf("target %q: token auth changed unexpectedly while updating fields", targetID)
+			}
+			if !sshAuthEqual(ot.SSH, nt.SSH) {
+				return fmt.Errorf("target %q: ssh auth changed unexpectedly while updating fields", targetID)
+			}
+			continue
+		}
+		if !targetDeepEqual(ot, nt) {
+			return fmt.Errorf("target %q was modified but was not the intended target %q", ot.ID, targetID)
+		}
+	}
+	return nil
+}
+
+// field is one key/value pair to write into a subtable or onto a target's
+// own top-level fields. Non-literal, non-raw values are rendered as a
+// quoted TOML basic string; literal values (armored ciphertext) are
+// rendered as a multi-line TOML literal string (”'...”') since age armor
+// output is itself multi-line ASCII text; raw values are written verbatim,
+// unquoted — for a non-string TOML type (api_port's bare integer,
+// insecure_tls's bare boolean), where value already holds the exact TOML
+// syntax text (via strconv.Itoa/FormatBool), not a Go string that needs
+// quoting.
 type field struct {
 	key     string
 	value   string
 	literal bool
+	raw     bool
 }
 
 func (f field) render() string {
 	if f.literal {
 		return fmt.Sprintf("%s = '''\n%s'''\n", f.key, ensureTrailingNewline(f.value))
+	}
+	if f.raw {
+		return fmt.Sprintf("%s = %s\n", f.key, f.value)
 	}
 	return fmt.Sprintf("%s = %s\n", f.key, quoteTOMLBasicString(f.value))
 }
@@ -204,6 +418,9 @@ func (f field) render() string {
 func (f field) renderValue() string {
 	if f.literal {
 		return fmt.Sprintf("'''\n%s'''", ensureTrailingNewline(f.value))
+	}
+	if f.raw {
+		return f.value
 	}
 	return quoteTOMLBasicString(f.value)
 }

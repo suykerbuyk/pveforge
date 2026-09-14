@@ -204,6 +204,9 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		hostKeyFP = existing.HostKeyFingerprint
 
 		if res := trySkipTokenRecreate(ctx, opts, api, hostKeyFP, fullTokenID); res != nil {
+			if err := persistTargetMeta(opts); err != nil {
+				return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+			}
 			return res, nil
 		}
 	} else {
@@ -261,7 +264,50 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		return nil, fmt.Errorf("bootstrap %s: persist token auth: %w", opts.TargetID, err)
 	}
 
+	if err := persistTargetMeta(opts); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+
 	return &Result{HostKeyFingerprint: hostKeyFP, TokenID: fullTokenID}, nil
+}
+
+// persistTargetMeta writes opts' resolved Host/Node/APIPort/InsecureTLS
+// back into the roster for opts.TargetID — closing
+// pveforge-bootstrap-insecure-tls-not-persisted: ensureTargetExists only
+// ever writes these fields once, via AppendTarget, for a target's
+// first-ever roster entry. A target that already had a bare [[targets]]
+// block before this Run started (hand-added per the roster template's
+// own documented convention, or left over from a bootstrap that predates
+// this fix) never got them written at all — so e.g. `bootstrap
+// --insecure-tls` against such a target silently lost that setting the
+// moment bootstrap finished, even though bootstrap's OWN HTTPS calls
+// (ValidateTokenGrants, above and in trySkipTokenRecreate) correctly used
+// it for themselves.
+//
+// Called from BOTH of Run's success paths (the token-recreate-skipped
+// fast path and the full mint-a-fresh-token path) — not just the full
+// path — since either can be the first time a given target's metadata
+// actually gets persisted; a target reached via the fast path might just
+// as easily be one with a hand-added bare roster entry.
+//
+// roster.UpdateTargetFields is itself a true no-op when every field
+// already matches what's persisted, so this never causes gratuitous
+// roster churn on an ordinary retry that changed nothing — and by the
+// time this runs, opts already reflects defaultHostNodeFromRoster's own
+// restore-from-roster step (called at the very top of Run, before
+// validateOptions), so a retry that OMITS --insecure-tls against a
+// target that already has it set has ALREADY had opts.InsecureTLS
+// restored to true before this call ever sees it — this cannot
+// re-introduce the exact drift defaultHostNodeFromRoster exists to
+// prevent, it only closes the gap of nothing ever having persisted the
+// value in the first place.
+func persistTargetMeta(opts Options) error {
+	return roster.UpdateTargetFields(opts.RosterPath, opts.TargetID, roster.TargetMeta{
+		Host:        opts.Host,
+		Node:        opts.Node,
+		APIPort:     opts.APIPort,
+		InsecureTLS: opts.InsecureTLS,
+	})
 }
 
 // defaultHostNodeFromRoster fills opts.Host/opts.Node/opts.APIPort/
@@ -512,8 +558,13 @@ func loadExistingTokenAuth(opts Options) (*existingTokenAuth, error) {
 // if this check had never run — a broken, stale, or simply
 // differently-named persisted token must never become a hard failure
 // here, since minting a fresh one is Run's own established, safe recovery
-// path. No roster write happens on the skip path: nothing changed, so
-// there is nothing to persist.
+// path. This function itself never writes the roster: nothing about the
+// TOKEN changed on the skip path, so there is nothing for IT to persist —
+// Run's own caller-side handling of a non-nil result here still calls
+// persistTargetMeta afterward, since the target's plain connection
+// metadata (host/node/api_port/insecure_tls) is a separate concern from
+// token auth and can still need writing even when the token doesn't
+// (pveforge-bootstrap-insecure-tls-not-persisted).
 func trySkipTokenRecreate(ctx context.Context, opts Options, api APIValidator, hostKeyFP, wantFullTokenID string) *Result {
 	tok, err := loadExistingTokenAuth(opts)
 	if err != nil || tok == nil {
