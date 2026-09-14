@@ -21,6 +21,7 @@ func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
 		authorizedKeys += "ssh-ed25519 AAAAtest testkey\n"
 		return "added\n", "", 0
 	}
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -55,6 +56,7 @@ func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
 func TestInstallPubkeyViaPassword_WrongPasswordRejected(t *testing.T) {
 	fs := newFakeServer(t)
 	fs.allowPassword("correct-horse")
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -71,6 +73,7 @@ func TestInstallPubkeyViaPassword_RemoteScriptFailure(t *testing.T) {
 	fs.handleExec = func(cmd string) (string, string, int) {
 		return "", "permission denied\n", 1
 	}
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

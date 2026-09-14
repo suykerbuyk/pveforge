@@ -19,8 +19,16 @@ type fakeSSHServer struct {
 	hostSigner ssh.Signer
 	allowedPub ssh.PublicKey
 	handleExec func(cmd string) (stdout, stderr string, exitCode int)
+	listener   net.Listener
 }
 
+// newFakeSSHServer constructs the fake server and binds its listening
+// port, but does NOT start accepting connections yet — call Start() once
+// the test has finished configuring it (setting allowedPub/handleExec).
+// Starting the accept loop here, before the caller configures the struct,
+// was a genuine data race: a connection accepted in that window could
+// read fs.allowedPub concurrently with the test goroutine's write to it
+// (caught by `go test -race`) — see pveforge-fix-fake-ssh-server-test-races.
 func newFakeSSHServer(t *testing.T) *fakeSSHServer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -41,9 +49,15 @@ func newFakeSSHServer(t *testing.T) *fakeSSHServer {
 		addr:       ln.Addr().String(),
 		hostSigner: signer,
 		handleExec: func(cmd string) (string, string, int) { return "", "", 0 },
+		listener:   ln,
 	}
-	go fs.serve(ln)
 	return fs
+}
+
+// Start begins accepting connections. Call it only after the test has
+// finished configuring the server — see newFakeSSHServer's doc comment.
+func (fs *fakeSSHServer) Start() {
+	go fs.serve(fs.listener)
 }
 
 func (fs *fakeSSHServer) serve(ln net.Listener) {

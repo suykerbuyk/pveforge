@@ -17,12 +17,20 @@ type fakeServer struct {
 	hostKey  ssh.Signer
 	password string          // "" disables password auth
 	authKeys map[string]bool // marshaled-pubkey -> allowed, "" disables pubkey auth
+	listener net.Listener
 
 	// handleExec is invoked for every "exec" request accepted by the
 	// server; it returns (stdout, stderr, exitStatus).
 	handleExec func(cmd string) (string, string, int)
 }
 
+// newFakeServer constructs the fake server and binds its listening port,
+// but does NOT start accepting connections yet — call Start() once the
+// test has finished configuring it (allowPassword/allowPublicKey/
+// handleExec). Starting the accept loop here, before the caller
+// configures the struct, was a genuine data race: a connection accepted
+// in that window could read fs.password/fs.authKeys concurrently with the
+// test goroutine's write to them (caught by `go test -race`).
 func newFakeServer(t *testing.T) *fakeServer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -47,10 +55,18 @@ func newFakeServer(t *testing.T) *fakeServer {
 		handleExec: func(cmd string) (string, string, int) {
 			return "", "", 0
 		},
+		listener: ln,
 	}
-
-	go fs.serve(t, ln)
 	return fs
+}
+
+// Start begins accepting connections. Call it only after the test has
+// finished configuring the server (allowPassword/allowPublicKey/setting
+// handleExec) — see newFakeServer's doc comment for why the ordering
+// matters.
+func (fs *fakeServer) Start(t *testing.T) {
+	t.Helper()
+	go fs.serve(t, fs.listener)
 }
 
 // allowPassword enables password auth accepting exactly this password.

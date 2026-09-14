@@ -10,6 +10,7 @@ func TestPinnedHostKeyCallback_AcceptsMatchingKey(t *testing.T) {
 	fs := newFakeServer(t)
 	kp, pub := clientKeypair(t)
 	fs.allowPublicKey(pub)
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -43,6 +44,7 @@ func TestPinnedHostKeyCallback_RejectsMismatchedKey(t *testing.T) {
 	fs := newFakeServer(t)
 	kp, pub := clientKeypair(t)
 	fs.allowPublicKey(pub)
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

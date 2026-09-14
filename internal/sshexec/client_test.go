@@ -26,6 +26,7 @@ func TestDial_WithKey_RunCapturesStdoutStderrExit(t *testing.T) {
 		}
 		return "hello stdout\n", "hello stderr\n", 0
 	}
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -57,6 +58,7 @@ func TestDial_WrongKeyRejected(t *testing.T) {
 	fs := newFakeServer(t)
 	_, allowedPub := clientKeypair(t)
 	fs.allowPublicKey(allowedPub)
+	fs.Start(t)
 
 	otherKp, _ := clientKeypair(t)
 
@@ -80,6 +82,7 @@ func TestClient_Run_ContextCancellation(t *testing.T) {
 		<-block
 		return "", "", 0
 	}
+	fs.Start(t)
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +19,31 @@ import (
 // real deps.go adapters (realSSHTransport/realSSHSession) against actual
 // sshexec/x-crypto-ssh network code — no live PVE host involved, per this
 // package's test strategy.
+//
+// Configuration fields (password/allowedPub/handleExec) are guarded by mu
+// and accessed only through the set*/get* methods below — never directly.
+// Unlike internal/sshexec's and internal/pve's equivalent fixtures (which
+// use a deferred Start() because each of their tests configures the
+// server fully exactly once, before any use), several tests here
+// reconfigure handleExec mid-test, AFTER the server has already handled
+// one full connection (see TestRealSSHTransport_DialWithKey_RunAndClose
+// and TestRealSSHTransport_ReconnectWithPinnedKey_RunAndClose): the
+// client observing connection #1 complete does NOT create a
+// race-detector-visible happens-before edge with the server-side
+// goroutine that served it — Go's race detector has no model for
+// ordering established via raw socket I/O, only via its own recognized
+// primitives (channels, mutexes, atomics, goroutine creation). A
+// one-time deferred Start() would still leave that second, mid-test
+// write racing against the server goroutine from connection #1 as far as
+// the detector is concerned, even though the real-world ordering happens
+// to be safe. A mutex around every access closes that gap regardless of
+// how many times a test reconfigures the server. See
+// pveforge-fix-fake-ssh-server-test-races.
 type depsFakeSSHServer struct {
 	addr       string
 	hostSigner ssh.Signer
+
+	mu         sync.Mutex
 	password   string
 	allowedPub ssh.PublicKey
 	handleExec func(cmd string) (string, string, int)
@@ -51,6 +74,46 @@ func newDepsFakeSSHServer(t *testing.T) *depsFakeSSHServer {
 	return fs
 }
 
+// setPassword, setAllowedPub, and setHandleExec are the only sanctioned
+// way to configure a depsFakeSSHServer, at any point in a test's
+// lifetime — including after the server has already handled earlier
+// connections — since every access goes through fs.mu.
+func (fs *depsFakeSSHServer) setPassword(password string) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.password = password
+}
+
+func (fs *depsFakeSSHServer) setAllowedPub(pub ssh.PublicKey) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.allowedPub = pub
+}
+
+func (fs *depsFakeSSHServer) setHandleExec(fn func(cmd string) (string, string, int)) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.handleExec = fn
+}
+
+func (fs *depsFakeSSHServer) getPassword() string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.password
+}
+
+func (fs *depsFakeSSHServer) getAllowedPub() ssh.PublicKey {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.allowedPub
+}
+
+func (fs *depsFakeSSHServer) getHandleExec() func(cmd string) (string, string, int) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.handleExec
+}
+
 func (fs *depsFakeSSHServer) serve(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -64,13 +127,13 @@ func (fs *depsFakeSSHServer) serve(ln net.Listener) {
 func (fs *depsFakeSSHServer) handleConn(conn net.Conn) {
 	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			if fs.password != "" && string(pass) == fs.password {
+			if want := fs.getPassword(); want != "" && string(pass) == want {
 				return nil, nil
 			}
 			return nil, errAuthRejected
 		},
 		PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if fs.allowedPub != nil && string(key.Marshal()) == string(fs.allowedPub.Marshal()) {
+			if allowed := fs.getAllowedPub(); allowed != nil && string(key.Marshal()) == string(allowed.Marshal()) {
 				return nil, nil
 			}
 			return nil, errAuthRejected
@@ -112,7 +175,7 @@ func (fs *depsFakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Requ
 		if req.WantReply {
 			_ = req.Reply(true, nil)
 		}
-		stdout, stderr, code := fs.handleExec(cmd)
+		stdout, stderr, code := fs.getHandleExec()(cmd)
 		_, _ = ch.Write([]byte(stdout))
 		_, _ = ch.Stderr().Write([]byte(stderr))
 		status := make([]byte, 4)
@@ -130,8 +193,8 @@ var errAuthRejected = &authRejectedError{}
 
 func TestRealSSHTransport_InstallPubkeyViaPassword(t *testing.T) {
 	fs := newDepsFakeSSHServer(t)
-	fs.password = "hunter2"
-	fs.handleExec = func(cmd string) (string, string, int) { return "added\n", "", 0 }
+	fs.setPassword("hunter2")
+	fs.setHandleExec(func(cmd string) (string, string, int) { return "added\n", "", 0 })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -148,7 +211,7 @@ func TestRealSSHTransport_InstallPubkeyViaPassword(t *testing.T) {
 
 func TestRealSSHTransport_InstallPubkeyViaPassword_PropagatesError(t *testing.T) {
 	fs := newDepsFakeSSHServer(t)
-	fs.password = "hunter2"
+	fs.setPassword("hunter2")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -182,12 +245,12 @@ func TestRealSSHTransport_DialWithKey_RunAndClose(t *testing.T) {
 	}
 
 	fs := newDepsFakeSSHServer(t)
-	fs.allowedPub = signer.PublicKey()
+	fs.setAllowedPub(signer.PublicKey())
 
 	// Capture the real host key fingerprint the same way bootstrap's own
 	// InstallPubkeyViaPassword step would, so DialWithKey's pinning check
 	// has something real to compare against.
-	fs.password = "hunter2"
+	fs.setPassword("hunter2")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	fp, err := NewSSHTransport().InstallPubkeyViaPassword(ctx, fs.addr, "root", "hunter2", kp.AuthorizedKeyLine)
@@ -195,7 +258,7 @@ func TestRealSSHTransport_DialWithKey_RunAndClose(t *testing.T) {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
 
-	fs.handleExec = func(cmd string) (string, string, int) { return "ran: " + cmd, "", 0 }
+	fs.setHandleExec(func(cmd string) (string, string, int) { return "ran: " + cmd, "", 0 })
 
 	session, err := NewSSHTransport().DialWithKey(ctx, fs.addr, "root", kp.PrivateKeyPEM, fp)
 	if err != nil {
@@ -235,8 +298,8 @@ func TestRealSSHTransport_ReconnectWithPinnedKey_RunAndClose(t *testing.T) {
 	}
 
 	fs := newDepsFakeSSHServer(t)
-	fs.allowedPub = signer.PublicKey()
-	fs.password = "hunter2"
+	fs.setAllowedPub(signer.PublicKey())
+	fs.setPassword("hunter2")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -249,7 +312,7 @@ func TestRealSSHTransport_ReconnectWithPinnedKey_RunAndClose(t *testing.T) {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
 
-	fs.handleExec = func(cmd string) (string, string, int) { return "ran: " + cmd, "", 0 }
+	fs.setHandleExec(func(cmd string) (string, string, int) { return "ran: " + cmd, "", 0 })
 
 	session, err := NewSSHTransport().ReconnectWithPinnedKey(ctx, fs.addr, "root", kp.PrivateKeyPEM, fp)
 	if err != nil {
@@ -278,7 +341,7 @@ func TestRealSSHTransport_ReconnectWithPinnedKey_RejectsMismatchedHostKey(t *tes
 	}
 
 	fs := newDepsFakeSSHServer(t)
-	fs.allowedPub = signer.PublicKey()
+	fs.setAllowedPub(signer.PublicKey())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

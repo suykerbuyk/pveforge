@@ -140,6 +140,35 @@ func (c *RoutedClient) SetVMConfigField(ctx context.Context, vmid int, field, va
 	return err
 }
 
+// SetVMConfigFieldCAS is SetVMConfigField with the digest-based
+// compare-and-swap guard described on Client.SetVMConfigFieldCAS's own
+// doc comment (internal/pve's defense-in-depth alongside internal/lock's
+// per-object serialization).
+//
+// Refuses outright — rather than silently falling back to an
+// unconditional write — for any field in sshexec.RootOnlyFields. Those
+// fields are routed over the standing SSH vector (`qm set`), which has no
+// digest/compare-and-swap concept at all: honoring expectDigest there
+// would be impossible, and silently ignoring it would let a caller believe
+// it got the CAS guarantee it asked for when it didn't. A caller that
+// needs to mutate a root-only field still has internal/lock's own
+// per-object serialization; it just doesn't get this second, independent
+// layer of protection for that field.
+func (c *RoutedClient) SetVMConfigFieldCAS(ctx context.Context, vmid int, field, value, expectDigest string) error {
+	if sshexec.RootOnlyFields[field] {
+		// Deliberately does not use the word "digest" anywhere in this
+		// message: IsDigestConflictError matches on that substring to
+		// recognize a genuine PVE compare-and-swap rejection, and this is
+		// a permanent, purely local refusal (never sent to PVE at all) —
+		// if this text tripped that same substring check, a caller like
+		// internal/idempotent would misread it as a transient conflict
+		// worth retrying, uselessly repeating an error that can never
+		// succeed no matter how many times it's retried.
+		return fmt.Errorf("set vm %d field %q: root-only fields routed over the standing SSH vector have no compare-and-swap mechanism to honor an expected prior value with", vmid, field)
+	}
+	return c.rest.SetVMConfigFieldCAS(ctx, c.target.Node, vmid, field, value, expectDigest)
+}
+
 // setViaSSH dials the standing SSH vector on first use and reuses it for
 // every subsequent root-only-field write on this RoutedClient — but never
 // reuses a connection once it's found to be dead (see sshConnectionHealthy).

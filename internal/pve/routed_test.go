@@ -35,6 +35,12 @@ func bootstrappedTarget(t *testing.T, fs *fakeSSHServer, passphrase string) *ros
 	t.Helper()
 	kp, pub := sshTargetKeypair(t)
 	fs.allowedPub = pub
+	// Every caller of bootstrappedTarget configures fs (handleExec, if it
+	// wants a non-default one) before calling this, and fs.allowedPub —
+	// the last piece of configuration — is set immediately above, so
+	// starting the accept loop here is safe: no test writes to fs's
+	// configuration fields after this point.
+	fs.Start()
 
 	// Capture the fake server's real host key fingerprint the same way a
 	// real bootstrap would, so PinnedHostKeyCallback has something
@@ -506,5 +512,101 @@ func TestRoutedClient_TypedReadForwarding(t *testing.T) {
 	}
 	if networks, err := rc.GetNetworkInterfaces(ctx, "qa-pve-01"); err != nil || len(networks) != 1 {
 		t.Errorf("GetNetworkInterfaces: networks=%+v err=%v", networks, err)
+	}
+}
+
+// TestRoutedClient_SetVMConfigFieldCAS_NonRootOnlyField_ForwardsToREST
+// proves a non-root-only field's digest reaches the REST layer unchanged
+// and no SSH connection is ever dialed — the same non-root-only shape
+// TestRoutedClient_NonRootOnlyField_UsesRESTOnly already covers for the
+// plain (non-CAS) setter.
+func TestRoutedClient_SetVMConfigFieldCAS_NonRootOnlyField_ForwardsToREST(t *testing.T) {
+	var gotDigest string
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		gotDigest = r.PostForm.Get("digest")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer restSrv.Close()
+
+	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	if err != nil {
+		t.Fatalf("EncryptString: %v", err)
+	}
+	tg := &roster.Target{
+		ID:    "qa-pve-01",
+		Host:  "qa-pve-01.example.com",
+		Node:  "qa-pve-01",
+		Token: &roster.TokenAuth{ID: "root@pam!pveforge", SecretEnc: armored},
+	}
+	rest, err := NewClientForTarget(tg, "roster-pass")
+	if err != nil {
+		t.Fatalf("NewClientForTarget: %v", err)
+	}
+	rest.baseURL = restSrv.URL
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	if err := rc.SetVMConfigFieldCAS(context.Background(), 100, "tags", "prod", "digest-xyz"); err != nil {
+		t.Fatalf("SetVMConfigFieldCAS: %v", err)
+	}
+	if gotDigest != "digest-xyz" {
+		t.Errorf("expected digest=digest-xyz to reach REST, got %q", gotDigest)
+	}
+	if rc.ssh != nil {
+		t.Fatal("a non-root-only field must never dial SSH")
+	}
+}
+
+// TestRoutedClient_SetVMConfigFieldCAS_RootOnlyField_Refuses is the
+// asymmetry this method exists to make explicit: digest-based CAS has no
+// meaning for a field routed over the standing SSH vector (`qm set` has
+// no digest concept), so this must refuse outright rather than silently
+// proceed without the guarantee the caller asked for — and it must do so
+// WITHOUT ever touching the network (no REST call, no SSH dial), since
+// there's nothing a live connection could do to make this request valid.
+func TestRoutedClient_SetVMConfigFieldCAS_RootOnlyField_Refuses(t *testing.T) {
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must never reach REST for a root-only field")
+	}))
+	defer restSrv.Close()
+
+	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	if err != nil {
+		t.Fatalf("EncryptString: %v", err)
+	}
+	tg := &roster.Target{
+		ID:    "qa-pve-01",
+		Host:  "qa-pve-01.example.com",
+		Node:  "qa-pve-01",
+		Token: &roster.TokenAuth{ID: "root@pam!pveforge", SecretEnc: armored},
+	}
+	rest, err := NewClientForTarget(tg, "roster-pass")
+	if err != nil {
+		t.Fatalf("NewClientForTarget: %v", err)
+	}
+	rest.baseURL = restSrv.URL
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	err = rc.SetVMConfigFieldCAS(context.Background(), 100, "args", "-device foo", "digest-xyz")
+	if err == nil {
+		t.Fatal("expected an error: digest-based CAS is not available for root-only fields")
+	}
+	if !strings.Contains(err.Error(), "have no compare-and-swap mechanism") {
+		t.Errorf("expected a clear explanation, got: %v", err)
+	}
+	// This refusal must never be misclassified as a digest conflict — it's
+	// a permanent, purely local refusal, not something a caller (like
+	// internal/idempotent) should ever retry.
+	if IsDigestConflictError(err) {
+		t.Error("the root-only refusal error must not be recognized as a digest conflict")
+	}
+	if rc.ssh != nil {
+		t.Fatal("refusing a root-only CAS request must never dial SSH either")
 	}
 }

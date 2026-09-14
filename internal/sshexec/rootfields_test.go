@@ -43,6 +43,7 @@ func TestSetVMConfigField(t *testing.T) {
 		receivedCmd = cmd
 		return "", "", 0
 	}
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -67,6 +68,7 @@ func TestSetVMConfigField_RemoteFailure(t *testing.T) {
 	fs.handleExec = func(cmd string) (string, string, int) {
 		return "", "only root can set 'args' config\n", 1
 	}
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -89,6 +91,7 @@ func TestSetVMConfigField_RejectsUnsafeFieldName(t *testing.T) {
 	fs := newFakeServer(t)
 	kp, pub := clientKeypair(t)
 	fs.allowPublicKey(pub)
+	fs.Start(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

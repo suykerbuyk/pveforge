@@ -2,6 +2,7 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -105,6 +106,89 @@ func TestSetVMConfigField_EscapesNodeInURL(t *testing.T) {
 	}
 	if gotEscapedPath != "/nodes/weird%20node%2Fname/qemu/100/config" {
 		t.Fatalf("expected the node name to be escaped on the wire, got escaped path: %q", gotEscapedPath)
+	}
+}
+
+// TestSetVMConfigFieldCAS_SendsDigestWhenProvided proves the "digest"
+// form parameter is only ever added when expectDigest is non-empty
+// (SetVMConfigField's own unconditional-write behavior must be
+// unaffected by this CAS sibling existing).
+func TestSetVMConfigFieldCAS_SendsDigestWhenProvided(t *testing.T) {
+	var gotDigest string
+	var digestPresent bool
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		_, digestPresent = r.PostForm["digest"]
+		if digestPresent {
+			gotDigest = r.PostForm.Get("digest")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	c := testClient(t, srv)
+
+	if err := c.SetVMConfigFieldCAS(context.Background(), "qa-pve-01", 100, "tags", "prod", "abc123digest"); err != nil {
+		t.Fatalf("SetVMConfigFieldCAS: %v", err)
+	}
+	if !digestPresent || gotDigest != "abc123digest" {
+		t.Errorf("expected digest=abc123digest on the wire, got present=%v value=%q", digestPresent, gotDigest)
+	}
+}
+
+func TestSetVMConfigFieldCAS_OmitsDigestWhenEmpty(t *testing.T) {
+	var digestPresent bool
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		_, digestPresent = r.PostForm["digest"]
+		w.WriteHeader(http.StatusOK)
+	})
+	c := testClient(t, srv)
+
+	if err := c.SetVMConfigFieldCAS(context.Background(), "qa-pve-01", 100, "tags", "prod", ""); err != nil {
+		t.Fatalf("SetVMConfigFieldCAS: %v", err)
+	}
+	if digestPresent {
+		t.Error("expected no digest form field when expectDigest is empty")
+	}
+}
+
+// TestSetVMConfigField_IsCASWithEmptyDigest is the reverse check: the
+// plain SetVMConfigField is genuinely just SetVMConfigFieldCAS(..., "")
+// under the hood, not a separately-diverging code path.
+func TestSetVMConfigField_IsCASWithEmptyDigest(t *testing.T) {
+	var digestPresent bool
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		_, digestPresent = r.PostForm["digest"]
+		w.WriteHeader(http.StatusOK)
+	})
+	c := testClient(t, srv)
+
+	if err := c.SetVMConfigField(context.Background(), "qa-pve-01", 100, "tags", "prod"); err != nil {
+		t.Fatalf("SetVMConfigField: %v", err)
+	}
+	if digestPresent {
+		t.Error("SetVMConfigField must never send a digest parameter")
+	}
+}
+
+func TestIsDigestConflictError(t *testing.T) {
+	if IsDigestConflictError(nil) {
+		t.Error("nil error should never be a digest conflict")
+	}
+	if !IsDigestConflictError(errors.New("update VM 100: digest mismatch")) {
+		t.Error("expected an error mentioning 'digest' to be recognized")
+	}
+	if !IsDigestConflictError(errors.New("PVE returned 400: Digest verification failed")) {
+		t.Error("expected recognition to be case-insensitive")
+	}
+	if IsDigestConflictError(errors.New("only root can set 'args' config")) {
+		t.Error("an unrelated error must not be misrecognized as a digest conflict")
 	}
 }
 
