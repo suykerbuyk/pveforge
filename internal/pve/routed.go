@@ -60,6 +60,17 @@ func (c *RoutedClient) Close() error {
 	return nil
 }
 
+// Node returns the PVE node name this client is scoped to (its target's
+// roster.Target.Node). Needed by callers that call one of the node-
+// parameterized typed getters (GetVM, GetStorage, ...) against the same
+// target a RoutedClient already wraps — e.g. internal/device's resolvers,
+// which read a VM's current config via GetVM before writing a merged
+// value back via SetVMConfigField (which, unlike GetVM, resolves the node
+// internally and takes no node parameter).
+func (c *RoutedClient) Node() string {
+	return c.target.Node
+}
+
 // --- typed reads: thin pass-throughs to the REST client ------------------
 //
 // None of nodes.go/vms.go/storage.go/networks.go's getters can ever hit a

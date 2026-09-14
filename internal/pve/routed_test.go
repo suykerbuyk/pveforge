@@ -285,6 +285,14 @@ func TestRoutedClient_SetViaSSH_NoHostKeyFingerprint(t *testing.T) {
 	}
 }
 
+func TestRoutedClient_Node(t *testing.T) {
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	rc := &RoutedClient{target: tg}
+	if got := rc.Node(); got != "qa-pve-01" {
+		t.Errorf("Node() = %q, want %q", got, "qa-pve-01")
+	}
+}
+
 func TestRoutedClient_Close_NoopWhenSSHNeverDialed(t *testing.T) {
 	rc := &RoutedClient{}
 	if err := rc.Close(); err != nil {
