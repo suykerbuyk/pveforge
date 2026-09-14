@@ -1,0 +1,18 @@
+/CLAUDE.md
+/AGENTS.md
+/commit.msg
+/.claude/
+/.grok/
+/.vibe-palace/
+
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# local roster/secrets (never committed unencrypted; the age-encrypted
+# roster itself is meant to be tracked once it exists)
+*.local.toml
+.env
