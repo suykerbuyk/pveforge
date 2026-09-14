@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	proxmox "github.com/luthermonson/go-proxmox"
+
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -56,6 +58,51 @@ func (c *RoutedClient) Close() error {
 		return c.ssh.Close()
 	}
 	return nil
+}
+
+// --- typed reads: thin pass-throughs to the REST client ------------------
+//
+// None of nodes.go/vms.go/storage.go/networks.go's getters can ever hit a
+// root-only field (that restriction is REST-write-specific — see
+// vmconfig.go), so there is nothing for RoutedClient to route: every read
+// always goes over REST. These exist so a caller holding a *RoutedClient
+// (the common case — one object per target, for both reads and routed
+// writes) never needs to reach into an unexported field to get at them.
+
+func (c *RoutedClient) GetNode(ctx context.Context, node string) (*proxmox.Node, error) {
+	return c.rest.GetNode(ctx, node)
+}
+
+func (c *RoutedClient) GetNodes(ctx context.Context) (proxmox.NodeStatuses, error) {
+	return c.rest.GetNodes(ctx)
+}
+
+func (c *RoutedClient) GetVM(ctx context.Context, node string, vmid int) (*proxmox.VirtualMachine, error) {
+	return c.rest.GetVM(ctx, node, vmid)
+}
+
+func (c *RoutedClient) GetVMs(ctx context.Context, node string) (proxmox.VirtualMachines, error) {
+	return c.rest.GetVMs(ctx, node)
+}
+
+func (c *RoutedClient) GetStorage(ctx context.Context, node, name string) (*proxmox.Storage, error) {
+	return c.rest.GetStorage(ctx, node, name)
+}
+
+func (c *RoutedClient) GetStorages(ctx context.Context, node string) (proxmox.Storages, error) {
+	return c.rest.GetStorages(ctx, node)
+}
+
+func (c *RoutedClient) GetStorageVolumes(ctx context.Context, node, storage string) ([]*proxmox.StorageContent, error) {
+	return c.rest.GetStorageVolumes(ctx, node, storage)
+}
+
+func (c *RoutedClient) GetNetworkInterface(ctx context.Context, node, iface string) (*proxmox.NodeNetwork, error) {
+	return c.rest.GetNetworkInterface(ctx, node, iface)
+}
+
+func (c *RoutedClient) GetNetworkInterfaces(ctx context.Context, node string, ifaceType ...string) (proxmox.NodeNetworks, error) {
+	return c.rest.GetNetworkInterfaces(ctx, node, ifaceType...)
 }
 
 // SetVMConfigField sets one VM config field on this target's VM, routing

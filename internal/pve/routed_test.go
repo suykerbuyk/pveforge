@@ -422,3 +422,81 @@ func TestRoutedClient_RemoteCommandFailure_ReusesHealthyConnection(t *testing.T)
 		t.Fatal("expected the healthy connection to be reused, not redialed, after a normal remote command failure")
 	}
 }
+
+// TestRoutedClient_TypedReadForwarding exercises all 8 read-side
+// pass-through methods, proving each one actually forwards to c.rest
+// rather than being a dead/stubbed method — every one of them must reach
+// the fake REST server and return the data it serves.
+func TestRoutedClient_TypedReadForwarding(t *testing.T) {
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/nodes/qa-pve-01/status":
+			_, _ = w.Write([]byte(`{"data":{"uptime":100}}`))
+		case "/nodes":
+			_, _ = w.Write([]byte(`{"data":[{"node":"qa-pve-01"}]}`))
+		case "/nodes/qa-pve-01/qemu/100/status/current":
+			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
+		case "/nodes/qa-pve-01/qemu/100/config":
+			_, _ = w.Write([]byte(`{"data":{"name":"web-01"}}`))
+		case "/nodes/qa-pve-01/qemu":
+			_, _ = w.Write([]byte(`{"data":[{"vmid":100}]}`))
+		case "/nodes/qa-pve-01/storage/local/status":
+			_, _ = w.Write([]byte(`{"data":{"type":"dir"}}`))
+		case "/nodes/qa-pve-01/storage":
+			_, _ = w.Write([]byte(`{"data":[{"storage":"local"}]}`))
+		case "/nodes/qa-pve-01/storage/local/content":
+			_, _ = w.Write([]byte(`{"data":[{"volid":"local:iso/x.iso"}]}`))
+		case "/nodes/qa-pve-01/network/vmbr0":
+			_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24"}}`))
+		case "/nodes/qa-pve-01/network":
+			_, _ = w.Write([]byte(`{"data":[{"iface":"vmbr0"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{
+		ID:   "qa-pve-01",
+		Host: "qa-pve-01.example.com",
+		Node: "qa-pve-01",
+	}
+	// Built directly via NewClient (BaseURLOverride), not
+	// NewClientForTarget: the getters under test go through c.pc.Get,
+	// which uses go-proxmox's own internal base URL set at construction
+	// time — patching rest.baseURL after the fact (as other tests in this
+	// file do, for the raw-HTTP write path only) would not reach it.
+	rest := testClient(t, restSrv)
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	ctx := context.Background()
+
+	if node, err := rc.GetNode(ctx, "qa-pve-01"); err != nil || node.Uptime != 100 {
+		t.Errorf("GetNode: node=%+v err=%v", node, err)
+	}
+	if nodes, err := rc.GetNodes(ctx); err != nil || len(nodes) != 1 {
+		t.Errorf("GetNodes: nodes=%+v err=%v", nodes, err)
+	}
+	if vm, err := rc.GetVM(ctx, "qa-pve-01", 100); err != nil || vm.Status != "running" {
+		t.Errorf("GetVM: vm=%+v err=%v", vm, err)
+	}
+	if vms, err := rc.GetVMs(ctx, "qa-pve-01"); err != nil || len(vms) != 1 {
+		t.Errorf("GetVMs: vms=%+v err=%v", vms, err)
+	}
+	if storage, err := rc.GetStorage(ctx, "qa-pve-01", "local"); err != nil || storage.Type != "dir" {
+		t.Errorf("GetStorage: storage=%+v err=%v", storage, err)
+	}
+	if storages, err := rc.GetStorages(ctx, "qa-pve-01"); err != nil || len(storages) != 1 {
+		t.Errorf("GetStorages: storages=%+v err=%v", storages, err)
+	}
+	if vols, err := rc.GetStorageVolumes(ctx, "qa-pve-01", "local"); err != nil || len(vols) != 1 {
+		t.Errorf("GetStorageVolumes: vols=%+v err=%v", vols, err)
+	}
+	if nw, err := rc.GetNetworkInterface(ctx, "qa-pve-01", "vmbr0"); err != nil || nw.CIDR != "10.0.0.5/24" {
+		t.Errorf("GetNetworkInterface: nw=%+v err=%v", nw, err)
+	}
+	if networks, err := rc.GetNetworkInterfaces(ctx, "qa-pve-01"); err != nil || len(networks) != 1 {
+		t.Errorf("GetNetworkInterfaces: networks=%+v err=%v", networks, err)
+	}
+}
