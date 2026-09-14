@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
+	"github.com/suykerbuyk/pveforge/internal/lock"
 )
 
 func newVMCmd() *cobra.Command {
@@ -44,6 +45,16 @@ func newVMGetCmd() *cobra.Command {
 			return err
 		}
 		defer func() { _ = client.Close() }()
+
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+		unlock, err := lock.Read(cmd.Context(), rosterPath, lock.ObjectKey{TargetID: args[0], Kind: "vm", ID: strconv.Itoa(vmid)})
+		if err != nil {
+			return fmt.Errorf("acquire read lock: %w", err)
+		}
+		defer func() { _ = unlock() }()
 
 		vm, err := client.GetVM(cmd.Context(), client.Node(), vmid)
 		if err != nil {

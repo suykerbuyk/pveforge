@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
@@ -77,6 +81,61 @@ func TestNewVMGetCmd_JSONOutput(t *testing.T) {
 	got := out.String()
 	if !strings.HasPrefix(got, "{\n") {
 		t.Errorf("expected indented JSON output, got:\n%s", got)
+	}
+}
+
+// TestNewVMGetCmd_BlocksOnPendingMutation proves `vm get` actually
+// participates in the locking protocol (pveforge-wire-existing-reads-to-lock-read):
+// while a lock.Mutation is held for the same object, the get command's
+// lock.Read call must block rather than reach the PVE API, and once the
+// mutation releases, the read proceeds normally.
+func TestNewVMGetCmd_BlocksOnPendingMutation(t *testing.T) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"status":"running","vmid":100}}`))
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
+	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
+	if err != nil {
+		t.Fatalf("acquire mutation: %v", err)
+	}
+
+	cmd := newVMGetCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := cmd.ExecuteContext(ctx); err == nil {
+		t.Fatal("expected the read to be blocked by the pending mutation and time out")
+	} else if !strings.Contains(err.Error(), "acquire read lock") {
+		t.Errorf("expected a read-lock-acquisition error, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("expected the read to never reach the PVE API while the mutation held the lock, got %d hits", got)
+	}
+
+	if err := unlockMutation(); err != nil {
+		t.Fatalf("release mutation: %v", err)
+	}
+
+	cmd2 := newVMGetCmd()
+	cmd2.SetOut(&bytes.Buffer{})
+	cmd2.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
+	if err := cmd2.Execute(); err != nil {
+		t.Fatalf("Execute after mutation released: %v", err)
+	}
+	// GetVM fetches status and config in two separate requests (see
+	// TestNewVMGetCmd_Success), so one successful read means two hits.
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("expected exactly one successful read (2 hits: status+config) after the mutation released, got %d hits", got)
 	}
 }
 

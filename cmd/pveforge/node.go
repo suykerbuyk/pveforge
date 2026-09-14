@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
+	"github.com/suykerbuyk/pveforge/internal/lock"
 )
 
 func newNodeCmd() *cobra.Command {
@@ -35,6 +38,16 @@ func newNodeGetCmd() *cobra.Command {
 			return err
 		}
 		defer func() { _ = client.Close() }()
+
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+		unlock, err := lock.Read(cmd.Context(), rosterPath, lock.ObjectKey{TargetID: args[0], Kind: "node", ID: client.Node()})
+		if err != nil {
+			return fmt.Errorf("acquire read lock: %w", err)
+		}
+		defer func() { _ = unlock() }()
 
 		node, err := client.GetNode(cmd.Context(), client.Node())
 		if err != nil {
