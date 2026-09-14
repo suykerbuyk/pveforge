@@ -31,6 +31,33 @@ type NVMeDrive struct {
 	Format string
 }
 
+// Per-field allowed-character sets for Validate, extracted as named
+// constants (rather than left as inline string literals) so
+// internal/discover's hand-authored NVMeDriveSchema can derive its
+// per-field `pattern` regexes FROM these same values instead of
+// restating them independently — per
+// pveforge-discoverability-schema's recorded decision, this is the one
+// mechanism keeping the hand-authored schema in sync with this file's
+// own validation logic as it changes, without building a general
+// reflection/struct-tag system for a single resolver. Each is the
+// "extra" (beyond ASCII letters/digits) isSafeToken accepts for that
+// field; see isSafeToken and Validate's own doc comment for why each
+// field's set is what it is.
+const (
+	// NVMeSerialAllowedExtra: a serial number is a short opaque
+	// identifier, no path/URI structure — dash and underscore cover
+	// realistic naming conventions without opening up anything QEMU's
+	// comma-delimited option syntax would treat specially.
+	NVMeSerialAllowedExtra = "-_"
+	// NVMeBackingAllowedExtra: a PVE volid ("local-lvm:vm-100-disk-1")
+	// or a raw host path needs '.', '/', and ':' in addition to
+	// dash/underscore.
+	NVMeBackingAllowedExtra = "-_./:"
+	// NVMeFormatAllowedExtra: QEMU format values ("raw", "qcow2", ...)
+	// are plain alphanumeric; no extra characters are needed or allowed.
+	NVMeFormatAllowedExtra = ""
+)
+
 // Validate reports whether n is well-formed: Serial and Backing are
 // required and non-empty, and every set field is restricted to a safe
 // character set — none of them may contain ',' or other characters that
@@ -39,13 +66,13 @@ type NVMeDrive struct {
 // defense-in-depth discipline as sshexec's field-name/shell-quoting
 // checks elsewhere in this project).
 func (n NVMeDrive) Validate() error {
-	if !isSafeToken(n.Serial, "-_") {
+	if !isSafeToken(n.Serial, NVMeSerialAllowedExtra) {
 		return fmt.Errorf("nvme drive: serial %q is empty or contains unsafe characters", n.Serial)
 	}
-	if !isSafeToken(n.Backing, "-_./:") {
+	if !isSafeToken(n.Backing, NVMeBackingAllowedExtra) {
 		return fmt.Errorf("nvme drive: backing %q is empty or contains unsafe characters", n.Backing)
 	}
-	if n.Format != "" && !isSafeToken(n.Format, "") {
+	if n.Format != "" && !isSafeToken(n.Format, NVMeFormatAllowedExtra) {
 		return fmt.Errorf("nvme drive: format %q contains unsafe characters", n.Format)
 	}
 	return nil
