@@ -149,3 +149,32 @@ func TestNewClient_InsecureTLSDoesNotErrorOnConstruction(t *testing.T) {
 		t.Fatal("expected a non-nil client")
 	}
 }
+
+// TestNewClient_InsecureTLS_PreservesProxyFromEnvironment guards against
+// the defect where the InsecureTLS transport was built from a bare
+// &http.Transport{} literal (nil Proxy), silently dropping
+// HTTP_PROXY/HTTPS_PROXY/NO_PROXY support for the raw-HTTP write path
+// (vmconfig.go) specifically, unlike go-proxmox's own transport which
+// clones http.DefaultTransport (Proxy: http.ProxyFromEnvironment) before
+// flipping InsecureSkipVerify.
+func TestNewClient_InsecureTLS_PreservesProxyFromEnvironment(t *testing.T) {
+	c, err := NewClient(ClientConfig{
+		Host:        "qa-pve-01.example.com",
+		InsecureTLS: true,
+		TokenID:     "root@pam!pveforge",
+		TokenSecret: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected httpClient.Transport to be *http.Transport, got %T", c.httpClient.Transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("expected the InsecureTLS transport to preserve a non-nil Proxy (http.ProxyFromEnvironment), got nil")
+	}
+	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("expected InsecureSkipVerify to still be set on the cloned transport")
+	}
+}

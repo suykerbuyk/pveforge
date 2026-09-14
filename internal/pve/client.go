@@ -9,7 +9,9 @@ package pve
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"time"
 
 	proxmox "github.com/luthermonson/go-proxmox"
@@ -42,8 +44,17 @@ type ClientConfig struct {
 
 // Client is a token-authenticated Proxmox API client, narrowed to the
 // small surface pveforge currently needs.
+//
+// It holds two parallel things on purpose: pc (go-proxmox) for reads and
+// anything else that library covers well, and baseURL/authHeader/httpClient
+// for the raw-HTTP write path in vmconfig.go — see that file's doc comment
+// for why the write path deliberately does NOT go through go-proxmox.
 type Client struct {
 	pc *proxmox.Client
+
+	baseURL    string
+	authHeader string // "PVEAPIToken=<tokenid>=<secret>"
+	httpClient *http.Client
 }
 
 // NewClient builds a Client for cfg.
@@ -77,7 +88,29 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		opts = append(opts, proxmox.WithInsecureSkipVerify())
 	}
 
-	return &Client{pc: proxmox.NewClient(baseURL, opts...)}, nil
+	httpClient := &http.Client{Timeout: timeout}
+	if cfg.InsecureTLS {
+		// Clone http.DefaultTransport rather than starting from a bare
+		// &http.Transport{} literal: DefaultTransport carries
+		// Proxy: http.ProxyFromEnvironment (HTTP_PROXY/HTTPS_PROXY/
+		// NO_PROXY support) among other sane defaults, matching
+		// go-proxmox's own WithInsecureSkipVerify/ensureTransport
+		// approach. A bare literal has a nil Proxy, which would silently
+		// drop proxy support for this raw-HTTP write path (vmconfig.go)
+		// specifically — while reads through go-proxmox (ListNodes etc.)
+		// kept working via the proxy, since only go-proxmox's own
+		// transport was ever affected.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit opt-in via cfg.InsecureTLS, mirrors go-proxmox's own WithInsecureSkipVerify
+		httpClient.Transport = transport
+	}
+
+	return &Client{
+		pc:         proxmox.NewClient(baseURL, opts...),
+		baseURL:    baseURL,
+		authHeader: fmt.Sprintf("PVEAPIToken=%s=%s", cfg.TokenID, cfg.TokenSecret),
+		httpClient: httpClient,
+	}, nil
 }
 
 // ErrNotAuthorized is returned (wrapped) when PVE rejects a request as
