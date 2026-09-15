@@ -123,6 +123,14 @@ func (c *RoutedClient) GetNetworkInterfaces(ctx context.Context, node string, if
 	return c.rest.GetNetworkInterfaces(ctx, node, ifaceType...)
 }
 
+// NextVMID resolves a vmid to use for a new VM/CT — see Client.NextVMID's
+// own doc comment. A thin pass-through like the typed getters above, with
+// no node parameter: vmid allocation is cluster-wide, not scoped to this
+// RoutedClient's target node.
+func (c *RoutedClient) NextVMID(ctx context.Context, pin int, exclude ...int) (int, error) {
+	return c.rest.NextVMID(ctx, pin, exclude...)
+}
+
 // WaitForTask polls a PVE task (identified by the UPID a mutating call
 // returned) to completion — see Client.WaitForTask's own doc comment. A
 // thin pass-through like the typed getters above; node is kept as an
