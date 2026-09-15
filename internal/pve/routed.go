@@ -140,6 +140,19 @@ func (c *RoutedClient) WaitForTask(ctx context.Context, node, upid string) error
 	return c.rest.WaitForTask(ctx, node, upid)
 }
 
+// CreateVM creates a new VM with the given vmid on this target's node —
+// see Client.CreateVM's own doc comment. A thin pass-through like the
+// typed getters above, with no node parameter (RoutedClient already knows
+// its own target node, same as NextVMID's reasoning for omitting one —
+// though here it's because there's only ever one node to create on, not
+// because the operation is cluster-wide). VM creation can never hit a
+// root-only field the way an existing VM's config write can (there is no
+// prior config to compare against), so there is nothing for RoutedClient
+// to route: this always goes over REST.
+func (c *RoutedClient) CreateVM(ctx context.Context, vmid int, params url.Values) (string, error) {
+	return c.rest.CreateVM(ctx, c.target.Node, vmid, params)
+}
+
 // APIDocTree fetches this target's PVE host's own static API-doc schema
 // tree — see Client.APIDocTree's own doc comment. A thin pass-through
 // like the typed getters above: schema discovery can never hit a
