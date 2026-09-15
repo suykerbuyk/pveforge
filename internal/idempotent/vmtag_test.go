@@ -36,19 +36,23 @@ func TestVMTagEnsure_Read_PopulatesTagsAndDigest(t *testing.T) {
 	}
 }
 
+// TestVMTagEnsure_Read_NilVirtualMachineConfig proves a VM with no
+// VirtualMachineConfig (e.g. it doesn't exist) is surfaced as an error
+// rather than silently treated as digest="" — the latter would disable
+// SetVMConfigFieldCAS's compare-and-swap guard entirely (pveforge-nil-
+// vmconfig-digest-gap).
 func TestVMTagEnsure_Read_NilVirtualMachineConfig(t *testing.T) {
 	client := &fakeClient{node: "qa-pve-01", getVMResults: []*proxmox.VirtualMachine{{}}}
 	op := &VMTagEnsure{Client: client, VMID: 100, Tag: "canary"}
 
-	current, err := op.Read(context.Background())
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if current != "" {
-		t.Errorf("Read returned %q, want empty string", current)
+	if _, err := op.Read(context.Background()); err == nil {
+		t.Fatal("expected an error when VirtualMachineConfig is nil")
 	}
 	if op.tags != nil {
 		t.Errorf("op.tags = %v, want nil", op.tags)
+	}
+	if op.digest != "" {
+		t.Errorf("op.digest = %q, want empty", op.digest)
 	}
 }
 

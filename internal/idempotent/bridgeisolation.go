@@ -135,11 +135,12 @@ func (op *BridgeIsolationEnsure) Read(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("bridge isolation ensure: read vm %d: %w", op.VMID, err)
 	}
-	var hookscript, digest string
-	if vm.VirtualMachineConfig != nil {
-		hookscript = vm.VirtualMachineConfig.Hookscript
-		digest = vm.VirtualMachineConfig.Digest
+	cfg, err := requireVMConfig(vm, op.VMID, "bridge isolation ensure")
+	if err != nil {
+		return "", err
 	}
+	hookscript := cfg.Hookscript
+	digest := cfg.Digest
 	op.hookscript = hookscript
 	op.digest = digest
 	op.running = vm.Status == "running"

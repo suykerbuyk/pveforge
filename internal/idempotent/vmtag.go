@@ -123,14 +123,13 @@ func (op *VMTagEnsure) Read(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("vm tag ensure: read vm %d: %w", op.VMID, err)
 	}
-	var tagsStr, digest string
-	if vm.VirtualMachineConfig != nil {
-		tagsStr = vm.VirtualMachineConfig.Tags
-		digest = vm.VirtualMachineConfig.Digest
+	cfg, err := requireVMConfig(vm, op.VMID, "vm tag ensure")
+	if err != nil {
+		return "", err
 	}
-	op.tags = splitTags(tagsStr)
-	op.digest = digest
-	return tagsStr, nil
+	op.tags = splitTags(cfg.Tags)
+	op.digest = cfg.Digest
+	return cfg.Tags, nil
 }
 
 // Satisfied reports whether op.Tag is already among current's tags.

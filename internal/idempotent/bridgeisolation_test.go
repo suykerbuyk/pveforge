@@ -113,6 +113,26 @@ func TestBridgeIsolationEnsure_Read_PropagatesGetVMError(t *testing.T) {
 	}
 }
 
+// TestBridgeIsolationEnsure_Read_NilVirtualMachineConfig mirrors
+// VMTagEnsure's own regression test (vmtag_test.go): a VM with no
+// VirtualMachineConfig must surface as an error, not be silently treated
+// as digest="" (which would disable SetVMConfigFieldCAS's compare-and-swap
+// guard entirely — pveforge-nil-vmconfig-digest-gap).
+func TestBridgeIsolationEnsure_Read_NilVirtualMachineConfig(t *testing.T) {
+	client := &fakeBridgeClient{getVMResults: []*proxmox.VirtualMachine{{}}}
+	op := &BridgeIsolationEnsure{Client: client, VMID: 100, NetIndices: []int{0}, StorageID: "local"}
+
+	if _, err := op.Read(context.Background()); err == nil {
+		t.Fatal("expected an error when VirtualMachineConfig is nil")
+	}
+	if op.digest != "" {
+		t.Errorf("op.digest = %q, want empty", op.digest)
+	}
+	if op.hookscript != "" {
+		t.Errorf("op.hookscript = %q, want empty", op.hookscript)
+	}
+}
+
 func TestBridgeIsolationEnsure_Read_PropagatesTapLinkStateError(t *testing.T) {
 	client := &fakeBridgeClient{
 		getVMResults: []*proxmox.VirtualMachine{vmWithHookscript("", "d1", "running")},
