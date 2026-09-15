@@ -91,6 +91,10 @@ func (c *RoutedClient) GetNodes(ctx context.Context) (proxmox.NodeStatuses, erro
 	return c.rest.GetNodes(ctx)
 }
 
+func (c *RoutedClient) FindByTag(ctx context.Context, tag string) (*proxmox.ClusterResource, error) {
+	return c.rest.FindByTag(ctx, tag)
+}
+
 func (c *RoutedClient) GetVM(ctx context.Context, node string, vmid int) (*proxmox.VirtualMachine, error) {
 	return c.rest.GetVM(ctx, node, vmid)
 }

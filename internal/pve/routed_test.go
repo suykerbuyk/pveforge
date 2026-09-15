@@ -515,6 +515,36 @@ func TestRoutedClient_TypedReadForwarding(t *testing.T) {
 	}
 }
 
+// TestRoutedClient_FindByTag_Forwards proves RoutedClient.FindByTag
+// actually forwards to the REST client rather than being a dead/stubbed
+// method.
+func TestRoutedClient_FindByTag_Forwards(t *testing.T) {
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/cluster/resources" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"qemu/100","type":"qemu","vmid":100,"tags":"qng"}]}`))
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	// Built via NewClient (BaseURLOverride), not NewClientForTarget: see
+	// TestRoutedClient_TypedReadForwarding's identical note.
+	rest := testClient(t, restSrv)
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+
+	res, err := rc.FindByTag(context.Background(), "qng")
+	if err != nil {
+		t.Fatalf("FindByTag: %v", err)
+	}
+	if res == nil || res.VMID != 100 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
 // TestRoutedClient_SetVMConfigFieldCAS_NonRootOnlyField_ForwardsToREST
 // proves a non-root-only field's digest reaches the REST layer unchanged
 // and no SSH connection is ever dialed — the same non-root-only shape
