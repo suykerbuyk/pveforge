@@ -79,8 +79,7 @@ func TestFindByTag_TwoMatches(t *testing.T) {
 // "qng-template;other" never matches a lookup for "qng" — only an exact
 // semicolon-delimited element match counts. The fixture's only resource
 // carrying anything resembling "qng" as a substring is that qemu/101
-// resource and the lxc/200 resource (excluded by type below), so a lookup
-// for "qng" must come back as zero matches.
+// resource, so a lookup for "qng" must come back as zero matches.
 func TestFindByTag_ExactElementMatch_NotSubstring(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -96,23 +95,21 @@ func TestFindByTag_ExactElementMatch_NotSubstring(t *testing.T) {
 	}
 }
 
-// TestFindByTag_ExcludesLXC proves an lxc-type resource sharing the exact
-// same tag as a qemu resource is excluded entirely: it must not count
-// toward a match, and its presence must not turn a single qemu match into
-// an ambiguous one.
+// TestFindByTag_ExcludesLXC proves an lxc-type resource carrying the target
+// tag is excluded entirely, even when it's the ONLY resource with that tag:
+// an LXC-only tag match must never falsely resolve to a match.
 func TestFindByTag_ExcludesLXC(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(clusterResourcesFixture))
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"lxc/200","type":"lxc","vmid":200,"tags":"qng"}
+		]}`))
 	})
 	c := testClient(t, srv)
 
-	res, err := c.FindByTag(context.Background(), "qng")
-	if err != nil {
-		t.Fatalf("FindByTag: %v", err)
-	}
-	if res.VMID != 100 {
-		t.Fatalf("expected the qemu resource (vmid 100), got vmid %d", res.VMID)
+	_, err := c.FindByTag(context.Background(), "qng")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound (lxc-only tag match must not resolve), got: %v", err)
 	}
 }
 
