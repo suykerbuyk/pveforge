@@ -33,11 +33,27 @@ type apiObjectKeyPattern struct {
 // locking purposes); the node pattern does not — it's exactly
 // "/nodes/{node}" or "/nodes/{node}/status", matching the table's own
 // documented shape, not a general prefix.
+//
+// The network pattern captures {node}, not {iface}, and matches BOTH the
+// bare collection path (/nodes/{node}/network — the path
+// NetworkBridgeEnsure's own commit/PUT and whole-node-revert/DELETE calls
+// use, with no trailing iface segment at all) and the per-interface path
+// (/nodes/{node}/network/{iface}, plus anything nested further under it,
+// same trailing-segment convention as vm/storage above) — one table entry
+// covers both shapes, since capturing {node} makes the trailing
+// "/{iface}" segment irrelevant to the lock key either way. This mirrors
+// internal/idempotent/networkbridge.go's own NetworkLockKey: PVE's staged
+// network config (/nodes/{node}/network[...]) is a single shared,
+// node-wide staging area, not per-interface, so two concurrent mutations
+// against different interfaces on the SAME node must still serialize
+// against each other — keying by {iface} instead of {node} would let them
+// race. This is a reviewed, load-bearing decision — do not key this
+// pattern by {iface}.
 var apiObjectKeyPatterns = []apiObjectKeyPattern{
 	{kind: "vm", re: regexp.MustCompile(`^/nodes/[^/]+/qemu/(\d+)(?:/.*)?$`)},
 	{kind: "storage", re: regexp.MustCompile(`^/nodes/[^/]+/storage/([^/]+)(?:/.*)?$`)},
 	{kind: "storage", re: regexp.MustCompile(`^/storage/([^/]+)(?:/.*)?$`)},
-	{kind: "network", re: regexp.MustCompile(`^/nodes/[^/]+/network/([^/]+)(?:/.*)?$`)},
+	{kind: "network", re: regexp.MustCompile(`^/nodes/([^/]+)/network(?:/[^/]+)?(?:/.*)?$`)},
 	{kind: "node", re: regexp.MustCompile(`^/nodes/([^/]+)(?:/status)?$`)},
 }
 

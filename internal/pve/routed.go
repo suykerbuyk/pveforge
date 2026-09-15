@@ -26,6 +26,28 @@ import (
 // changes it.
 var sshPort = 22
 
+// SetSSHPortForIntegrationTests overrides the SSH port every RoutedClient
+// in this process dials, restoring the previous value via the returned
+// func (call it, typically via t.Cleanup, once the test is done). This
+// exists ONLY so a genuine full-stack integration test in ANOTHER package
+// (internal/idempotent's own NetworkBridgeEnsure integration test is the
+// one legitimate caller as of this writing — see that test for why it
+// can't live in this package: internal/idempotent's production code
+// already imports internal/pve for other reasons, so a pve-package test
+// file cannot import internal/idempotent back without an import cycle)
+// can point a real, unfaked *RoutedClient's SSH dial at an in-process fake
+// SSH server instead of the real port 22 — the same thing this package's
+// own tests already do internally via the unexported sshPort var and
+// routed_test.go's withFakeSSHPort, just exposed across the package
+// boundary. Production code must never call this. Not safe for two test
+// packages to use concurrently (it mutates process-wide state with no
+// locking, matching sshPort's own existing lack of synchronization).
+func SetSSHPortForIntegrationTests(port int) (restore func()) {
+	orig := sshPort
+	sshPort = port
+	return func() { sshPort = orig }
+}
+
 // RoutedClient is pveforge's single entry point for mutating one target's
 // VM config: callers call SetVMConfigField and never need to know or care
 // whether a given field went over the REST API or the standing SSH vector
@@ -344,6 +366,21 @@ func (c *RoutedClient) TapLinkState(ctx context.Context, tap string) (sshexec.Ta
 	err := c.withSSH(ctx, func(ssh *sshexec.Client) error {
 		var innerErr error
 		state, innerErr = ssh.TapLinkState(ctx, tap)
+		return innerErr
+	})
+	return state, err
+}
+
+// LinkState reports one network interface's live link state (see
+// sshexec.Client.LinkState) — a bridge-level sibling to TapLinkState, used
+// for questions about a bridge (or other top-level interface) itself
+// rather than a tap's membership on one. Routed over SSH since the PVE
+// REST API has no equivalent live-link-state query.
+func (c *RoutedClient) LinkState(ctx context.Context, iface string) (sshexec.LinkState, error) {
+	var state sshexec.LinkState
+	err := c.withSSH(ctx, func(ssh *sshexec.Client) error {
+		var innerErr error
+		state, innerErr = ssh.LinkState(ctx, iface)
 		return innerErr
 	})
 	return state, err

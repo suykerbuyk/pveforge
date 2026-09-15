@@ -62,7 +62,12 @@ func TestNewNetworkGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
-	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "vmbr0"}
+	// The lock is keyed per-NODE ("qa-pve-01", this test's target's own
+	// resolved node — see newTestRosterWithTLSTarget's target/node
+	// arguments above), not per-iface: PVE's staged network config is
+	// node-wide, matching NetworkBridgeEnsure's own NetworkLockKey (see
+	// internal/idempotent/networkbridge.go).
+	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "qa-pve-01"}
 	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
 	if err != nil {
 		t.Fatalf("acquire mutation: %v", err)
@@ -103,5 +108,121 @@ func TestNewNetworkGetCmd_RequiresTwoArgs(t *testing.T) {
 	cmd.SetArgs([]string{"qa-pve-01"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected an error for a missing iface argument")
+	}
+}
+
+// --- network bridge create/destroy: CLI wiring and argument/flag
+// validation. The full mutation round trip (real REST+SSH stage/guard/
+// commit/verify sequence) is exercised end to end against a real
+// *pve.RoutedClient by internal/idempotent's own
+// TestNetworkBridgeEnsure_Apply_Create_FullStack/..._Destroy_FullStack —
+// deliberately not duplicated here; these tests cover only what's unique
+// to this layer: flag/arg wiring and the CLI-specific duplicate-field
+// guard, none of which need a live roster or server.
+
+func TestWantedFieldsFromKVArgs_DuplicateFieldRejected(t *testing.T) {
+	_, err := wantedFieldsFromKVArgs([]string{"bridge_ports=eth0", "bridge_ports=eth1"})
+	if err == nil || !strings.Contains(err.Error(), "duplicate field") {
+		t.Fatalf("expected a duplicate-field error, got %v", err)
+	}
+}
+
+func TestWantedFieldsFromKVArgs_Success(t *testing.T) {
+	wanted, err := wantedFieldsFromKVArgs([]string{"type=bridge", "bridge_ports=eth0"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wanted["type"] != "bridge" || wanted["bridge_ports"] != "eth0" {
+		t.Fatalf("unexpected wanted map: %+v", wanted)
+	}
+}
+
+func TestNewNetworkBridgeCreateCmd_RequiresManagementBridgeFlag(t *testing.T) {
+	cmd := newNetworkBridgeCreateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"qa-pve-01", "vmbr1", "type=bridge"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "management-bridge") {
+		t.Fatalf("expected an error naming the required --management-bridge flag, got %v", err)
+	}
+}
+
+func TestNewNetworkBridgeCreateCmd_RequiresAtLeastTwoArgs(t *testing.T) {
+	cmd := newNetworkBridgeCreateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--management-bridge", "vmbr0", "qa-pve-01"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for a missing iface argument")
+	}
+}
+
+// TestNewNetworkBridgeCreateCmd_DuplicateFieldRejectedBeforeResolvingClient
+// proves the duplicate-field check runs before any roster/target
+// resolution — no --roster flag is even given, so resolveRoutedClient
+// would fail with a different error if the duplicate check didn't
+// short-circuit first.
+func TestNewNetworkBridgeCreateCmd_DuplicateFieldRejectedBeforeResolvingClient(t *testing.T) {
+	cmd := newNetworkBridgeCreateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--management-bridge", "vmbr0", "qa-pve-01", "vmbr1", "type=bridge", "type=other"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "duplicate field") {
+		t.Fatalf("expected a duplicate-field error, got %v", err)
+	}
+}
+
+func TestNewNetworkBridgeDestroyCmd_RequiresManagementBridgeFlag(t *testing.T) {
+	cmd := newNetworkBridgeDestroyCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"qa-pve-01", "vmbr1"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "management-bridge") {
+		t.Fatalf("expected an error naming the required --management-bridge flag, got %v", err)
+	}
+}
+
+func TestNewNetworkBridgeDestroyCmd_RequiresExactlyTwoArgs(t *testing.T) {
+	cmd := newNetworkBridgeDestroyCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--management-bridge", "vmbr0", "qa-pve-01", "vmbr1", "extra-arg"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for an unexpected extra positional argument (destroy takes no field=value args)")
+	}
+}
+
+// TestNewNetworkBridgeCreateCmd_NoForceFlag and its destroy counterpart
+// prove the deliberate design property that neither command wires a
+// --force flag at all — see NetworkBridgeEnsure's own doc comment (step 5)
+// on why no bypass is offered for the guard check.
+func TestNewNetworkBridgeCreateCmd_NoForceFlag(t *testing.T) {
+	cmd := newNetworkBridgeCreateCmd()
+	if f := cmd.Flags().Lookup("force"); f != nil {
+		t.Fatalf("expected no --force flag on network bridge create, found: %+v", f)
+	}
+}
+
+func TestNewNetworkBridgeDestroyCmd_NoForceFlag(t *testing.T) {
+	cmd := newNetworkBridgeDestroyCmd()
+	if f := cmd.Flags().Lookup("force"); f != nil {
+		t.Fatalf("expected no --force flag on network bridge destroy, found: %+v", f)
+	}
+}
+
+func TestNewNetworkBridgeCreateCmd_MutationTierIsMutating(t *testing.T) {
+	cmd := newNetworkBridgeCreateCmd()
+	if got := cmd.Annotations[mutationAnnotationKey]; got != mutationMutating {
+		t.Errorf("mutation tier = %q, want %q", got, mutationMutating)
+	}
+}
+
+func TestNewNetworkBridgeDestroyCmd_MutationTierIsDestructive(t *testing.T) {
+	cmd := newNetworkBridgeDestroyCmd()
+	if got := cmd.Annotations[mutationAnnotationKey]; got != mutationDestructive {
+		t.Errorf("mutation tier = %q, want %q", got, mutationDestructive)
 	}
 }

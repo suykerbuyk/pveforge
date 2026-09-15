@@ -69,14 +69,29 @@ func TestAPIObjectKey_StorageBothShapes(t *testing.T) {
 	}
 }
 
+// TestAPIObjectKey_Network proves the network pattern keys by {node}, not
+// {iface} — matching NetworkBridgeEnsure's own NetworkLockKey (PVE's
+// staged network config is node-wide, not per-interface — see
+// internal/idempotent/networkbridge.go) — for both the per-interface path
+// AND the bare collection path (/nodes/{node}/network, with no trailing
+// iface segment at all: the exact path NetworkBridgeEnsure's own
+// commit/PUT and whole-node-revert/DELETE calls use, which the OLD pattern
+// here failed to match at all).
 func TestAPIObjectKey_Network(t *testing.T) {
-	key, ok := apiObjectKey("qa-pve-01", "/nodes/qa-pve-01/network/vmbr0")
-	if !ok {
-		t.Fatal("expected a match")
+	cases := []string{
+		"/nodes/qa-pve-01/network/vmbr0",
+		"/nodes/qa-pve-01/network",
 	}
-	want := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "vmbr0"}
-	if key != want {
-		t.Errorf("key = %+v, want %+v", key, want)
+	for _, path := range cases {
+		key, ok := apiObjectKey("qa-pve-01", path)
+		if !ok {
+			t.Errorf("path %q: expected a match", path)
+			continue
+		}
+		want := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "qa-pve-01"}
+		if key != want {
+			t.Errorf("path %q: key = %+v, want %+v", path, key, want)
+		}
 	}
 }
 

@@ -23,3 +23,11 @@ var _ BridgeIsolationClient = (*pve.RoutedClient)(nil)
 // BridgeIsolationClient above, for the same "narrow interface per Op"
 // reason vmcreate.go's own doc comment gives.
 var _ VMCreateClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies
+// NetworkBridgeClient (networkbridge.go) — RawRequest and WaitForTask
+// already exist as pass-throughs, and LinkState was added to RoutedClient
+// in this same task's Phase 1 (internal/sshexec/linkstate.go's own
+// pass-through) specifically so this would hold with no further changes to
+// routed.go.
+var _ NetworkBridgeClient = (*pve.RoutedClient)(nil)

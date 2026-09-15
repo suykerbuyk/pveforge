@@ -364,6 +364,79 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_LeadingZeroVMID(t *testing.T) {
 	}
 }
 
+// TestNewAPICmd_SharesLockKeyWithTypedCommand_Network is the network
+// analog of TestNewAPICmd_SharesLockKeyWithTypedCommand above: a lock
+// taken directly with the node-keyed lock.ObjectKey{Kind: "network", ID:
+// <node>} — the SAME key NetworkBridgeEnsure's own NetworkLockKey derives,
+// and that `network bridge create|destroy` will use once wired into the
+// CLI — must block BOTH a typed `network get` against some interface on
+// that node AND a raw `api put` against the BARE network collection path
+// (/nodes/{node}/network, with no trailing iface segment). The bare-path
+// case is the one that mattered most here: before this fix, apiObjectKey's
+// network pattern required a trailing "/{iface}" segment and so never
+// matched the collection path at all, meaning a raw `pveforge api put
+// /nodes/{node}/network` — the exact call NetworkBridgeEnsure's own commit
+// step makes — took NO lock whatsoever.
+func TestNewAPICmd_SharesLockKeyWithTypedCommand_Network(t *testing.T) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24"}}`))
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	// The node-keyed lock `network bridge create|destroy` will use once
+	// wired into the CLI, via NetworkBridgeEnsure's own NetworkLockKey.
+	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "qa-pve-01"}
+	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
+	if err != nil {
+		t.Fatalf("acquire mutation: %v", err)
+	}
+
+	netGet := newNetworkGetCmd()
+	netGet.SetOut(&bytes.Buffer{})
+	netGet.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "vmbr0"})
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel1()
+	if err := netGet.ExecuteContext(ctx1); err == nil {
+		t.Fatal("expected the typed `network get` to be blocked by the node-keyed mutation lock")
+	}
+
+	apiPut := newAPIVerbCmd(http.MethodPut, "put")
+	apiPut.SetOut(&bytes.Buffer{})
+	// The bare collection path — no trailing iface segment — exactly what
+	// NetworkBridgeEnsure's own commit/PUT and whole-node-revert/DELETE
+	// calls use.
+	apiPut.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/network", "qa-pve-01"})
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	if err := apiPut.ExecuteContext(ctx2); err == nil {
+		t.Fatal("expected `api put` on the bare network collection path to be blocked by the same node-keyed lock")
+	}
+
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("expected neither call to reach the PVE API while the mutation held the lock, got %d hits", got)
+	}
+
+	if err := unlockMutation(); err != nil {
+		t.Fatalf("release mutation: %v", err)
+	}
+
+	apiPut2 := newAPIVerbCmd(http.MethodPut, "put")
+	apiPut2.SetOut(&bytes.Buffer{})
+	apiPut2.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/network", "qa-pve-01"})
+	if err := apiPut2.Execute(); err != nil {
+		t.Fatalf("Execute after mutation released: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected exactly one successful call after the mutation released, got %d hits", got)
+	}
+}
+
 // TestNewAPICmd_APIMutationBlocksTypedRead proves the direction that
 // actually matters most for the feature's safety claim: an `api post`
 // mutation held via lock.Mutation must block the EXISTING typed `vm get`
