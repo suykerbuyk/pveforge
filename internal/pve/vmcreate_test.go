@@ -71,6 +71,29 @@ func TestCreateVM_NilParamsDoesNotPanic(t *testing.T) {
 	}
 }
 
+// TestCreateVM_DoesNotMutateCallerParams proves CreateVM clones params
+// before stamping "vmid" onto it — the caller's own map (e.g.
+// VMCreate.Apply's op.Params) must come back exactly as it went in, with
+// no "vmid" key silently added to it.
+func TestCreateVM_DoesNotMutateCallerParams(t *testing.T) {
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":"UPID:qa-pve-01:1:2:3:qmcreate:100:root@pam:"}`))
+	})
+	c := testClient(t, srv)
+
+	params := url.Values{"cores": {"4"}}
+	if _, err := c.CreateVM(context.Background(), "qa-pve-01", 100, params); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	if _, ok := params["vmid"]; ok {
+		t.Errorf("caller's params was mutated: got vmid key %v, want untouched", params["vmid"])
+	}
+	if len(params) != 1 {
+		t.Errorf("caller's params gained keys: %v, want only cores", params)
+	}
+}
+
 func TestCreateVM_RequiresNode(t *testing.T) {
 	c := testClient(t, newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("should not reach the network when node is empty")

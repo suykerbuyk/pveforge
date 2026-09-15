@@ -38,12 +38,17 @@ func (c *Client) CreateVM(ctx context.Context, node string, vmid int, params url
 		return "", fmt.Errorf("create vm %d: node is required", vmid)
 	}
 
-	if params == nil {
-		params = url.Values{}
+	// Cloned, never mutated in place: params is the caller's own map (e.g.
+	// VMCreate.Apply passes op.Params directly), and stamping "vmid" onto
+	// it destructively would leave the caller looking at a params map with
+	// a key it never put there itself the moment this call returns.
+	form := params.Clone()
+	if form == nil {
+		form = url.Values{}
 	}
-	params.Set("vmid", strconv.Itoa(vmid))
+	form.Set("vmid", strconv.Itoa(vmid))
 
-	raw, err := c.RawRequest(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu", url.PathEscape(node)), params)
+	raw, err := c.RawRequest(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu", url.PathEscape(node)), form)
 	if err != nil {
 		return "", fmt.Errorf("create vm %d: %w", vmid, err)
 	}

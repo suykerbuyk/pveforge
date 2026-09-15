@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -542,6 +543,46 @@ func TestRoutedClient_FindByTag_Forwards(t *testing.T) {
 	}
 	if res == nil || res.VMID != 100 {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+// TestRoutedClient_CreateVM_Forwards proves RoutedClient.CreateVM actually
+// forwards to the REST client against this target's own node, rather than
+// being a dead/stubbed pass-through.
+func TestRoutedClient_CreateVM_Forwards(t *testing.T) {
+	var gotPath string
+	var gotForm url.Values
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		gotForm = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":"UPID:qa-pve-01:1:2:3:qmcreate:100:root@pam:"}`))
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	// Built via NewClient (BaseURLOverride), not NewClientForTarget: see
+	// TestRoutedClient_TypedReadForwarding's identical note.
+	rest := testClient(t, restSrv)
+
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+
+	upid, err := rc.CreateVM(context.Background(), 100, url.Values{"cores": {"2"}})
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	if gotPath != "/nodes/qa-pve-01/qemu" {
+		t.Errorf("path = %q, want /nodes/qa-pve-01/qemu", gotPath)
+	}
+	if gotForm.Get("vmid") != "100" || gotForm.Get("cores") != "2" {
+		t.Errorf("form vmid/cores = %q/%q, want 100/2", gotForm.Get("vmid"), gotForm.Get("cores"))
+	}
+	const wantUPID = "UPID:qa-pve-01:1:2:3:qmcreate:100:root@pam:"
+	if upid != wantUPID {
+		t.Errorf("upid = %q, want %q", upid, wantUPID)
 	}
 }
 

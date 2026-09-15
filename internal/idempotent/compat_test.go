@@ -17,3 +17,9 @@ var _ Client = (*pve.RoutedClient)(nil)
 // interface from Client above (see bridgeisolation.go's own doc comment
 // on why it isn't just Client extended).
 var _ BridgeIsolationClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies VMCreateClient
+// (vmcreate.go) — a third, separate interface from Client and
+// BridgeIsolationClient above, for the same "narrow interface per Op"
+// reason vmcreate.go's own doc comment gives.
+var _ VMCreateClient = (*pve.RoutedClient)(nil)
