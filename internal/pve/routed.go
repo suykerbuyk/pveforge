@@ -119,6 +119,15 @@ func (c *RoutedClient) GetNetworkInterfaces(ctx context.Context, node string, if
 	return c.rest.GetNetworkInterfaces(ctx, node, ifaceType...)
 }
 
+// WaitForTask polls a PVE task (identified by the UPID a mutating call
+// returned) to completion — see Client.WaitForTask's own doc comment. A
+// thin pass-through like the typed getters above; node is kept as an
+// explicit parameter, matching GetVM and the other typed getters in this
+// section, even though RoutedClient already knows its own target node.
+func (c *RoutedClient) WaitForTask(ctx context.Context, node, upid string) error {
+	return c.rest.WaitForTask(ctx, node, upid)
+}
+
 // APIDocTree fetches this target's PVE host's own static API-doc schema
 // tree — see Client.APIDocTree's own doc comment. A thin pass-through
 // like the typed getters above: schema discovery can never hit a
