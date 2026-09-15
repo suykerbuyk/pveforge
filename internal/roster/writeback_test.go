@@ -907,6 +907,62 @@ node = "qa-pve-01"
 	}
 }
 
+// TestUpdateTargetFields_BlankLineBeforeExistingSubtablePreserved proves the
+// findTargetBlocks ownEnd fix: appending a new top-level field to a target
+// that already has a subtable must not strand the pre-existing blank line
+// before the new field — the new field belongs adjacent to the target's
+// other own fields, and the blank line stays where it was, immediately
+// before the subtable header.
+func TestUpdateTargetFields_BlankLineBeforeExistingSubtablePreserved(t *testing.T) {
+	tokenArmored := sampleArmored(t, "token-secret", "test-passphrase")
+	fixture := `[[targets]]
+id   = "qa-pve-01"
+host = "qa-pve-01.example.com"
+node = "qa-pve-01"
+
+  [targets.token]
+  id         = "pveforge@pve!automation"
+  secret_enc = '''
+` + tokenArmored + `'''
+`
+	path := writeTempRoster(t, fixture)
+
+	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
+		Host:        "qa-pve-01.example.com",
+		Node:        "qa-pve-01",
+		InsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTargetFields: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	gotStr := string(got)
+
+	// No blank line between the existing own fields and the newly appended
+	// one, and exactly one blank line between the new field and the
+	// subtable header that follows it.
+	const want = "node = \"qa-pve-01\"\ninsecure_tls = true\n\n  [targets.token]\n"
+	if !strings.Contains(gotStr, want) {
+		t.Fatalf("expected %q in result, got:\n%s", want, gotStr)
+	}
+
+	r, err := Decode(got)
+	if err != nil {
+		t.Fatalf("Decode result: %v\n---\n%s", err, got)
+	}
+	tg := r.Find("qa-pve-01")
+	if tg == nil || !tg.InsecureTLS {
+		t.Fatalf("insecure_tls not updated: %+v", tg)
+	}
+	if tg.Token == nil || tg.Token.ID != "pveforge@pve!automation" || tg.Token.SecretEnc != tokenArmored {
+		t.Fatalf("token auth changed while updating top-level fields: %+v", tg.Token)
+	}
+}
+
 // TestUpdateTargetFields_TrailingNewlineGuard proves the append-branch's
 // own "insert a leading newline if the insertion point isn't already at a
 // clean line boundary" guard — mirroring applySubtableSplice's identical

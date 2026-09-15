@@ -298,29 +298,14 @@ func UpdateTargetFields(path, targetID string, meta TargetMeta) error {
 // end, and never needs the "subtable doesn't exist yet, append a whole
 // header" branch applySubtableSplice has, since a target's top-level
 // field span always exists once the target itself does) — but both reuse
-// the exact same field-lookup (findSubtableFields, which only needs a
-// [start,end) span, not literally a subtable) and edit/applyEdits
-// machinery beneath that split, per this task's own instruction not to
-// invent a parallel raw-rewrite mechanism.
+// the exact same target-lookup (findUniqueTargetBlock), field-lookup
+// (findSubtableFields, which only needs a [start,end) span, not literally
+// a subtable) and edit/applyEdits machinery beneath that split, per this
+// task's own instruction not to invent a parallel raw-rewrite mechanism.
 func applyTargetFieldsSplice(data []byte, targetID string, fields []field) ([]byte, error) {
-	blocks, err := findTargetBlocks(data)
+	match, err := findUniqueTargetBlock(data, targetID)
 	if err != nil {
 		return nil, err
-	}
-
-	var match *targetBlock
-	matches := 0
-	for i := range blocks {
-		if blocks[i].id == targetID {
-			matches++
-			match = &blocks[i]
-		}
-	}
-	if matches == 0 {
-		return nil, fmt.Errorf("no target with id %q found in roster", targetID)
-	}
-	if matches > 1 {
-		return nil, fmt.Errorf("ambiguous: %d targets with id %q found in roster", matches, targetID)
 	}
 
 	existing := findSubtableFields(data, subtableSpan{start: match.start, end: match.ownEnd})
@@ -605,24 +590,9 @@ type edit struct {
 }
 
 func applySubtableSplice(data []byte, targetID, subKey string, fields []field) ([]byte, error) {
-	blocks, err := findTargetBlocks(data)
+	match, err := findUniqueTargetBlock(data, targetID)
 	if err != nil {
 		return nil, err
-	}
-
-	var match *targetBlock
-	matches := 0
-	for i := range blocks {
-		if blocks[i].id == targetID {
-			matches++
-			match = &blocks[i]
-		}
-	}
-	if matches == 0 {
-		return nil, fmt.Errorf("no target with id %q found in roster", targetID)
-	}
-	if matches > 1 {
-		return nil, fmt.Errorf("ambiguous: %d targets with id %q found in roster", matches, targetID)
 	}
 
 	sub := findSubtable(data, *match, subKey)
@@ -726,7 +696,7 @@ func findTargetBlocks(data []byte) ([]targetBlock, error) {
 			if cur != nil {
 				if len(e.path) > 1 && e.path[0] == "targets" {
 					if cur.ownEnd == 0 {
-						cur.ownEnd = e.lineStart
+						cur.ownEnd = backOffLeadingBlankOrComments(data, e.lineStart)
 					}
 				} else {
 					closeCurrent(backOffLeadingBlankOrComments(data, e.lineStart))
@@ -748,6 +718,35 @@ func findTargetBlocks(data []byte) ([]targetBlock, error) {
 		}
 	}
 	return blocks, nil
+}
+
+// findUniqueTargetBlock locates the single target block with id targetID.
+// Shared by applyTargetFieldsSplice and applySubtableSplice: the "ambiguous"
+// case is live for applySubtableSplice's callers (WriteTokenAuth/WriteSSHAuth
+// splice raw bytes without ever calling Decode's own validate()), even though
+// it's unreachable via applyTargetFieldsSplice's only caller, UpdateTargetFields
+// (which does call Decode first).
+func findUniqueTargetBlock(data []byte, targetID string) (*targetBlock, error) {
+	blocks, err := findTargetBlocks(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var match *targetBlock
+	matches := 0
+	for i := range blocks {
+		if blocks[i].id == targetID {
+			matches++
+			match = &blocks[i]
+		}
+	}
+	if matches == 0 {
+		return nil, fmt.Errorf("no target with id %q found in roster", targetID)
+	}
+	if matches > 1 {
+		return nil, fmt.Errorf("ambiguous: %d targets with id %q found in roster", matches, targetID)
+	}
+	return match, nil
 }
 
 // subtableSpan is the byte span of one [targets.<key>] table: [start, end).
