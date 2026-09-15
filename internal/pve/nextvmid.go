@@ -3,6 +3,7 @@ package pve
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -48,13 +49,22 @@ func (c *Client) NextVMID(ctx context.Context, pin int, exclude ...int) (int, er
 		return pin, nil
 	}
 
-	cluster, err := c.pc.Cluster(ctx)
-	if err != nil {
+	// Deliberately calls c.pc.Get directly rather than go-proxmox's own
+	// Cluster(ctx)+Cluster.NextID(ctx) — Client.Cluster(ctx) unconditionally
+	// issues an extra GET /cluster/status probe first (swallowed only on an
+	// auth failure) before it will even return a *Cluster to call NextID
+	// on, which would both cost a wasted round-trip on every non-pinned
+	// call and make NextVMID fail on a /cluster/status-specific error even
+	// when /cluster/nextid itself is fine. This mirrors Cluster.NextID's
+	// own implementation exactly (a bare string response, parsed with
+	// strconv.Atoi) and vmidFree's own direct-Get pattern below.
+	var raw string
+	if err := c.pc.Get(ctx, "/cluster/nextid", &raw); err != nil {
 		return 0, fmt.Errorf("next vmid: %w", err)
 	}
-	candidate, err := cluster.NextID(ctx)
+	candidate, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, fmt.Errorf("next vmid: %w", err)
+		return 0, fmt.Errorf("next vmid: parse nextid response %q: %w", raw, err)
 	}
 	if !excluded[candidate] {
 		// The raw, untouched NextID() value is trusted free on PVE's own

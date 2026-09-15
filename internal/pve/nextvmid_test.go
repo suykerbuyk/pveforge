@@ -4,18 +4,11 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
-
-// writeClusterStatusOK answers Client.Cluster(ctx)'s incidental
-// GET /cluster/status probe with an empty-but-valid cluster status body —
-// none of these tests care about its contents, only that it doesn't error.
-func writeClusterStatusOK(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"data":[]}`))
-}
 
 func writeNextIDData(w http.ResponseWriter, vmid int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -38,8 +31,6 @@ func writeVMIDTaken(w http.ResponseWriter, vmid int) {
 func TestNextVMID_NoPinNoExclude_PassesThroughNextID(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/cluster/status":
-			writeClusterStatusOK(w)
 		case "/cluster/nextid":
 			if r.URL.Query().Get("vmid") != "" {
 				t.Fatalf("expected NextID's raw candidate to be trusted without a vmidFree check, got query %q", r.URL.RawQuery)
@@ -67,8 +58,6 @@ func TestNextVMID_NoPinNoExclude_PassesThroughNextID(t *testing.T) {
 func TestNextVMID_NoPin_SkipsExcludedCandidatesWithoutNetworkCall(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/cluster/status":
-			writeClusterStatusOK(w)
 		case "/cluster/nextid":
 			vmid := r.URL.Query().Get("vmid")
 			switch vmid {
@@ -101,8 +90,6 @@ func TestNextVMID_NoPin_SkipsExcludedCandidatesWithoutNetworkCall(t *testing.T) 
 func TestNextVMID_NoPin_WalksPastCandidateTakenByPVE(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/cluster/status":
-			writeClusterStatusOK(w)
 		case "/cluster/nextid":
 			switch r.URL.Query().Get("vmid") {
 			case "":
@@ -231,8 +218,6 @@ func TestVMIDFree_UnrelatedError_NotMisclassifiedAsTaken(t *testing.T) {
 func TestRoutedClient_NextVMID_Forwards(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/cluster/status":
-			writeClusterStatusOK(w)
 		case "/cluster/nextid":
 			switch r.URL.Query().Get("vmid") {
 			case "":
@@ -247,10 +232,10 @@ func TestRoutedClient_NextVMID_Forwards(t *testing.T) {
 		}
 	})
 	// Built via NewClient(BaseURLOverride), not NewClientForTarget:
-	// NextVMID goes through c.pc.Cluster/c.pc.Get, which use go-proxmox's
-	// own internal base URL set at construction time — patching
-	// rest.baseURL after the fact (as some other RoutedClient tests do, for
-	// the raw-HTTP write path only) would not reach it. See
+	// NextVMID goes through c.pc.Get, which uses go-proxmox's own internal
+	// base URL set at construction time — patching rest.baseURL after the
+	// fact (as some other RoutedClient tests do, for the raw-HTTP write
+	// path only) would not reach it. See
 	// TestRoutedClient_TypedReadForwarding's identical note.
 	rest := testClient(t, srv)
 	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
@@ -273,5 +258,47 @@ func TestRoutedClient_NextVMID_Forwards(t *testing.T) {
 	}
 	if got != 42 {
 		t.Fatalf("NextVMID (pin) = %d, want 42", got)
+	}
+}
+
+// TestNextVMID_NoPin_WalkForwardCapExhausted covers the walk-forward loop's
+// bounded exit: when every candidate through maxNextVMIDWalkAttempts is
+// reported taken by PVE, NextVMID errors cleanly instead of looping forever,
+// and asserts exactly maxNextVMIDWalkAttempts vmidFree checks were made —
+// no more, no fewer.
+func TestNextVMID_NoPin_WalkForwardCapExhausted(t *testing.T) {
+	var vmidFreeChecks atomic.Int32
+	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/cluster/nextid" {
+			http.NotFound(w, r)
+			return
+		}
+		vmid := r.URL.Query().Get("vmid")
+		if vmid == "" {
+			writeNextIDData(w, 100)
+			return
+		}
+		vmidFreeChecks.Add(1)
+		n, err := strconv.Atoi(vmid)
+		if err != nil {
+			t.Fatalf("unexpected non-numeric vmid query: %q", vmid)
+		}
+		writeVMIDTaken(w, n)
+	})
+	c := testClient(t, srv)
+
+	got, err := c.NextVMID(context.Background(), 0, 100)
+	if err == nil {
+		t.Fatalf("expected an exhaustion error, got vmid %d with no error", got)
+	}
+	wantErr := "next vmid: no free vmid found within 1000 attempts past 100"
+	if err.Error() != wantErr {
+		t.Fatalf("error = %q, want %q", err.Error(), wantErr)
+	}
+	if got != 0 {
+		t.Fatalf("expected a zero vmid alongside the exhaustion error, got %d", got)
+	}
+	if n := vmidFreeChecks.Load(); n != maxNextVMIDWalkAttempts {
+		t.Fatalf("vmidFree checks = %d, want exactly %d", n, maxNextVMIDWalkAttempts)
 	}
 }
