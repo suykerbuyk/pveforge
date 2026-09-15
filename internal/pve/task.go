@@ -54,6 +54,18 @@ func (e *TaskFailedError) Error() string {
 // to get there at all — and since proxmox.Task.Ping calls NewTask again on
 // every single poll, the check has to happen once, up front, here, rather
 // than relying on anything downstream.
+//
+// A related, still-unfixed-upstream risk in the same area: proxmox.Task's
+// UnmarshalJSON copies every field present in a status response onto the
+// Task via reflection, including UPID and Node — a response body that
+// omits those two fields silently zeroes them on the Task, which can then
+// nil-panic inside go-proxmox's own Ping on a later poll (NewTask("", ...)
+// returns nil, and Ping dereferences it). Real PVE always sends both
+// fields, so this hasn't been observed against a live cluster, but it's
+// worth knowing before adding a second caller (e.g. the create/clone/
+// destroy Ops landing with pveforge-vm-lifecycle-ops): it lives inside
+// go-proxmox's own response handling, past anything this function's own
+// pre-check can reach.
 func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 	if node == "" {
 		return fmt.Errorf("wait for task: node is required")
@@ -67,6 +79,11 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 
 	task := proxmox.NewTask(proxmox.UPID(upid), c.pc)
 	if task == nil {
+		// proxmox.NewTask only returns nil for an empty UPID today, which
+		// the check above already excludes — this stays as a defensive
+		// backstop against that behavior ever changing upstream, not dead
+		// code: this same library boundary already proved unreliable once
+		// (the sp[7] off-by-one this function's pre-check guards against).
 		return fmt.Errorf("wait for task: empty upid")
 	}
 	if task.Node != node {
@@ -78,7 +95,7 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 	}
 
 	if !task.IsSuccessful {
-		return fmt.Errorf("wait for task %s: %w", upid, &TaskFailedError{UPID: upid, ExitStatus: task.ExitStatus})
+		return &TaskFailedError{UPID: upid, ExitStatus: task.ExitStatus}
 	}
 	return nil
 }
