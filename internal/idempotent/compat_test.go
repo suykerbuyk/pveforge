@@ -31,3 +31,9 @@ var _ VMCreateClient = (*pve.RoutedClient)(nil)
 // pass-through) specifically so this would hold with no further changes to
 // routed.go.
 var _ NetworkBridgeClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies
+// VMDestroyClient (vmdestroy.go) — a fifth, separate interface from
+// Client, BridgeIsolationClient, VMCreateClient, and NetworkBridgeClient
+// above, for the same "narrow interface per Op" reason.
+var _ VMDestroyClient = (*pve.RoutedClient)(nil)
