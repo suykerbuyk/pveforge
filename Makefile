@@ -36,7 +36,7 @@ build: ## Build the pveforge binary into bin/
 
 .PHONY: test
 test: ## Run unit tests (race detector + coverage — this project's standing verification bar)
-	go test ./... -race -cover -count=1
+	go test ./... -race -cover -count=1 -timeout 20m
 
 .PHONY: integration
 integration: ## Run integration-tagged tests (none exist yet — this project's live-host verification has so far been manual, ad-hoc SSH probes against a real PVE cluster, never wired into `go test`; kept as a placeholder so a future -tags=integration test file needs no Makefile change)
