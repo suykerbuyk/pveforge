@@ -16,3 +16,9 @@
 # roster itself is meant to be tracked once it exists)
 *.local.toml
 .env
+
+# local roster + mutation-serialization lock state, written by running the
+# binary against a real cluster; per-host, never shared
+/pveforge.toml
+/pveforge.toml.lock
+/pveforge.toml.locks/
