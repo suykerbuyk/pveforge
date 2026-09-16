@@ -240,6 +240,29 @@ func TestWaitForTask_MalformedUPIDBoundary(t *testing.T) {
 	}
 }
 
+// TestIsTaskTimeoutError covers pve.IsTaskTimeoutError's own contract
+// directly: true for proxmox.ErrTimeout both bare and %w-wrapped (the
+// shape WaitForTask's own error actually takes), false for nil and for an
+// unrelated error. New exported API surface, tested in isolation from
+// WaitForTask's own timeout test (TestWaitForTask_Timeout above already
+// covers that WaitForTask's error wraps proxmox.ErrTimeout; this test
+// covers the predicate built on top of that fact).
+func TestIsTaskTimeoutError(t *testing.T) {
+	if !IsTaskTimeoutError(proxmox.ErrTimeout) {
+		t.Error("expected true for the bare proxmox.ErrTimeout sentinel")
+	}
+	wrapped := fmt.Errorf("wait for task %s: %w", wellFormedUPID("qa-pve-01"), proxmox.ErrTimeout)
+	if !IsTaskTimeoutError(wrapped) {
+		t.Error("expected true for a %w-wrapped proxmox.ErrTimeout")
+	}
+	if IsTaskTimeoutError(nil) {
+		t.Error("expected false for a nil error")
+	}
+	if IsTaskTimeoutError(errors.New("some unrelated failure")) {
+		t.Error("expected false for an unrelated error")
+	}
+}
+
 // TestWaitForTask_RequiresNodeAndUPID covers the plain empty-input guards.
 func TestWaitForTask_RequiresNodeAndUPID(t *testing.T) {
 	c := testClient(t, newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {

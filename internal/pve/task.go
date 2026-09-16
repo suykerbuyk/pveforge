@@ -99,3 +99,21 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 	}
 	return nil
 }
+
+// IsTaskTimeoutError reports whether err is (or wraps) the timeout
+// WaitForTask returns when a task never leaves the "running" state within
+// defaultTaskWaitTimeout — proxmox.ErrTimeout, propagated unchanged
+// through WaitForTask's own %w wrap. Exposed as a project-level predicate,
+// mirroring IsDigestConflictError's precedent (vmconfig.go) of giving
+// callers pveforge's own API to check against rather than expecting them
+// to import go-proxmox's sentinel directly.
+//
+// A caller whose WaitForTask call is guarding a destructive, non-retryable
+// operation (VMDestroy's hard destroy step is the motivating case — see
+// its own doc comment) should treat a true result as "the task's actual
+// outcome is unknown, do not blindly retry the operation," distinct from
+// every other WaitForTask failure, which is a terminal, safely-retryable
+// (or non-retryable-for-other-reasons) error.
+func IsTaskTimeoutError(err error) bool {
+	return proxmox.IsTimeout(err)
+}

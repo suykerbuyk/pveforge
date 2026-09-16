@@ -175,6 +175,29 @@ func (c *RoutedClient) CreateVM(ctx context.Context, vmid int, params url.Values
 	return c.rest.CreateVM(ctx, c.target.Node, vmid, params)
 }
 
+// StopVM issues a best-effort stop for vmid on this target's node — see
+// Client.StopVM's own doc comment. A thin pass-through like the typed
+// getters above; VM stop can never hit a root-only field, so there is
+// nothing for RoutedClient to route.
+func (c *RoutedClient) StopVM(ctx context.Context, vmid int) (string, error) {
+	return c.rest.StopVM(ctx, c.target.Node, vmid)
+}
+
+// DestroyVM issues a hard destroy for vmid on this target's node — see
+// Client.DestroyVM's own doc comment. A thin pass-through like the typed
+// getters above; VM destroy can never hit a root-only field, so there is
+// nothing for RoutedClient to route.
+func (c *RoutedClient) DestroyVM(ctx context.Context, vmid int, purge bool) (string, error) {
+	return c.rest.DestroyVM(ctx, c.target.Node, vmid, purge)
+}
+
+// TagStillClaimed reports whether any VM other than excludeVMID still
+// carries tag — see Client.TagStillClaimed's own doc comment. Cluster-wide,
+// like FindByTag and NextVMID, so no node parameter.
+func (c *RoutedClient) TagStillClaimed(ctx context.Context, tag string, excludeVMID int) (bool, error) {
+	return c.rest.TagStillClaimed(ctx, tag, excludeVMID)
+}
+
 // APIDocTree fetches this target's PVE host's own static API-doc schema
 // tree — see Client.APIDocTree's own doc comment. A thin pass-through
 // like the typed getters above: schema discovery can never hit a
