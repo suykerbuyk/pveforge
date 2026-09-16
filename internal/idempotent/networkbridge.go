@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -16,6 +17,16 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
+
+// rawNetworkClient is the minimal shape the free functions below need —
+// just the raw REST passthrough, parameterized explicitly by (client, node)
+// rather than a receiver, so networkfields.go's NetworkFieldsEnsure can
+// call the identical stage/commit/revert/fetch primitives NetworkBridgeEnsure
+// uses without duplicating their bodies. Both NetworkBridgeClient and
+// NetworkFieldsClient satisfy this structurally.
+type rawNetworkClient interface {
+	RawRequest(ctx context.Context, method, path string, params url.Values) (json.RawMessage, error)
+}
 
 // NetworkBridgeClient is the subset of *pve.RoutedClient NetworkBridgeEnsure
 // needs: the raw REST passthrough (PVE's network-config API has no
@@ -192,7 +203,7 @@ func (op *NetworkBridgeEnsure) Validate() error {
 // result is never hash-compared against itself — Satisfied only ever
 // inspects the specific keys named in Wanted.
 func (op *NetworkBridgeEnsure) Read(ctx context.Context) (string, error) {
-	fields, exists, err := op.fetchInterface(ctx, op.Iface)
+	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
 	if err != nil {
 		return "", fmt.Errorf("network bridge ensure: read %s: %w", op.Iface, err)
 	}
@@ -260,7 +271,7 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 1: pre-stage snapshot of ManagementBridge -----------------
-	fields, exists, err := op.fetchInterface(ctx, op.ManagementBridge)
+	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.ManagementBridge)
 	if err != nil {
 		return fmt.Errorf("network bridge ensure: %s: pre-stage snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
 	}
@@ -283,7 +294,7 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 3: post-stage, pre-commit snapshot of ManagementBridge ---
-	pendingFields, exists, err := op.fetchInterface(ctx, op.ManagementBridge)
+	pendingFields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.ManagementBridge)
 	if err != nil {
 		return fmt.Errorf("network bridge ensure: %s: post-stage snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
 	}
@@ -370,7 +381,7 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 // behavior) and return a hard error naming exactly which signal
 // contradicted two-phase semantics.
 func (op *NetworkBridgeEnsure) guardSelfCheck(ctx context.Context) error {
-	fields, exists, err := op.fetchInterface(ctx, op.Iface)
+	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
 	if err != nil {
 		return fmt.Errorf("network bridge ensure: %s: guard self-check: read iface state: %w", op.Iface, err)
 	}
@@ -447,15 +458,18 @@ func (op *NetworkBridgeEnsure) stage(ctx context.Context) error {
 	return err
 }
 
-// commit is Apply's step 6: PUT /nodes/{node}/network with no params,
-// committing every staged change on the node at once. Returns the UPID PVE
-// reports for the resulting task — typically a bare JSON string, unwrapped
-// via kvjson.Scalar (which already handles both a quoted JSON string and a
-// bare/unquoted response body, the same coercion VMFieldsEnsure's Read
-// relies on for other raw PVE fields).
-func (op *NetworkBridgeEnsure) commit(ctx context.Context) (string, error) {
-	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(op.Node))
-	raw, err := op.Client.RawRequest(ctx, http.MethodPut, path, nil)
+// commitNetworkStage is Apply's step 6: PUT /nodes/{node}/network with no
+// params, committing every staged change on the node at once. Returns the
+// UPID PVE reports for the resulting task — typically a bare JSON string,
+// unwrapped via kvjson.Scalar (which already handles both a quoted JSON
+// string and a bare/unquoted response body, the same coercion
+// VMFieldsEnsure's Read relies on for other raw PVE fields).
+//
+// Free function (see rawNetworkClient's own doc comment) so
+// NetworkFieldsEnsure's Apply can commit through the identical call.
+func commitNetworkStage(ctx context.Context, client rawNetworkClient, node string) (string, error) {
+	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(node))
+	raw, err := client.RawRequest(ctx, http.MethodPut, path, nil)
 	if err != nil {
 		return "", err
 	}
@@ -469,7 +483,11 @@ func (op *NetworkBridgeEnsure) commit(ctx context.Context) (string, error) {
 	return upid, nil
 }
 
-// abortAndRevert issues PVE's whole-node "discard every staged change"
+func (op *NetworkBridgeEnsure) commit(ctx context.Context) (string, error) {
+	return commitNetworkStage(ctx, op.Client, op.Node)
+}
+
+// revertNetworkStage issues PVE's whole-node "discard every staged change"
 // call — DELETE /nodes/{node}/network, with NO iface — and returns a hard
 // error combining reason with the revert's own outcome. Used by both step
 // 4's guard self-check and step 5's stanza-mismatch compare, which share
@@ -482,13 +500,26 @@ func (op *NetworkBridgeEnsure) commit(ctx context.Context) (string, error) {
 // anyway) and is UNTESTED against a live PVE host in this implementation
 // session, the same empirical-verification-gap discipline flagged
 // elsewhere in this project.
-func (op *NetworkBridgeEnsure) abortAndRevert(ctx context.Context, reason string) error {
-	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(op.Node))
-	_, revertErr := op.Client.RawRequest(ctx, http.MethodDelete, path, nil)
+//
+// Free function (see rawNetworkClient's own doc comment) so
+// NetworkFieldsEnsure's Apply can revert through the identical call —
+// deliberately the SAME whole-node discard, not a scoped one: PVE's
+// staging area is node-wide by design, there is no per-interface discard
+// primitive, and in the concurrent-human-webUI case the only alternative
+// would be committing someone else's unreviewed staged change, which is
+// strictly worse. 3b inherits this unchanged from reviewed 3a.
+func revertNetworkStage(ctx context.Context, client rawNetworkClient, node, reason string) error {
+	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(node))
+	_, revertErr := client.RawRequest(ctx, http.MethodDelete, path, nil)
 	if revertErr != nil {
-		return fmt.Errorf("network bridge ensure: %s: %s (reverting staged changes also failed: %v)", op.Iface, reason, revertErr)
+		return fmt.Errorf("%s (reverting staged changes also failed: %v)", reason, revertErr)
 	}
-	return fmt.Errorf("network bridge ensure: %s: %s", op.Iface, reason)
+	return errors.New(reason)
+}
+
+func (op *NetworkBridgeEnsure) abortAndRevert(ctx context.Context, reason string) error {
+	err := revertNetworkStage(ctx, op.Client, op.Node, reason)
+	return fmt.Errorf("network bridge ensure: %s: %w", op.Iface, err)
 }
 
 // fetchInterface issues GET /nodes/{node}/network/{iface} and reports
@@ -501,9 +532,14 @@ func (op *NetworkBridgeEnsure) abortAndRevert(ctx context.Context, reason string
 // defensive second case alongside the error-text check, in case a future
 // PVE version reports a missing interface as an empty 2xx body instead of
 // an error.
-func (op *NetworkBridgeEnsure) fetchInterface(ctx context.Context, iface string) (map[string]json.RawMessage, bool, error) {
-	path := fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(op.Node), url.PathEscape(iface))
-	raw, err := op.Client.RawRequest(ctx, http.MethodGet, path, nil)
+//
+// Free function (not a NetworkBridgeEnsure method) so networkfields.go's
+// NetworkFieldsEnsure can call it directly for its own target-interface
+// reads, rather than duplicating this body — see rawNetworkClient's own
+// doc comment.
+func fetchInterface(ctx context.Context, client rawNetworkClient, node, iface string) (map[string]json.RawMessage, bool, error) {
+	path := fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(node), url.PathEscape(iface))
+	raw, err := client.RawRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		if isMissingNetworkInterfaceError(err) {
 			return nil, false, nil
@@ -519,6 +555,59 @@ func (op *NetworkBridgeEnsure) fetchInterface(ctx context.Context, iface string)
 		return nil, false, fmt.Errorf("parse: %w", err)
 	}
 	return fields, true, nil
+}
+
+// fetchAllInterfaces issues a single raw GET against /nodes/{node}/network
+// (the LIST endpoint, no iface segment — the same path commitNetworkStage/
+// revertNetworkStage below already hit for PUT/DELETE) and returns every
+// interface's own raw fields, keyed by each entry's own "iface" field.
+// Used by NetworkFieldsEnsure's "every other interface unchanged" guard in
+// place of one fetchInterface call per other interface, per this task's own
+// review finding that the list endpoint is cheaper and closes a narrow
+// read/hash non-atomicity gap a typed-enumeration-plus-N-raw-GETs approach
+// would have.
+//
+// CAVEAT — unverified against a live host: confirmed from the vendored
+// go-proxmox source (nodes_network.go) that this endpoint returns a JSON
+// ARRAY with each element carrying its own "iface" key, matching what
+// go-proxmox's own typed Node.Networks decodes. NOT confirmed: that each
+// array element's raw JSON carries the same set of untyped fields (e.g.
+// vlan_filtering, which go-proxmox's NodeNetwork struct doesn't type at
+// all) that a single GET /nodes/{node}/network/{iface} call returns for
+// that same interface — decoding both into the same typed struct only
+// proves parity for the fields that struct actually types. If a live host
+// shows the list response omits fields the single-GET carries, this
+// function silently makes NetworkFieldsEnsure's guard WEAKER than 3a's
+// per-interface guard (a changed-but-omitted field on some other interface
+// would go undetected). Fail-closed remedy in that case: abandon this
+// single-list-call optimization and revert the guard to N per-interface
+// fetchInterface calls, accepting the extra REST calls — do not continue
+// trusting a guard already known to be weaker than it appears.
+func fetchAllInterfaces(ctx context.Context, client rawNetworkClient, node string) (map[string]map[string]json.RawMessage, error) {
+	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(node))
+	raw, err := client.RawRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+
+	byIface := make(map[string]map[string]json.RawMessage, len(entries))
+	for _, fields := range entries {
+		ifaceRaw, ok := fields["iface"]
+		if !ok {
+			return nil, fmt.Errorf(`list response entry missing "iface" field`)
+		}
+		iface, err := kvjson.Scalar(ifaceRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse iface name: %w", err)
+		}
+		byIface[iface] = fields
+	}
+	return byIface, nil
 }
 
 // canonicalHash marshals fields with keys sorted (encoding/json already

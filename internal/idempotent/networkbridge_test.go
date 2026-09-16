@@ -787,6 +787,70 @@ func TestNetworkBridgeEnsure_Apply_Step8Mismatch_HardError(t *testing.T) {
 	}
 }
 
+// TestNetworkBridgeEnsure_Apply_CommitReturnsEmptyUPID_HardError guards the
+// extract-method refactor that turns commit into the free function
+// commitNetworkStage (see networkfields.go's own doc comment on why that
+// refactor happened): no other test in this file ever drives commit to
+// return an empty UPID, so without this test the "commit returned no upid"
+// guard could be deleted entirely and every other test here would still
+// pass.
+func TestNetworkBridgeEnsure_Apply_CommitReturnsEmptyUPID_HardError(t *testing.T) {
+	client := newHappyPathClient()
+	client.commitUPID = "" // explicit: this is the case under test, not relying on the zero value
+
+	op := &NetworkBridgeEnsure{
+		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
+		Wanted: map[string]string{"bridge_ports": "eth1"},
+	}
+	err := op.Apply(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "commit returned no upid") {
+		t.Fatalf("expected hard error naming the missing upid, got %v", err)
+	}
+	if client.waitForTaskCalls != 0 {
+		t.Fatalf("expected WaitForTask never called after a commit-parse failure, got %d", client.waitForTaskCalls)
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_GuardTripAndRevertBothFail_CombinedError
+// guards the extract-method refactor that turns abortAndRevert into the
+// free function revertNetworkStage: no other test in this file ever makes
+// the revert call itself fail, so without this test the combined-error
+// branch (which reports the revert failure instead of silently swallowing
+// it) could be dropped entirely and every other test here would still
+// pass.
+func TestNetworkBridgeEnsure_Apply_GuardTripAndRevertBothFail_CombinedError(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{
+		{fields: mgmtFields("eth0")},
+		{fields: mgmtFields("eth9")}, // changed during the stage window -> guard trip
+	}
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}}
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}}
+	client.revertErr = errors.New("pve rejected the revert")
+
+	op := &NetworkBridgeEnsure{
+		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
+		Wanted: map[string]string{"bridge_ports": "eth1"},
+	}
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "bridge_ports") {
+		t.Fatalf("expected error to still name the original guard-trip reason (bridge_ports), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pve rejected the revert") {
+		t.Fatalf("expected error to also name the revert failure, not silently swallow it, got %v", err)
+	}
+	if client.commitCalls != 0 {
+		t.Fatalf("expected commit never called, got %d", client.commitCalls)
+	}
+	if client.revertCalls != 1 {
+		t.Fatalf("expected revert attempted once, got %d", client.revertCalls)
+	}
+}
+
 func TestNetworkBridgeEnsure_Read_PropagatesHardError(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
 	client.getResponses["vmbr99"] = []getResponse{{err: errors.New("connection reset")}}
