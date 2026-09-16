@@ -37,3 +37,10 @@ var _ NetworkBridgeClient = (*pve.RoutedClient)(nil)
 // Client, BridgeIsolationClient, VMCreateClient, and NetworkBridgeClient
 // above, for the same "narrow interface per Op" reason.
 var _ VMDestroyClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies
+// NetworkFieldsClient (networkfields.go) — the same Node/RawRequest/
+// LinkState/WaitForTask pass-throughs NetworkBridgeClient above already
+// pins, minus GetNetworkInterfaces (not needed — see NetworkFieldsClient's
+// own doc comment on why the guard reads the raw LIST endpoint instead).
+var _ NetworkFieldsClient = (*pve.RoutedClient)(nil)

@@ -226,3 +226,90 @@ func TestNewNetworkBridgeDestroyCmd_MutationTierIsDestructive(t *testing.T) {
 		t.Errorf("mutation tier = %q, want %q", got, mutationDestructive)
 	}
 }
+
+// --- network set: CLI wiring and argument/flag validation. The full
+// mutation round trip (real REST+SSH stage/guard/commit/verify sequence) is
+// exercised end to end against a real *pve.RoutedClient by
+// internal/idempotent's own
+// TestNetworkFieldsEnsure_Apply_MTUSet_FullStack/..._DecoyInterfaceChanged_
+// FullStack — deliberately not duplicated here, same established
+// convention as "network bridge create/destroy"'s own tests above: these
+// cover only what's unique to this layer.
+
+func TestNewNetworkSetCmd_RequiresThreeArgs(t *testing.T) {
+	cmd := newNetworkSetCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"qa-pve-01", "vmbr5"}) // no field=value at all
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for a missing field=value argument")
+	}
+}
+
+func TestNewNetworkSetCmd_NoForceFlag(t *testing.T) {
+	cmd := newNetworkSetCmd()
+	if f := cmd.Flags().Lookup("force"); f != nil {
+		t.Fatalf("expected no --force flag on network set, found: %+v", f)
+	}
+}
+
+func TestNewNetworkSetCmd_NoManagementBridgeFlag(t *testing.T) {
+	cmd := newNetworkSetCmd()
+	if f := cmd.Flags().Lookup("management-bridge"); f != nil {
+		t.Fatalf("expected no --management-bridge flag on network set (the guard covers every other interface, not one canary), found: %+v", f)
+	}
+}
+
+func TestNewNetworkSetCmd_MutationTierIsMutating(t *testing.T) {
+	cmd := newNetworkSetCmd()
+	if got := cmd.Annotations[mutationAnnotationKey]; got != mutationMutating {
+		t.Errorf("mutation tier = %q, want %q", got, mutationMutating)
+	}
+}
+
+// TestNewNetworkSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied is the
+// network-set sibling of TestNewVMSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied:
+// idempotent.Run calls Satisfied before Apply, so a duplicate field=value
+// pair that already matches current state would let Satisfied
+// short-circuit before Apply — and therefore NetworkFieldsEnsure.Validate,
+// which is where the duplicate check lives — ever runs, silently bypassing
+// the "no duplicate field name" contract. network.go's RunE calls
+// op.Validate() itself, before calling idempotent.Run, so this is caught
+// regardless of whether the batch would have been a no-op. REST-only (no
+// SSH server needed): Validate rejects before Apply would ever reach the
+// stage/commit/LinkState calls.
+func TestNewNetworkSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied(t *testing.T) {
+	var writeHit int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"mtu":"9000"}}`))
+			return
+		}
+		atomic.AddInt32(&writeHit, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newNetworkSetCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	// Duplicate field, already satisfied (mtu is already 9000 on the fake
+	// server) — Satisfied would short-circuit before Apply/Validate ever
+	// ran, if RunE didn't call Validate explicitly first.
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "vmbr5", "mtu=9000", "mtu=9000"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error for a duplicate field name, even though the batch is already satisfied")
+	}
+	if !strings.Contains(err.Error(), "more than once") {
+		t.Errorf("expected the duplicate-field error, got: %v", err)
+	}
+	if atomic.LoadInt32(&writeHit) != 0 {
+		t.Error("expected no write to be attempted: Validate should reject the batch before any write")
+	}
+}

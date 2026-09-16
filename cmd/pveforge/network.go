@@ -17,6 +17,7 @@ func newNetworkCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newNetworkGetCmd())
 	cmd.AddCommand(newNetworkBridgeCmd())
+	cmd.AddCommand(newNetworkSetCmd())
 	return cmd
 }
 
@@ -236,5 +237,78 @@ depends on iface before running this.`,
 		panic(err)
 	}
 	markDestructive(cmd)
+	return cmd
+}
+
+// newNetworkSetCmd wraps NetworkFieldsEnsure (3b): per-interface field set
+// (e.g. mtu, vlan_filtering) on an EXISTING node-level interface, reusing
+// 3a's NetworkLockKey (see that function's own doc comment: MTU/vlan set
+// and bridge create/destroy on the same node must serialize against each
+// other, since PVE's staged network config is node-wide) and the same
+// two-phase stage/commit model as "network bridge create/destroy" above.
+func newNetworkSetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "set <target-id> <iface> field=value [field=value ...]",
+		Short: "Set one or more fields on an existing node-level network interface",
+		Long: `Set one or more fields (e.g. mtu, vlan_filtering) on an EXISTING node-level
+network interface via PVE's own two-phase stage/commit model: the change is
+staged (PUT /nodes/{node}/network/{iface}), a guard proves every OTHER
+interface on the node is unchanged (PVE's staged network config is
+node-wide, not per-interface — an unrelated concurrent change would
+otherwise be silently swept into the same commit), and only then committed
+(PUT /nodes/{node}/network), which is the single call that actually
+triggers ifupdown2's live reload.
+
+Unlike "network bridge create/destroy", this command has no
+--management-bridge flag: the guard here covers EVERY other interface on
+the node, not one designated canary.
+
+This command has NO --force override for the guard check, for the same
+reason "network bridge create/destroy" doesn't: a mismatch means PVE staged
+changes this command never asked for and knows nothing about — there is no
+safe way to force past that.`,
+		Args: cobra.MinimumNArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pairs, err := kvjson.ParseKVArgs(args[2:])
+			if err != nil {
+				return err
+			}
+
+			client, err := resolveRoutedClient(cmd, args[0])
+			if err != nil {
+				return err
+			}
+			defer func() { _ = client.Close() }()
+
+			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+			if err != nil {
+				return err
+			}
+
+			key := idempotent.NetworkLockKey(args[0], client.Node())
+			op := &idempotent.NetworkFieldsEnsure{
+				Client: client,
+				Node:   client.Node(),
+				Iface:  args[1],
+				Pairs:  pairs,
+			}
+
+			// Explicit, ahead of Run: idempotent.Run calls Satisfied before
+			// Apply, and if op.Iface already matches every wanted field,
+			// Apply — and therefore its own internal Validate() call —
+			// never runs at all. Same reasoning as newNetworkBridgeCreateCmd's
+			// and newVMSetCmd's own explicit-Validate comment.
+			if err := op.Validate(); err != nil {
+				return err
+			}
+
+			if _, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false); err != nil {
+				return err
+			}
+			return printAppliedFields(cmd.OutOrStdout(), args[0], op.Applied, pairs)
+		},
+	}
+	addRosterFlag(cmd)
+	markMutating(cmd)
 	return cmd
 }

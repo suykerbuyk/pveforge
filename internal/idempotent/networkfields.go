@@ -1,0 +1,354 @@
+package idempotent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+
+	"github.com/suykerbuyk/pveforge/internal/kvjson"
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
+)
+
+// NetworkFieldsClient is the subset of *pve.RoutedClient NetworkFieldsEnsure
+// needs: the raw REST passthrough (same reasoning as NetworkBridgeClient's
+// own doc comment — PVE's network-config API has no go-proxmox-typed
+// stage/commit split), the kernel-level link-state primitive, and task
+// polling. Unlike NetworkBridgeClient, this interface has no
+// GetNetworkInterfaces: the "every other interface" guard reads the raw
+// LIST endpoint directly via RawRequest (see fetchAllInterfaces in
+// networkbridge.go), so the typed getter isn't needed at all.
+type NetworkFieldsClient interface {
+	Node() string
+	RawRequest(ctx context.Context, method, path string, params url.Values) (json.RawMessage, error)
+	LinkState(ctx context.Context, iface string) (sshexec.LinkState, error)
+	WaitForTask(ctx context.Context, node, upid string) error
+}
+
+// NetworkFieldsEnsure is idempotent.Op for `network set` (3b): ensure Iface's
+// config holds every field in Pairs at its given value, via PVE's own
+// two-phase stage/commit model — the SAME model NetworkBridgeEnsure (3a)
+// uses, reusing its NetworkLockKey and the free stage/commit/revert/fetch
+// functions in networkbridge.go rather than reimplementing them (see this
+// task's own vault record, "3a source verification" and "Implementation
+// plan", for exactly what was and wasn't already reusable as of 3a).
+//
+// Unlike NetworkBridgeEnsure's guard (a single canary interface, the node's
+// management bridge), this Op's guard is BROADER: an MTU/vlan_filtering
+// apply can touch the whole /etc/network/interfaces file's semantics, so
+// EVERY OTHER interface on the node must be proven byte-identical (via
+// canonicalHash) before this Op will commit — any difference in any
+// excluded interface aborts and reverts, same as 3a's own "no --force
+// bypass" discipline.
+type NetworkFieldsEnsure struct {
+	Client NetworkFieldsClient
+	Node   string
+	// Iface is the target interface whose fields this Op ensures.
+	Iface string
+	// Pairs are the field=value pairs to ensure, in caller order — reuses
+	// kvjson.Pair, the same type VMFieldsEnsure uses, rather than inventing
+	// a second pair type for this Op.
+	Pairs []kvjson.Pair
+
+	// current is set by Read and consumed by Satisfied — Iface's own
+	// current field values for exactly the fields named in Pairs. Refreshed
+	// on every Read call, matching VMFieldsEnsure.current's own contract.
+	current map[string]string
+
+	// Applied is the field names Apply actually wrote, in Pairs order —
+	// reset at the start of every Apply call. Exported so cmd/pveforge's
+	// RunE can report exactly what this Op wrote, same reasoning as
+	// VMFieldsEnsure.Applied's own doc comment.
+	Applied []string
+}
+
+// networkFieldsState is Read's comparable-state JSON shape: Current holds
+// op.Iface's own field values (what Satisfied inspects). OtherHashes is
+// deliberately never populated by Read — the "every other interface"
+// guard is an Apply-only concern, refreshed fresh at the start of every
+// Apply call, the same reasoning NetworkBridgeEnsure gives for why its own
+// currentFields/preStanzaHash aren't Read-populated — but the field is kept
+// in this type so the comparable-state blob stays round-trippable the way
+// idempotent.Run's Result.Before/After expects, matching the two-dimension
+// encoding precedent this Op's own design record cites.
+type networkFieldsState struct {
+	Current     map[string]string `json:"current"`
+	OtherHashes map[string]string `json:"otherHashes,omitempty"`
+}
+
+// Validate reports whether op is well-formed: Node and Iface are required,
+// at least one field must be given, and no field name may repeat — mirrors
+// VMFieldsEnsure.Validate's own duplicate-field rejection.
+func (op *NetworkFieldsEnsure) Validate() error {
+	if op.Node == "" {
+		return fmt.Errorf("network fields ensure: node is required")
+	}
+	if op.Iface == "" {
+		return fmt.Errorf("network fields ensure: iface is required")
+	}
+	if len(op.Pairs) == 0 {
+		return fmt.Errorf("network fields ensure: iface %s: at least one field is required", op.Iface)
+	}
+	seen := make(map[string]bool, len(op.Pairs))
+	for _, p := range op.Pairs {
+		if seen[p.Field] {
+			return fmt.Errorf("network fields ensure: iface %s: field %q specified more than once", op.Iface, p.Field)
+		}
+		seen[p.Field] = true
+	}
+	return nil
+}
+
+// Read fetches Iface's own current raw config (via the free fetchInterface
+// function in networkbridge.go — see NetworkFieldsEnsure's own doc comment
+// on why this task reuses it rather than duplicating it) and records each
+// requested field's current value via kvjson.Scalar, same coercion
+// VMFieldsEnsure.Read relies on. A field absent from Iface's current
+// config is simply absent from the returned map — see fieldsEqual's own
+// doc comment on why that absence must never be conflated with a
+// present-but-empty value.
+func (op *NetworkFieldsEnsure) Read(ctx context.Context) (string, error) {
+	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
+	if err != nil {
+		return "", fmt.Errorf("network fields ensure: %s: read: %w", op.Iface, err)
+	}
+	if !exists {
+		return "", fmt.Errorf("network fields ensure: %s: interface does not exist", op.Iface)
+	}
+
+	current := make(map[string]string, len(op.Pairs))
+	for _, p := range op.Pairs {
+		raw, ok := fields[p.Field]
+		if !ok {
+			continue
+		}
+		s, err := kvjson.Scalar(raw)
+		if err != nil {
+			return "", fmt.Errorf("network fields ensure: %s: field %q: %w", op.Iface, p.Field, err)
+		}
+		current[p.Field] = s
+	}
+	op.current = current
+
+	b, err := json.Marshal(networkFieldsState{Current: current})
+	if err != nil {
+		return "", fmt.Errorf("network fields ensure: %s: encode current state: %w", op.Iface, err)
+	}
+	return string(b), nil
+}
+
+// Satisfied reports whether every requested field's current value already
+// equals its wanted value, via fieldsEqual (not a plain == compare) so a
+// boolean-shaped field like vlan_filtering converges regardless of which
+// literal encoding PVE and the caller each used — see fieldsEqual's own
+// doc comment. An absent field can never be considered already-matching,
+// same discipline as VMFieldsEnsure.Satisfied and NetworkBridgeEnsure.Satisfied.
+func (op *NetworkFieldsEnsure) Satisfied(current string) bool {
+	var state networkFieldsState
+	if err := json.Unmarshal([]byte(current), &state); err != nil {
+		// Corrupted input reads as unsatisfied (safe to fail toward
+		// re-Apply) — Satisfied has no error return to report this any
+		// other way, matching parseBridgeIsolationState's own contract.
+		return false
+	}
+	for _, p := range op.Pairs {
+		val, ok := state.Current[p.Field]
+		if !ok || !fieldsEqual(val, p.Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldsEqual reports whether current and wanted represent the same field
+// value, treating four specific boolean-shaped tokens — "true", "false",
+// "1", "0" (case-insensitive, whitespace-trimmed) — as equivalent to their
+// counterpart regardless of which side wrote which form: PVE can report a
+// boolean-shaped field like vlan_filtering as a JSON bool (kvjson.Scalar
+// renders that as literal "true"/"false"), while the PVE-CLI convention a
+// caller is likely to type is "1"/"0" — kvjson.Scalar itself has no
+// normalization for this (see internal/kvjson/kvjson.go's Scalar), and
+// this Op is deliberately the only place that gets one, scoped to this
+// Op's own comparisons rather than touching the shared kvjson package
+// every other field/render path also depends on.
+//
+// The empty string "" is deliberately EXCLUDED from the four-token set: an
+// absent field is represented in networkFieldsState.Current by the key
+// being absent entirely (see Read), never by an empty-string value, so ""
+// reaching this function at all already means a field is genuinely,
+// deliberately set to empty text — that must never be treated as
+// boolean-false-shaped, or it would silently match a caller's wanted
+// "false"/"0" for a field that was never actually false.
+func fieldsEqual(current, wanted string) bool {
+	cb, cok := parseBoolish(current)
+	wb, wok := parseBoolish(wanted)
+	if cok && wok {
+		return cb == wb
+	}
+	return current == wanted
+}
+
+// parseBoolish reports s's boolean value and whether s is one of the four
+// recognized boolean-shaped tokens at all — see fieldsEqual's own doc
+// comment for exactly which four and why the empty string isn't one of
+// them.
+func parseBoolish(s string) (value bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "1":
+		return true, true
+	case "false", "0":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// Apply performs the full stage -> guard -> commit -> poll -> verify
+// sequence, reusing 3a's free stage/commit/revert/fetch functions from
+// networkbridge.go throughout (see this Op's own doc comment). Like
+// NetworkBridgeEnsure, this Op has no compare-and-swap/digest mechanism:
+// every failure path below is terminal, never wrapping ErrConflict.
+//
+// Deliberately has NO step analogous to NetworkBridgeEnsure's step-4 guard
+// self-check on op.Iface itself: that check works because bridge
+// create/destroy is a binary exists/not-exists transition with two
+// independent pre/post signals: an MTU/vlan_filtering field SET has no
+// equivalent binary signal to check between stage and commit (the field's
+// current value is arbitrary, and neither PVE's "active" field nor kernel
+// LinkState reflects a pending field-level change) — see this task's own
+// vault record ("Design choices needing a decision") for why re-reading
+// op.Iface's own fields mid-stage was considered and rejected rather than
+// silently omitted.
+func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
+	if err := op.Validate(); err != nil {
+		return err
+	}
+	op.Applied = nil
+
+	// --- Step 1: pre-stage snapshot of every OTHER interface ------------
+	before, err := fetchAllInterfaces(ctx, op.Client, op.Node)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: pre-stage snapshot of other interfaces: %w", op.Iface, err)
+	}
+	beforeHashes, err := otherInterfaceHashes(before, op.Iface)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
+	}
+
+	// --- Step 2: stage ---------------------------------------------------
+	if err := op.stage(ctx); err != nil {
+		return fmt.Errorf("network fields ensure: %s: stage: %w", op.Iface, err)
+	}
+
+	// --- Step 3: post-stage, pre-commit snapshot of every OTHER interface
+	after, err := fetchAllInterfaces(ctx, op.Client, op.Node)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: post-stage snapshot of other interfaces: %w", op.Iface, err)
+	}
+	afterHashes, err := otherInterfaceHashes(after, op.Iface)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
+	}
+
+	// --- Step 4: compare — NO --force bypass, same reasoning as 3a's own
+	// step 5: a mismatch here means PVE staged changes on this node that
+	// this Op never asked for and knows nothing about.
+	if diff := changedOtherInterfaces(before, after, beforeHashes, afterHashes); diff != "" {
+		revertErr := revertNetworkStage(ctx, op.Client, op.Node,
+			fmt.Sprintf("another interface's staged config changed during the stage window (refusing to commit an unrelated staged change): %s", diff))
+		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, revertErr)
+	}
+
+	// --- Step 5: commit ----------------------------------------------
+	upid, err := commitNetworkStage(ctx, op.Client, op.Node)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: commit: %w", op.Iface, err)
+	}
+
+	// --- Step 5b: poll to completion (critical, not optional) ----------
+	if err := op.Client.WaitForTask(ctx, op.Node, upid); err != nil {
+		return fmt.Errorf("network fields ensure: %s: commit task %s did not complete successfully (no revert attempted: pve may already have applied this change, in whole or in part): %w", op.Iface, upid, err)
+	}
+
+	// --- Step 6: mandatory post-apply kernel verification of op.Iface
+	// itself — see sshexec.LinkState's own doc comment: it carries no MTU
+	// field, so this can only assert the interface still EXISTS, never
+	// that the new field values actually took effect at the kernel level.
+	link, err := op.Client.LinkState(ctx, op.Iface)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: post-apply kernel check: %w", op.Iface, err)
+	}
+	if !link.Exists {
+		return fmt.Errorf("network fields ensure: %s: post-apply kernel state mismatch: interface no longer exists after apply — pve has already committed and reconfigured the kernel; no automatic remediation attempted", op.Iface)
+	}
+
+	op.Applied = make([]string, len(op.Pairs))
+	for i, p := range op.Pairs {
+		op.Applied[i] = p.Field
+	}
+	return nil
+}
+
+// stage is Apply's step 2: PUT /nodes/{node}/network/{iface} with Pairs'
+// field=value params — matches confirmed NodeNetwork.Update semantics for
+// an EXISTING interface's field update (see this task's own "3a source
+// verification" record), distinct from 3a's POST-to-list create path.
+func (op *NetworkFieldsEnsure) stage(ctx context.Context) error {
+	params := url.Values{}
+	for _, p := range op.Pairs {
+		params.Set(p.Field, p.Value)
+	}
+	path := fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(op.Node), url.PathEscape(op.Iface))
+	_, err := op.Client.RawRequest(ctx, http.MethodPut, path, params)
+	return err
+}
+
+// otherInterfaceHashes canonicalHashes every interface in all EXCEPT
+// exclude, for the guard's before/after comparison.
+func otherInterfaceHashes(all map[string]map[string]json.RawMessage, exclude string) (map[string]string, error) {
+	hashes := make(map[string]string, len(all))
+	for iface, fields := range all {
+		if iface == exclude {
+			continue
+		}
+		h, err := canonicalHash(fields)
+		if err != nil {
+			return nil, fmt.Errorf("hash interface %s: %w", iface, err)
+		}
+		hashes[iface] = h
+	}
+	return hashes, nil
+}
+
+// changedOtherInterfaces compares before/after hash snapshots (see
+// otherInterfaceHashes) and, for every interface whose hash differs (added,
+// removed, or changed), renders a per-field diff via diffFields — the same
+// function 3a's own step 5 uses — against beforeFields/afterFields' raw
+// field maps, so the guard's error names exactly which field on exactly
+// which OTHER interface changed, not just "something changed".
+func changedOtherInterfaces(beforeFields, afterFields map[string]map[string]json.RawMessage, beforeHashes, afterHashes map[string]string) string {
+	names := make(map[string]bool, len(beforeHashes)+len(afterHashes))
+	for k := range beforeHashes {
+		names[k] = true
+	}
+	for k := range afterHashes {
+		names[k] = true
+	}
+	sorted := make([]string, 0, len(names))
+	for k := range names {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+
+	var diffs []string
+	for _, iface := range sorted {
+		if beforeHashes[iface] == afterHashes[iface] {
+			continue
+		}
+		diffs = append(diffs, fmt.Sprintf("%s: %s", iface, diffFields(beforeFields[iface], afterFields[iface])))
+	}
+	return strings.Join(diffs, "; ")
+}
