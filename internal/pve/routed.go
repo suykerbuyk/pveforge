@@ -570,3 +570,14 @@ func (c *RoutedClient) ListSnapshots(ctx context.Context, vmid int) ([]*proxmox.
 func (c *RoutedClient) CreateSnapshot(ctx context.Context, vmid int, name, description string) error {
 	return c.rest.CreateSnapshot(ctx, c.target.Node, vmid, name, description)
 }
+
+// ShutdownVM issues a GRACEFUL shutdown for vmid on this target's node —
+// see Client.ShutdownVM's own doc comment, especially on why this exposes
+// no hard-stop escalation path of any kind (that is a caller decision, not
+// something buried in a shared primitive). A thin pass-through like the
+// typed getters above, with no node parameter, for the same reason
+// StopVM/DestroyVM have none; a shutdown writes no VM config field, so it
+// can never hit a root-only field and there is nothing to route.
+func (c *RoutedClient) ShutdownVM(ctx context.Context, vmid int) (string, error) {
+	return c.rest.ShutdownVM(ctx, c.target.Node, vmid)
+}

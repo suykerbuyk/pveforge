@@ -44,3 +44,10 @@ var _ VMDestroyClient = (*pve.RoutedClient)(nil)
 // pins, minus GetNetworkInterfaces (not needed — see NetworkFieldsClient's
 // own doc comment on why the guard reads the raw LIST endpoint instead).
 var _ NetworkFieldsClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies
+// VMShutdownClient (vmshutdown.go) — a seventh, separate interface from
+// the six above, for the same "narrow interface per Op" reason. The
+// ShutdownVM pass-through added to routed.go in this same task is what
+// makes this hold.
+var _ VMShutdownClient = (*pve.RoutedClient)(nil)
