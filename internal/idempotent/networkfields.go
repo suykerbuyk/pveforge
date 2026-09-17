@@ -163,49 +163,6 @@ func (op *NetworkFieldsEnsure) Satisfied(current string) bool {
 	return true
 }
 
-// fieldsEqual reports whether current and wanted represent the same field
-// value, treating four specific boolean-shaped tokens — "true", "false",
-// "1", "0" (case-insensitive, whitespace-trimmed) — as equivalent to their
-// counterpart regardless of which side wrote which form: PVE can report a
-// boolean-shaped field like vlan_filtering as a JSON bool (kvjson.Scalar
-// renders that as literal "true"/"false"), while the PVE-CLI convention a
-// caller is likely to type is "1"/"0" — kvjson.Scalar itself has no
-// normalization for this (see internal/kvjson/kvjson.go's Scalar), and
-// this Op is deliberately the only place that gets one, scoped to this
-// Op's own comparisons rather than touching the shared kvjson package
-// every other field/render path also depends on.
-//
-// The empty string "" is deliberately EXCLUDED from the four-token set: an
-// absent field is represented in networkFieldsState.Current by the key
-// being absent entirely (see Read), never by an empty-string value, so ""
-// reaching this function at all already means a field is genuinely,
-// deliberately set to empty text — that must never be treated as
-// boolean-false-shaped, or it would silently match a caller's wanted
-// "false"/"0" for a field that was never actually false.
-func fieldsEqual(current, wanted string) bool {
-	cb, cok := parseBoolish(current)
-	wb, wok := parseBoolish(wanted)
-	if cok && wok {
-		return cb == wb
-	}
-	return current == wanted
-}
-
-// parseBoolish reports s's boolean value and whether s is one of the four
-// recognized boolean-shaped tokens at all — see fieldsEqual's own doc
-// comment for exactly which four and why the empty string isn't one of
-// them.
-func parseBoolish(s string) (value bool, ok bool) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "true", "1":
-		return true, true
-	case "false", "0":
-		return false, true
-	default:
-		return false, false
-	}
-}
-
 // Apply performs the full stage -> guard -> commit -> poll -> verify
 // sequence, reusing 3a's free stage/commit/revert/fetch functions from
 // networkbridge.go throughout (see this Op's own doc comment). Like

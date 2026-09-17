@@ -403,42 +403,17 @@ func TestNetworkFieldsEnsure_Satisfied(t *testing.T) {
 	})
 }
 
-// --- fieldsEqual / parseBoolish direct coverage ------------------------
-
-func TestFieldsEqual(t *testing.T) {
-	cases := []struct {
-		name            string
-		current, wanted string
-		want            bool
-	}{
-		{"exact string match", "9000", "9000", true},
-		{"exact string mismatch", "9000", "1500", false},
-		{"true vs 1", "true", "1", true},
-		{"false vs 0", "false", "0", true},
-		{"TRUE vs 1 (case-insensitive)", "TRUE", "1", true},
-		{" true  vs 1 (trimmed)", " true ", "1", true},
-		{"true vs 0", "true", "0", false},
-		{"1 vs 0", "1", "0", false},
-		{"empty vs false", "", "false", false},
-		{"empty vs 0", "", "0", false},
-		{"false vs empty", "false", "", false},
-		{"non-boolish exact match", "eth0", "eth0", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := fieldsEqual(tc.current, tc.wanted); got != tc.want {
-				t.Fatalf("fieldsEqual(%q, %q) = %v, want %v", tc.current, tc.wanted, got, tc.want)
-			}
-		})
-	}
-}
+// fieldsEqual/parseBoolish's own direct coverage (TestFieldsEqual) moved to
+// boolish_test.go as of the 2026-09-16 extraction (pveforge-vm-converge-fields)
+// that made the helper shared with VMFieldsEnsure — see boolish.go.
 
 // TestNetworkFieldsEnsure_ReadThenSatisfied_VLANFilteringBooleanCoercion is
-// the end-to-end version of the fieldsEqual cases above: PVE's raw JSON
-// boolean true, coerced by kvjson.Scalar (via Read) into the literal text
-// "true", must still converge against a caller-supplied PVE-CLI-conventional
-// "1" once it reaches Satisfied — this is the exact scenario the Chair's
-// review required a fix for (see fieldsEqual's own doc comment).
+// the end-to-end version of TestFieldsEqual's cases (boolish_test.go): PVE's
+// raw JSON boolean true, coerced by kvjson.Scalar (via Read) into the literal
+// text "true", must still converge against a caller-supplied
+// PVE-CLI-conventional "1" once it reaches Satisfied — this is the exact
+// scenario the Chair's review required a fix for (see fieldsEqual's own doc
+// comment in boolish.go).
 func TestNetworkFieldsEnsure_ReadThenSatisfied_VLANFilteringBooleanCoercion(t *testing.T) {
 	client := newFakeNetworkFieldsClient("pve1")
 	client.getResponses["vmbr5"] = []getResponse{{fields: map[string]json.RawMessage{"vlan_filtering": rawBool(true)}}}
