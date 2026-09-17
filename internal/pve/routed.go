@@ -548,3 +548,25 @@ func (c *RoutedClient) sshConnectionHealthy() bool {
 	_, err := c.ssh.Run(probeCtx, "true")
 	return err == nil
 }
+
+// ListSnapshots lists every snapshot entry PVE reports for vmid on this
+// target's node, including the "current" pseudo-entry — see
+// Client.ListSnapshots's own doc comment. A thin pass-through with no
+// node parameter, for the same reason AgentExec above has none. A
+// snapshot listing is a plain read and can never hit a root-only config
+// field, so there is nothing for RoutedClient to route: it always goes
+// over REST.
+func (c *RoutedClient) ListSnapshots(ctx context.Context, vmid int) ([]*proxmox.VirtualMachineSnapshot, error) {
+	return c.rest.ListSnapshots(ctx, c.target.Node, vmid)
+}
+
+// CreateSnapshot takes a vmstate-including snapshot of vmid on this
+// target's node, refusing a name collision up front and verifying the
+// result afterward — see Client.CreateSnapshot's own doc comment,
+// especially on why vmstate is not a parameter. A thin pass-through with
+// no node parameter, for the same reason AgentExec above has none.
+// Snapshot creation writes no VM config field, so it can never hit a
+// root-only field: there is nothing for RoutedClient to route.
+func (c *RoutedClient) CreateSnapshot(ctx context.Context, vmid int, name, description string) error {
+	return c.rest.CreateSnapshot(ctx, c.target.Node, vmid, name, description)
+}
