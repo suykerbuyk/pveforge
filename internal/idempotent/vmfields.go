@@ -141,6 +141,15 @@ func (op *VMFieldsEnsure) Read(ctx context.Context) (string, error) {
 // be considered already-matching, full stop — there is no way for a
 // caller to ask this command for "leave it absent" in the first place, so
 // treating absence as unconditionally unsatisfied loses nothing.
+//
+// Compares a present field via fieldsEqual (boolish.go, shared with
+// NetworkFieldsEnsure as of pveforge-vm-converge-fields, 2026-09-16), not a
+// plain ==: a boolean-shaped field (protection, onboot, template, and the
+// other go-proxmox IntOrBool fields) can come back from PVE as a JSON bool
+// while a caller types the PVE-CLI-conventional "1"/"0" — kvjson.Scalar
+// (this Op's Read) has no normalization for that, and before this fix a
+// plain != here meant such a field could never converge: Apply rewrote it
+// on every single invocation, forever, even when it was already correct.
 func (op *VMFieldsEnsure) Satisfied(current string) bool {
 	var m map[string]string
 	if err := json.Unmarshal([]byte(current), &m); err != nil {
@@ -151,7 +160,7 @@ func (op *VMFieldsEnsure) Satisfied(current string) bool {
 	}
 	for _, p := range op.Pairs {
 		val, ok := m[p.Field]
-		if !ok || val != p.Value {
+		if !ok || !fieldsEqual(val, p.Value) {
 			return false
 		}
 	}
@@ -166,9 +175,23 @@ func (op *VMFieldsEnsure) Satisfied(current string) bool {
 // reasoning as Satisfied: a field absent from Read's snapshot must never
 // be treated as already matching, even when the wanted value happens to
 // be the empty string, since a plain map lookup can't tell "absent" from
-// "present and empty" apart — and applies the two correctness fixes this
-// Op's whole design depends on (recorded,
-// pveforge-vm-set-unlocked, "Locking design", 2026-09-14):
+// "present and empty" apart.
+//
+// This skip-check compares via fieldsEqual (boolish.go), not a plain ==,
+// for the same reason Satisfied does (approved, pveforge-vm-converge-fields,
+// 2026-09-16, under the standing "fix a real defect the moment it's found"
+// rule): Satisfied can return false for the BATCH because one OTHER field
+// genuinely needs a write, which means Apply runs for the whole batch — and
+// before this fix, Apply's own per-field skip-check would then use a plain
+// == and needlessly re-write a boolean-shaped field that was ALREADY
+// correct in a different token form (e.g. current "true", wanted "1"). That
+// is strictly worse than Satisfied's own bug: a needless read/compare cycle
+// versus a needless CAS WRITE against a live VM's config — a mutation
+// nobody asked for, an extra chance at a digest conflict, and noise in what
+// the command reports as changed.
+//
+// Also applies the two correctness fixes this Op's whole design depends on
+// (recorded, pveforge-vm-set-unlocked, "Locking design", 2026-09-14):
 //
 //  1. PVE's digest guards the WHOLE config blob, not one field — reusing
 //     one digest (from Read, or from an earlier field's write in this
@@ -211,7 +234,7 @@ func (op *VMFieldsEnsure) Apply(ctx context.Context) error {
 	op.Applied = nil
 
 	for _, p := range op.Pairs {
-		if val, ok := op.current[p.Field]; ok && val == p.Value {
+		if val, ok := op.current[p.Field]; ok && fieldsEqual(val, p.Value) {
 			continue
 		}
 

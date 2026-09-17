@@ -550,6 +550,98 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_ConflictThenSuccess_ResumesNotRedoes(t *
 	}
 }
 
+// TestVMFieldsEnsure_ReadThenSatisfied_BooleanShapedFieldConverges is the
+// VM-config analogue of NetworkFieldsEnsure's own
+// TestNetworkFieldsEnsure_ReadThenSatisfied_VLANFilteringBooleanCoercion
+// (networkfields_test.go): PVE's raw JSON boolean true, coerced by
+// kvjson.Scalar (via Read) into the literal text "true", must still
+// converge against a caller-supplied PVE-CLI-conventional "1" once it
+// reaches Satisfied. "protection" is a confirmed go-proxmox IntOrBool
+// field (types.go:1013) — the same field
+// TestVMFieldsEnsure_Read_CoercesJSONTypedValuesToComparableStrings above
+// already fixtures as PVE-boolean-true. Before Satisfied called
+// fieldsEqual (boolish.go), this case failed forever: "true" != "1".
+func TestVMFieldsEnsure_ReadThenSatisfied_BooleanShapedFieldConverges(t *testing.T) {
+	client := &fakeClient{
+		node:              "qa-pve-01",
+		rawRequestResults: []json.RawMessage{json.RawMessage(`{"digest":"d1","protection":true}`)},
+	}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("protection", "1")}
+
+	current, err := op.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !op.Satisfied(current) {
+		t.Fatal("expected satisfied: PVE JSON bool true should converge with caller-supplied \"1\"")
+	}
+}
+
+// TestVMFieldsEnsure_ViaRun_EndToEnd_BooleanFieldAlreadyCorrectIsNoOp is the
+// regression test for the user-visible behavior change this fix ships:
+// before Satisfied called fieldsEqual, `vm set protection=1` against a VM
+// PVE already reports as "protection":true returned Changed:true and
+// issued a redundant CAS write on EVERY invocation (the old plain !=
+// compare: "true" != "1"). Reverting Satisfied to that plain compare must
+// make this test fail.
+func TestVMFieldsEnsure_ViaRun_EndToEnd_BooleanFieldAlreadyCorrectIsNoOp(t *testing.T) {
+	client := &fakeClient{
+		node:              "qa-pve-01",
+		rawRequestResults: []json.RawMessage{json.RawMessage(`{"digest":"d1","protection":true}`)},
+	}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("protection", "1")}
+	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
+
+	res, err := Run(context.Background(), testRosterPath(t), key, op, false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Changed {
+		t.Error("expected Changed=false: protection is already true, matching caller-supplied \"1\"")
+	}
+	if client.setFieldCalls != 0 || client.setFieldPlainCalls != 0 {
+		t.Error("no write should be attempted: the field is already correct once boolean-shaped tokens are recognized as equal")
+	}
+}
+
+// TestVMFieldsEnsure_ViaRun_EndToEnd_ApplySkipsAlreadyCorrectBooleanFieldInMixedBatch
+// is the regression test for the second, more severe instance of the same
+// bug: a multi-field batch where ONE field ("cores") genuinely needs a
+// write, so Satisfied correctly returns false for the whole batch and
+// Apply runs — but Apply's OWN per-field skip-check must still recognize
+// that the OTHER field ("protection") is already correct in a different
+// token form and must NOT re-write it. Before this fix, Apply's skip-check
+// used a plain == and issued a needless CAS write against a live VM's
+// config for "protection" on every such batch — a mutation nobody asked
+// for, not just a wasted read. Asserts the CAS call COUNT (exactly one,
+// for cores only), not merely the absence of an error: the count is the
+// observable that distinguishes this bug from its fix.
+func TestVMFieldsEnsure_ViaRun_EndToEnd_ApplySkipsAlreadyCorrectBooleanFieldInMixedBatch(t *testing.T) {
+	client := &fakeClient{
+		node: "qa-pve-01",
+		rawRequestResults: []json.RawMessage{
+			json.RawMessage(`{"digest":"d1","cores":2,"protection":true}`), // Read
+			json.RawMessage(`{"digest":"d2"}`),                             // cores' own fresh-digest re-fetch
+		},
+	}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("cores", "4", "protection", "1")}
+	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
+
+	res, err := Run(context.Background(), testRosterPath(t), key, op, false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true: cores genuinely needs a write")
+	}
+	if len(client.casCalls) != 1 {
+		t.Fatalf("expected exactly 1 CAS write (cores only; protection already matches via fieldsEqual), got %d: %+v", len(client.casCalls), client.casCalls)
+	}
+	if client.casCalls[0].field != "cores" {
+		t.Errorf("expected the single CAS write to be for cores, got field %q", client.casCalls[0].field)
+	}
+}
+
 // pairs is a small test helper building []kvjson.Pair from alternating
 // field/value strings.
 func pairs(fieldValue ...string) []kvjson.Pair {
