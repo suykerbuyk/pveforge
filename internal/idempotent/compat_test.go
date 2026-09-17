@@ -51,3 +51,11 @@ var _ NetworkFieldsClient = (*pve.RoutedClient)(nil)
 // ShutdownVM pass-through added to routed.go in this same task is what
 // makes this hold.
 var _ VMShutdownClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient also satisfies VMCloneClient
+// (vmclone.go). Pins BOTH halves of the Chair-review fix this Op depends
+// on: RoutedClient.CloneVM and — the one an earlier design omitted —
+// RoutedClient.StorageType. If either pass-through is ever dropped from
+// routed.go, this stops compiling rather than leaving VMClone.Apply's
+// linked-clone pre-check silently unreachable.
+var _ VMCloneClient = (*pve.RoutedClient)(nil)

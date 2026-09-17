@@ -581,3 +581,24 @@ func (c *RoutedClient) CreateSnapshot(ctx context.Context, vmid int, name, descr
 func (c *RoutedClient) ShutdownVM(ctx context.Context, vmid int) (string, error) {
 	return c.rest.ShutdownVM(ctx, c.target.Node, vmid)
 }
+
+// CloneVM clones sourceVMID into newVMID on this target's node — see
+// Client.CloneVM's own doc comment, especially on why newVMID is stamped
+// authoritatively and why go-proxmox's VirtualMachine.Clone is not used.
+// A thin pass-through with no node parameter, for the same reason CreateVM
+// above has none. A clone writes no VM config field, so it can never hit a
+// root-only field: there is nothing for RoutedClient to route.
+func (c *RoutedClient) CloneVM(ctx context.Context, sourceVMID, newVMID int, params url.Values) (string, error) {
+	return c.rest.CloneVM(ctx, c.target.Node, sourceVMID, newVMID, params)
+}
+
+// StorageType resolves storageID's backend type string on node — see
+// Client.StorageType's own doc comment on why it is exported at all (this
+// pass-through is the other half of that: without it, VMClone.Apply's
+// linked-clone pre-check cannot reach storage-type resolution through its
+// VMCloneClient interface). Keeps its node parameter, matching GetStorage's
+// own pass-through above rather than CreateVM's node-dropping shape: a
+// clone's TARGET storage may live on a different node than this client's.
+func (c *RoutedClient) StorageType(ctx context.Context, node, storageID string) (string, error) {
+	return c.rest.StorageType(ctx, node, storageID)
+}
