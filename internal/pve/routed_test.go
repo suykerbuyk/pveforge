@@ -1022,3 +1022,89 @@ func TestRoutedClient_GuestAgentForwarding(t *testing.T) {
 		t.Errorf("saw %d requests (%q), want at least 5 — one per pass-through", len(gotPaths), gotPaths)
 	}
 }
+
+// TestRoutedClient_CloneVM_Forwards covers the seam between
+// RoutedClient.CloneVM and Client.CloneVM — specifically that the SOURCE
+// vmid lands in the URL path and the NEW vmid lands in the "newid" form
+// key, and that neither is the target's node or the other vmid.
+//
+// This exists because CloneVM is this project's first RoutedClient
+// pass-through carrying TWO adjacent same-typed int parameters. Every
+// other write pass-through (CreateVM, StopVM, DestroyVM) takes exactly one
+// vmid, so transposing arguments is not even expressible there; here it is,
+// and a transposition is invisible to both packages' own tests — the
+// idempotent tests drive a fake client and never execute the pass-through,
+// while the pve tests call Client.CloneVM directly and skip it. An
+// independent review confirmed by mutation that swapping the two arguments
+// here passed the COMPLETE internal/pve and internal/idempotent suites,
+// which would send POST /nodes/{node}/qemu/201/clone with newid=100 for a
+// caller asking to clone 100 into 201 — cloning the new vmid onto the
+// source and overwriting it. Distinct values (100/201) are used for exactly
+// that reason: equal ones would make the assertion unfalsifiable.
+func TestRoutedClient_CloneVM_Forwards(t *testing.T) {
+	var gotPath, gotNewID string
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		gotNewID = r.PostForm.Get("newid")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":"UPID:qa-pve-01:1:2:3:qmclone:100:root@pam:"}`))
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	// Built via NewClient (BaseURLOverride), not NewClientForTarget: see
+	// TestRoutedClient_TypedReadForwarding's identical note.
+	rc := &RoutedClient{rest: testClient(t, restSrv), target: tg, passphrase: "roster-pass"}
+
+	upid, err := rc.CloneVM(context.Background(), 100, 201, url.Values{"storage": {"local-lvm"}})
+	if err != nil {
+		t.Fatalf("CloneVM: %v", err)
+	}
+	if want := "/nodes/qa-pve-01/qemu/100/clone"; gotPath != want {
+		t.Errorf("path = %q, want %q — the SOURCE vmid belongs in the path", gotPath, want)
+	}
+	if gotNewID != "201" {
+		t.Errorf("newid = %q, want 201 — the NEW vmid belongs in the form", gotNewID)
+	}
+	if upid == "" {
+		t.Error("upid was not returned through the pass-through")
+	}
+}
+
+// TestRoutedClient_StorageType_Forwards proves the other pass-through this
+// task added actually reaches the REST client and resolves the storage the
+// caller named — the linked-clone pre-check compares two of these, so a
+// pass-through that ignored its storageID would make the guard compare a
+// value against itself.
+func TestRoutedClient_StorageType_Forwards(t *testing.T) {
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/nodes/qa-pve-01/storage/local-lvm/status":
+			_, _ = w.Write([]byte(`{"data":{"type":"lvmthin"}}`))
+		case "/nodes/qa-pve-01/storage/tank/status":
+			_, _ = w.Write([]byte(`{"data":{"type":"zfspool"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	rc := &RoutedClient{rest: testClient(t, restSrv), target: tg, passphrase: "roster-pass"}
+
+	lvm, err := rc.StorageType(context.Background(), "qa-pve-01", "local-lvm")
+	if err != nil {
+		t.Fatalf("StorageType(local-lvm): %v", err)
+	}
+	zfs, err := rc.StorageType(context.Background(), "qa-pve-01", "tank")
+	if err != nil {
+		t.Fatalf("StorageType(tank): %v", err)
+	}
+	if lvm != "lvmthin" || zfs != "zfspool" {
+		t.Errorf("StorageType = %q/%q, want lvmthin/zfspool", lvm, zfs)
+	}
+}
