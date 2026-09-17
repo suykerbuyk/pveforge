@@ -547,6 +547,51 @@ func TestRoutedClient_FindByTag_Forwards(t *testing.T) {
 	}
 }
 
+// TestRoutedClient_StorageOrphanScan_Forwards proves RoutedClient's three
+// storage-orphan-scan pass-throughs (ClaimedVolumes, OrphanVolumes,
+// OrphanVolumesForVMID) actually forward to the REST client rather than
+// being dead/stubbed methods.
+func TestRoutedClient_StorageOrphanScan_Forwards(t *testing.T) {
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/nodes/qa-pve-01/storage/local-lvm/status":
+			_, _ = w.Write([]byte(`{"data":{"storage":"local-lvm","type":"lvmthin","shared":0}}`))
+		case "/nodes/qa-pve-01/storage/local-lvm/content":
+			_, _ = w.Write([]byte(`{"data":[{"volid":"local-lvm:vm-102-disk-0","vmid":102,"content":"images"}]}`))
+		case "/nodes/qa-pve-01/qemu":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case "/nodes/qa-pve-01/qemu/100/status/current":
+			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
+		case "/nodes/qa-pve-01/qemu/100/config":
+			_, _ = w.Write([]byte(`{"data":{"scsi0":"local-lvm:vm-100-disk-0,size=32G"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	rest := testClient(t, restSrv)
+	rc := &RoutedClient{rest: rest, target: tg, passphrase: "roster-pass"}
+	ctx := context.Background()
+
+	claimed, err := rc.ClaimedVolumes(ctx, "qa-pve-01", 100)
+	if err != nil || !claimed["local-lvm:vm-100-disk-0"] {
+		t.Errorf("ClaimedVolumes: claimed=%v err=%v", claimed, err)
+	}
+
+	orphans, err := rc.OrphanVolumes(ctx, "qa-pve-01", "local-lvm")
+	if err != nil || len(orphans) != 1 || orphans[0].Volid != "local-lvm:vm-102-disk-0" {
+		t.Errorf("OrphanVolumes: orphans=%+v err=%v", orphans, err)
+	}
+
+	matched, err := rc.OrphanVolumesForVMID(ctx, "qa-pve-01", "local-lvm", 102)
+	if err != nil || len(matched) != 1 || matched[0].Volid != "local-lvm:vm-102-disk-0" {
+		t.Errorf("OrphanVolumesForVMID: matched=%+v err=%v", matched, err)
+	}
+}
+
 // TestRoutedClient_CreateVM_Forwards proves RoutedClient.CreateVM actually
 // forwards to the REST client against this target's own node, rather than
 // being a dead/stubbed pass-through.
