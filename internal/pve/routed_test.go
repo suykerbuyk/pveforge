@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -882,5 +883,97 @@ func TestRoutedClient_WithSSH_RedialsAfterConnectionDrop(t *testing.T) {
 	}
 	if rc.ssh == nil || rc.ssh == cachedSSH {
 		t.Fatal("expected a fresh ssh connection after redial, not the stale one")
+	}
+}
+
+// TestRoutedClient_GuestAgentForwarding proves each guest-agent
+// pass-through actually forwards to the REST client, against THIS
+// target's own node and the vmid it was handed, rather than being a
+// dead/stubbed method. The node and vmid assertions are the point: a
+// pass-through wired to the wrong node, or one that drops or shifts the
+// vmid, would otherwise look identical to a working one.
+func TestRoutedClient_GuestAgentForwarding(t *testing.T) {
+	var gotPaths []string
+	var gotCommand []string
+	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/agent/exec"):
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+				return
+			}
+			gotCommand = r.PostForm["command"]
+			_, _ = w.Write([]byte(`{"data":{"pid":99}}`))
+		case strings.HasSuffix(r.URL.Path, "/agent/exec-status"):
+			_, _ = w.Write([]byte(`{"data":{"exited":1,"exitcode":0,"out-data":"routed\n"}}`))
+		case strings.HasSuffix(r.URL.Path, "/agent/network-get-interfaces"):
+			_, _ = w.Write([]byte(`{"data":{"result":[{"name":"eth0","hardware-address":"BC:24:11:2E:C5:4A","ip-addresses":[{"ip-address":"10.0.0.10","ip-address-type":"ipv4","prefix":24}]}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/config"):
+			_, _ = w.Write([]byte(`{"data":{"net0":"virtio=BC:24:11:2E:C5:4A,bridge=vmbr0"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer restSrv.Close()
+
+	tg := &roster.Target{ID: "qa-pve-01", Host: "qa-pve-01.example.com", Node: "qa-pve-01"}
+	// Built via NewClient (BaseURLOverride), not NewClientForTarget: see
+	// TestRoutedClient_TypedReadForwarding's identical note.
+	rc := &RoutedClient{rest: testClient(t, restSrv), target: tg, passphrase: "roster-pass"}
+	ctx := context.Background()
+
+	pid, err := rc.AgentExec(ctx, 100, []string{"/bin/sh", "-c", "echo routed"}, "")
+	if err != nil {
+		t.Fatalf("AgentExec: %v", err)
+	}
+	if pid != 99 {
+		t.Errorf("pid = %d, want 99", pid)
+	}
+	if len(gotCommand) != 3 || gotCommand[2] != "echo routed" {
+		t.Errorf("command = %q, want the argv forwarded intact", gotCommand)
+	}
+
+	status, err := rc.AgentExecStatus(ctx, 100, 99)
+	if err != nil {
+		t.Fatalf("AgentExecStatus: %v", err)
+	}
+	if status.OutData != "routed\n" {
+		t.Errorf("OutData = %q, want %q", status.OutData, "routed\n")
+	}
+
+	waited, err := rc.WaitForAgentExec(ctx, 100, 99, time.Millisecond, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForAgentExec: %v", err)
+	}
+	if !waited.Succeeded() {
+		t.Errorf("Succeeded() = false, want true")
+	}
+
+	ifaces, err := rc.AgentInterfaces(ctx, 100)
+	if err != nil {
+		t.Fatalf("AgentInterfaces: %v", err)
+	}
+	if len(ifaces) != 1 || ifaces[0].Name != "eth0" {
+		t.Errorf("interfaces = %+v, want one eth0", ifaces)
+	}
+
+	macs, err := rc.VMNetMACs(ctx, 100)
+	if err != nil {
+		t.Fatalf("VMNetMACs: %v", err)
+	}
+	if macs[0] != "bc:24:11:2e:c5:4a" {
+		t.Errorf("net0 mac = %q, want bc:24:11:2e:c5:4a", macs[0])
+	}
+
+	// Every call must have gone to THIS target's node and to vmid 100.
+	for _, p := range gotPaths {
+		if !strings.HasPrefix(p, "/nodes/qa-pve-01/qemu/100/") {
+			t.Errorf("request path %q did not target node qa-pve-01 / vmid 100", p)
+		}
+	}
+	if len(gotPaths) < 5 {
+		t.Errorf("saw %d requests (%q), want at least 5 — one per pass-through", len(gotPaths), gotPaths)
 	}
 }

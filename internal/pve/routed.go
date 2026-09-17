@@ -198,6 +198,51 @@ func (c *RoutedClient) TagStillClaimed(ctx context.Context, tag string, excludeV
 	return c.rest.TagStillClaimed(ctx, tag, excludeVMID)
 }
 
+// AgentExec dispatches a command inside vmid's guest via the QEMU guest
+// agent and returns its pid — see Client.AgentExec's own doc comment.
+// A thin pass-through, with no node parameter: like CreateVM/StopVM/
+// DestroyVM this acts on one VM on this RoutedClient's own target node,
+// so there is only ever one node to exec on. A guest-agent call can
+// never hit a root-only config field (it writes no config at all), so
+// there is nothing for RoutedClient to route: it always goes over REST.
+func (c *RoutedClient) AgentExec(ctx context.Context, vmid int, command []string, inputData string) (int, error) {
+	return c.rest.AgentExec(ctx, c.target.Node, vmid, command, inputData)
+}
+
+// AgentExecStatus fetches one dispatched guest command's status — see
+// Client.AgentExecStatus's own doc comment. A thin pass-through with no
+// node parameter, for the same reason AgentExec above has none.
+func (c *RoutedClient) AgentExecStatus(ctx context.Context, vmid, pid int) (*AgentExecStatus, error) {
+	return c.rest.AgentExecStatus(ctx, c.target.Node, vmid, pid)
+}
+
+// WaitForAgentExec polls a dispatched guest command to completion under a
+// bounded deadline — see Client.WaitForAgentExec's own doc comment,
+// especially on what its error return does and does not mean. A thin
+// pass-through with no node parameter, for the same reason AgentExec
+// above has none.
+func (c *RoutedClient) WaitForAgentExec(ctx context.Context, vmid, pid int, pollInterval, timeout time.Duration) (*AgentExecStatus, error) {
+	return c.rest.WaitForAgentExec(ctx, c.target.Node, vmid, pid, pollInterval, timeout)
+}
+
+// AgentInterfaces fetches the interfaces vmid's guest agent reports — see
+// Client.AgentInterfaces's own doc comment. A thin pass-through with no
+// node parameter, for the same reason AgentExec above has none.
+func (c *RoutedClient) AgentInterfaces(ctx context.Context, vmid int) ([]AgentInterface, error) {
+	return c.rest.AgentInterfaces(ctx, c.target.Node, vmid)
+}
+
+// VMNetMACs returns the configured MAC of every netN interface on vmid,
+// keyed by N — the config side of a MAC join against AgentInterfaces's
+// guest-reported side. See Client.VMNetMACs's own doc comment. A thin
+// pass-through with no node parameter, for the same reason AgentExec
+// above has none; this READS config rather than writing it, so the
+// root-only-field routing that applies to SetVMConfigField does not
+// apply here.
+func (c *RoutedClient) VMNetMACs(ctx context.Context, vmid int) (map[int]string, error) {
+	return c.rest.VMNetMACs(ctx, c.target.Node, vmid)
+}
+
 // APIDocTree fetches this target's PVE host's own static API-doc schema
 // tree — see Client.APIDocTree's own doc comment. A thin pass-through
 // like the typed getters above: schema discovery can never hit a
