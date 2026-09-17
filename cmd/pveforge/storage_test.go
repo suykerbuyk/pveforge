@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,5 +104,170 @@ func TestNewStorageGetCmd_RequiresTwoArgs(t *testing.T) {
 	cmd.SetArgs([]string{"qa-pve-01"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected an error for a missing storage-name argument")
+	}
+}
+
+// --- storage orphans ----------------------------------------------------
+
+func TestNewStorageOrphansCmd_SingleStorage_Success(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/nodes/qa-pve-01/storage/local-lvm/status":
+			_, _ = w.Write([]byte(`{"data":{"storage":"local-lvm","type":"lvmthin","shared":0}}`))
+		case "/api2/json/nodes/qa-pve-01/storage/local-lvm/content":
+			_, _ = w.Write([]byte(`{"data":[{"volid":"local-lvm:vm-105-disk-0","vmid":105,"content":"images"}]}`))
+		case "/api2/json/nodes/qa-pve-01/qemu":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newStorageOrphansCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "local-lvm"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "local-lvm:vm-105-disk-0") {
+		t.Errorf("expected the orphaned volid in output, got:\n%s", got)
+	}
+}
+
+// TestNewStorageOrphansCmd_JSONOutput documents the --output json path
+// (the default CLI-wiring test above only exercises the default kv
+// format) — proves the {"orphans": [...]} wrapper round-trips correctly
+// as valid, parseable JSON too.
+func TestNewStorageOrphansCmd_JSONOutput(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/nodes/qa-pve-01/storage/local-lvm/status":
+			_, _ = w.Write([]byte(`{"data":{"storage":"local-lvm","type":"lvmthin","shared":0}}`))
+		case "/api2/json/nodes/qa-pve-01/storage/local-lvm/content":
+			_, _ = w.Write([]byte(`{"data":[{"volid":"local-lvm:vm-105-disk-0","vmid":105,"content":"images"}]}`))
+		case "/api2/json/nodes/qa-pve-01/qemu":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newStorageOrphansCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--roster", rosterPath, "--output", "json", "qa-pve-01", "local-lvm"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var parsed struct {
+		Orphans []struct {
+			Volid string `json:"volid"`
+		} `json:"orphans"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput:\n%s", err, out.String())
+	}
+	if len(parsed.Orphans) != 1 || parsed.Orphans[0].Volid != "local-lvm:vm-105-disk-0" {
+		t.Errorf("unexpected parsed orphans: %+v", parsed.Orphans)
+	}
+}
+
+// TestNewStorageOrphansCmd_NodeWide_SkipsDisabledStorage proves the
+// node-wide scan (no storage-name given) skips a disabled storage
+// WITHOUT ever calling its content endpoint — asserted on call count,
+// not just on the rendered output, per the Chair's requirement.
+func TestNewStorageOrphansCmd_NodeWide_SkipsDisabledStorage(t *testing.T) {
+	var disabledHits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "disabled-storage") {
+			atomic.AddInt32(&disabledHits, 1)
+			http.Error(w, "must never be called", http.StatusInternalServerError)
+			return
+		}
+		switch r.URL.Path {
+		case "/api2/json/nodes/qa-pve-01/storage":
+			_, _ = w.Write([]byte(`{"data":[
+				{"storage":"enabled-storage","enabled":1},
+				{"storage":"disabled-storage","enabled":0}
+			]}`))
+		case "/api2/json/nodes/qa-pve-01/storage/enabled-storage/status":
+			_, _ = w.Write([]byte(`{"data":{"storage":"enabled-storage","type":"lvmthin","shared":0}}`))
+		case "/api2/json/nodes/qa-pve-01/storage/enabled-storage/content":
+			_, _ = w.Write([]byte(`{"data":[{"volid":"enabled-storage:vm-200-disk-0","vmid":200,"content":"images"}]}`))
+		case "/api2/json/nodes/qa-pve-01/qemu":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newStorageOrphansCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := atomic.LoadInt32(&disabledHits); got != 0 {
+		t.Errorf("expected disabled-storage's content endpoint to never be called, got %d hits", got)
+	}
+	got := out.String()
+	if !strings.Contains(got, "enabled-storage:vm-200-disk-0") {
+		t.Errorf("expected the enabled storage's orphan in output, got:\n%s", got)
+	}
+}
+
+// TestNewStorageOrphansCmd_GetStoragesFailure_Errors proves a failed
+// node-wide storage listing aborts the command rather than silently
+// reporting zero orphans scanned.
+func TestNewStorageOrphansCmd_GetStoragesFailure_Errors(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api2/json/nodes/qa-pve-01/storage" {
+			http.Error(w, "storage list exploded", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newStorageOrphansCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected an error when GetStorages fails, got output:\n%s", out.String())
+	}
+}
+
+func TestNewStorageOrphansCmd_RequiresAtLeastOneArg(t *testing.T) {
+	cmd := newStorageOrphansCmd()
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for a missing target-id argument")
 	}
 }
