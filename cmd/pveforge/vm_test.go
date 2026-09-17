@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -631,5 +633,613 @@ func TestNewVMSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied(t *testing.T
 	}
 	if atomic.LoadInt32(&writeHit) != 0 {
 		t.Error("expected no write to be attempted: Validate should reject the batch before any write")
+	}
+}
+
+// vmCreateFake is a minimal stateful PVE stand-in for `vm create`'s three
+// network touchpoints, each independently steerable so a test can put the
+// cluster in states a single boolean can't express — in particular
+// "vmid taken cluster-wide but NOT present on this node", which is what
+// separates the NextVMID pre-check from the post-Run backstop.
+type vmCreateFake struct {
+	// nextIDTaken makes GET /cluster/nextid?vmid=N answer with PVE's own
+	// "VM N already exists" rejection (the cluster-wide view NextVMID's
+	// pin path consults).
+	nextIDTaken bool
+	// nextIDBroken makes that same check fail for a reason that is NOT
+	// "taken" — a 500. vmidFree must propagate it rather than read it as
+	// "free" and wave the create through.
+	nextIDBroken bool
+
+	// createRejects makes POST /nodes/{node}/qemu answer with PVE's own
+	// "VM N already exists" rejection — the collision that happens at the
+	// create call itself, past both the pre-check and Read.
+	createRejects bool
+
+	createCalls  int32
+	nextIDChecks int32
+
+	// mu guards the fields below: httptest serves each request on its own
+	// goroutine, so the POST handler's write to vmPresent and the later
+	// GET handler's read of it are cross-goroutine even though the client
+	// issues them strictly in sequence. The lock tests additionally read
+	// createdForm from the TEST goroutine while the command runs on
+	// another, which makes the guard load-bearing rather than defensive.
+	mu          sync.Mutex
+	vmPresentMu bool
+	createdForm url.Values
+}
+
+func (f *vmCreateFake) present() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.vmPresentMu
+}
+
+func (f *vmCreateFake) setPresent(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.vmPresentMu = v
+}
+
+func (f *vmCreateFake) form() url.Values {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createdForm
+}
+
+func (f *vmCreateFake) setForm(v url.Values) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createdForm = v
+}
+
+// newPresentFake starts with the VM already visible on this node — the
+// state where the NextVMID pre-check passes but VMCreate.Read finds
+// something, i.e. the residual race the Changed==false backstop exists
+// for.
+func newPresentFake() *vmCreateFake {
+	f := &vmCreateFake{}
+	f.setPresent(true)
+	return f
+}
+
+// waitForCount blocks until counter reaches want, or timeout elapses.
+//
+// These tests synchronize on an OBSERVABLE event (the pre-check's request
+// landing at the fake server) rather than on a wall-clock guess at how
+// long roster decryption, the TLS handshake and the first round-trip
+// take. That guess is exactly what made an earlier version of the two
+// lock tests below pass in isolation and then FAIL inside a loaded
+// `make test` -race run, where a 5s context budget was consumed entirely
+// by setup before the command ever reached the lock it was supposed to
+// block on.
+func waitForCount(counter *int32, want int32, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if atomic.LoadInt32(counter) >= want {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// runVMCreateAsync starts `vm create <vmid>` on its own goroutine with a
+// deadline-free context, so the ONLY thing that can release it is the
+// lock it is waiting on. Returns a channel carrying its exit error.
+func runVMCreateAsync(rosterPath, vmid string) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		cmd := newVMCreateCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", vmid, "cores=4"})
+		done <- cmd.Execute()
+	}()
+	return done
+}
+
+// newVMCreateServer wires f up as a TLS httptest server speaking the
+// /api2/json-prefixed paths the roster-driven client actually uses.
+func newVMCreateServer(t *testing.T, node string, vmid int, f *vmCreateFake) *httptest.Server {
+	t.Helper()
+	upid := fmt.Sprintf("UPID:%s:00001234:0000ABCD:5F000000:qmcreate:%d:root@pam:", node, vmid)
+	base := "/api2/json"
+
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == base+"/cluster/nextid":
+			atomic.AddInt32(&f.nextIDChecks, 1)
+			if got := r.URL.Query().Get("vmid"); got != fmt.Sprint(vmid) {
+				t.Errorf("vm create must consult NextVMID's PIN path only (?vmid=%d), got query %q", vmid, r.URL.RawQuery)
+			}
+			if f.nextIDBroken {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if f.nextIDTaken {
+				// The exact body shape PVE returns for a taken vmid — see
+				// internal/pve/nextvmid_test.go's own canned fixture.
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, `{"errors":{"vmid":"VM %d already exists"},"data":null}`, vmid)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"data":%q}`, fmt.Sprint(vmid))
+
+		case r.URL.Path == fmt.Sprintf("%s/nodes/%s/qemu/%d/status/current", base, node, vmid):
+			if !f.present() {
+				http.Error(w, "no such vm", http.StatusNotFound)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"status":"running","vmid":%d}}`, vmid)
+
+		case r.URL.Path == fmt.Sprintf("%s/nodes/%s/qemu/%d/config", base, node, vmid):
+			_, _ = fmt.Fprint(w, `{"data":{"name":"already-here","cores":2}}`)
+
+		case r.URL.Path == fmt.Sprintf("%s/nodes/%s/qemu", base, node) && r.Method == http.MethodPost:
+			atomic.AddInt32(&f.createCalls, 1)
+			if err := r.ParseForm(); err != nil {
+				// t.Errorf, never t.Fatalf: this runs on httptest's own
+				// per-request goroutine, and t.Fatalf calls runtime.Goexit
+				// on its CALLING goroutine — which would abandon this
+				// handler without ever writing a response, hang the client,
+				// and surface as an unrelated 120s timeout somewhere else.
+				t.Errorf("ParseForm: %v", err)
+				http.Error(w, "bad form", http.StatusBadRequest)
+				return
+			}
+			f.setForm(r.PostForm)
+			if f.createRejects {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprintf(w, `{"errors":{"vmid":"VM %d already exists"},"data":null}`, vmid)
+				return
+			}
+			// The create "succeeds": from here on the VM is present, so
+			// idempotent.Run's own best-effort post-Apply re-read sees it.
+			f.setPresent(true)
+			_, _ = fmt.Fprintf(w, `{"data":%q}`, upid)
+
+		case strings.HasPrefix(r.URL.Path, fmt.Sprintf("%s/nodes/%s/tasks/", base, node)):
+			_, _ = fmt.Fprintf(w, `{"data":{"status":"stopped","exitstatus":"OK","upid":%q,"node":%q}}`, upid, node)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// vmCreateRoster points a one-target roster at srv and arms the
+// passphrase env var, the same two-line preamble every other command test
+// in this package opens with.
+func vmCreateRoster(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+	return rosterPath
+}
+
+// TestNewVMCreateCmd_Success is the baseline the collision tests are
+// measured against: a free vmid creates, reports the id it used, and puts
+// the caller's parameters (tags included, atomically, with no separate
+// post-create tag write) on the create call itself.
+func TestNewVMCreateCmd_Success(t *testing.T) {
+	f := &vmCreateFake{}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4", "memory=2048", "tags=pveforge"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "vm 100 created") {
+		t.Errorf("expected the created vmid to be reported, got: %q", got)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 1 {
+		t.Fatalf("expected exactly 1 create call, got %d", got)
+	}
+	if got := atomic.LoadInt32(&f.nextIDChecks); got != 1 {
+		t.Errorf("expected exactly 1 NextVMID pin check, got %d", got)
+	}
+	if got := f.form().Get("vmid"); got != "100" {
+		t.Errorf("create form vmid = %q, want 100", got)
+	}
+	if got := f.form().Get("cores"); got != "4" {
+		t.Errorf("create form cores = %q, want 4", got)
+	}
+	if got := f.form().Get("tags"); got != "pveforge" {
+		t.Errorf("create form tags = %q, want pveforge — tags must ride the create call itself, never a separate post-create write", got)
+	}
+}
+
+// TestNewVMCreateCmd_TakenVMID_ErrorsAndNamesIt is the unit's central
+// guarantee AND the sensitivity test for the NextVMID pre-check.
+//
+// The fake deliberately reports the vmid taken CLUSTER-WIDE (via
+// /cluster/nextid, which is what NextVMID's pin path consults) while the
+// VM is NOT visible on this node (GetVM 404s) — a real, ordinary state:
+// the VM lives on a different node of the same cluster. On that state the
+// pre-check is the ONLY thing standing between the caller and a create,
+// because VMCreate.Read would see nothing, Satisfied would be false, and
+// the Op would happily Apply.
+//
+// So: delete the `client.NextVMID(...)` pre-check from newVMCreateCmd and
+// this test fails — the command exits 0, createCalls becomes 1, and the
+// shipped Satisfied semantics never get a chance to object. That is the
+// mutation this test is here to catch.
+func TestNewVMCreateCmd_TakenVMID_ErrorsAndNamesIt(t *testing.T) {
+	f := &vmCreateFake{nextIDTaken: true}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected vm create against a taken vmid to ERROR, got success — a silent no-op is exactly what this command exists to prevent")
+	}
+	if !strings.Contains(err.Error(), "100") {
+		t.Errorf("the error must NAME the taken vmid, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already taken") {
+		t.Errorf("expected NextVMID's own verbatim pin-taken text, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("a refused vmid must never reach the create call, got %d create calls", got)
+	}
+}
+
+// TestNewVMCreateCmd_TakenVMID_NeverSubstitutesAnotherID guards the other
+// half of the contract: the refusal must be terminal. A caller who asked
+// for one VM must not discover it created one at an id it never saw, so
+// nothing may retry the walk-forward search after a pin is refused.
+func TestNewVMCreateCmd_TakenVMID_NeverSubstitutesAnotherID(t *testing.T) {
+	f := &vmCreateFake{nextIDTaken: true}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error")
+	}
+	// Exactly one pin check and no bare /cluster/nextid call: the fake's
+	// handler fails the test if it ever sees a request without ?vmid=100,
+	// which is what an unpinned walk-forward search would issue.
+	if got := atomic.LoadInt32(&f.nextIDChecks); got != 1 {
+		t.Errorf("expected exactly 1 pin check and no walk-forward search, got %d nextid calls", got)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("expected no create at any vmid, got %d", got)
+	}
+}
+
+// TestNewVMCreateCmd_ResidualRace_ChangedFalseBackstopFires is the
+// sensitivity test for the post-Run backstop.
+//
+// It simulates exactly the window the backstop exists for: the pre-check
+// PASSES (/cluster/nextid reports the vmid free), but by the time
+// VMCreate.Read runs the VM is there. VMCreate.Satisfied returns true on
+// a non-empty read (internal/idempotent/vmcreate.go:158-160), so
+// idempotent.Run skips Apply and returns success with Changed == false —
+// a silent no-op. Without the backstop the command exits 0 having created
+// nothing.
+//
+// So: delete the `if !res.Changed` branch from newVMCreateCmd and this
+// test fails with a nil error. Note the pre-check cannot save this case —
+// it already passed — which is what makes the two guards genuinely
+// independent rather than one guard tested twice.
+func TestNewVMCreateCmd_ResidualRace_ChangedFalseBackstopFires(t *testing.T) {
+	f := newPresentFake()
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected the Changed==false backstop to turn the Op's idempotent-satisfied no-op into an error, got success")
+	}
+	if !strings.Contains(err.Error(), "100") {
+		t.Errorf("the backstop error must NAME the vmid, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected the backstop to say the vm already exists, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.nextIDChecks); got != 1 {
+		t.Errorf("the pre-check must still have run (and passed), got %d nextid calls", got)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("Run must have skipped Apply on the satisfied path, got %d create calls", got)
+	}
+}
+
+// TestNewVMCreateCmd_SerializedUnderPerVMLockKey names, in executable
+// assertions, WHICH lock key covers the create: {qa-pve-01, vm, 100} —
+// the same per-VM key `vm get` and `vm set` already use. It takes a PAIR
+// of tests to identify a key, because "it blocked" alone is also what a
+// coarser target-wide lock would look like:
+//
+//   - here: holding {vm,100} blocks the create, and it never reaches the
+//     create call, so the authoritative existence check idempotent.Run
+//     performs under that key really is serialized against a concurrent
+//     pveforge mutation on this VMID;
+//   - next test: holding {vm,101} does NOT block it, so the key is
+//     per-VMID rather than target- or node-wide.
+//
+// Deliberately asserts BEHAVIOR (blocked, then completes on release)
+// rather than matching the lock key's text in a timeout error: the
+// text-matching version depended on a context deadline firing in exactly
+// the right phase, which is not a property that survives a loaded machine.
+func TestNewVMCreateCmd_SerializedUnderPerVMLockKey(t *testing.T) {
+	f := &vmCreateFake{}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
+	unlock, err := lock.Mutation(context.Background(), rosterPath, key)
+	if err != nil {
+		t.Fatalf("acquire mutation: %v", err)
+	}
+
+	done := runVMCreateAsync(rosterPath, "100")
+
+	// The pre-check runs BEFORE idempotent.Run takes the lock, so wait for
+	// it to land: past this point the command is at the lock, and the
+	// grace below measures the lock wait rather than setup.
+	//
+	// NOTE for anyone mutation-testing the pre-check: deleting the
+	// client.NextVMID call makes this wait run its full 120s before failing,
+	// so the suite LOOKS hung for two minutes. It is not hung — it is this
+	// line correctly reporting that the pre-check never happened.
+	if !waitForCount(&f.nextIDChecks, 1, 120*time.Second) {
+		t.Fatal("the NextVMID pre-check never reached the fake server")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("vm create completed while %s was held by another mutation: %v", key, err)
+	case <-time.After(time.Second):
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("the create must never run while another mutation holds %s, got %d create calls", key, got)
+	}
+
+	if err := unlock(); err != nil {
+		t.Fatalf("release mutation: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("vm create failed after the lock released: %v", err)
+		}
+	case <-time.After(120 * time.Second):
+		t.Fatalf("vm create never completed after %s was released", key)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 1 {
+		t.Errorf("expected exactly 1 create once the lock released, got %d", got)
+	}
+}
+
+// TestNewVMCreateCmd_LockKeyIsPerVMIDNotTargetWide is the specificity half
+// of the pair: a mutation held on a DIFFERENT vmid must not block this
+// create at all.
+func TestNewVMCreateCmd_LockKeyIsPerVMIDNotTargetWide(t *testing.T) {
+	f := &vmCreateFake{}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	other := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "101"}
+	unlock, err := lock.Mutation(context.Background(), rosterPath, other)
+	if err != nil {
+		t.Fatalf("acquire mutation on %s: %v", other, err)
+	}
+	defer func() { _ = unlock() }()
+
+	select {
+	case err := <-runVMCreateAsync(rosterPath, "100"):
+		if err != nil {
+			t.Fatalf("a mutation held on %s must not block a create of vm 100: %v", other, err)
+		}
+	case <-time.After(120 * time.Second):
+		t.Fatalf("a mutation held on %s blocked a create of vm 100 — the create lock is not per-VMID", other)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 1 {
+		t.Errorf("expected the create to proceed, got %d create calls", got)
+	}
+}
+
+// TestNewVMCreateCmd_RejectsAutoAllocationSentinel covers the one piece of
+// vmid validation this command does: 0 is NextVMID's "no pin,
+// auto-allocate" sentinel, and auto-allocation is not this command's
+// contract. This is sentinel hygiene, not band or range policy — nothing
+// here knows about VMID ranges.
+func TestNewVMCreateCmd_RejectsAutoAllocationSentinel(t *testing.T) {
+	for _, arg := range []string{"0", "-1"} {
+		cmd := newVMCreateCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		// "--" so cobra reads a negative vmid as a positional argument
+		// rather than as the shorthand flag "-1".
+		cmd.SetArgs([]string{"--", "qa-pve-01", arg, "cores=4"})
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatalf("vmid %s: expected an error, got success", arg)
+		}
+		if !strings.Contains(err.Error(), "explicit positive vmid") {
+			t.Errorf("vmid %s: expected the auto-allocation refusal, got: %v", arg, err)
+		}
+	}
+}
+
+func TestNewVMCreateCmd_InvalidVMID(t *testing.T) {
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"qa-pve-01", "not-a-number", "cores=4"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "invalid vmid") {
+		t.Fatalf("expected an invalid-vmid error, got: %v", err)
+	}
+}
+
+// TestNewVMCreateCmd_OrphanIPConfigRejected proves the explicit
+// VMCreate.Validate() call ahead of idempotent.Run is load-bearing: an
+// ipconfigN with no matching netN is refused before any network call.
+func TestNewVMCreateCmd_OrphanIPConfigRejected(t *testing.T) {
+	f := &vmCreateFake{}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "ipconfig0=ip=10.0.0.5/24"})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "no matching net0") {
+		t.Fatalf("expected an orphan-ipconfig rejection, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("expected no create call, got %d", got)
+	}
+}
+
+func TestVMCreateParams_ModeSelection(t *testing.T) {
+	if _, err := vmCreateParams(nil, "", ""); err == nil {
+		t.Error("expected an error when no input mode is given")
+	}
+	if _, err := vmCreateParams([]string{"cores=4"}, `{"memory":"2048"}`, ""); err == nil {
+		t.Error("expected an error when two input modes are given")
+	}
+	got, err := vmCreateParams(nil, `{"memory":"2048"}`, "")
+	if err != nil {
+		t.Fatalf("vmCreateParams(--json): %v", err)
+	}
+	if got.Get("memory") != "2048" {
+		t.Errorf("--json memory = %q, want 2048", got.Get("memory"))
+	}
+}
+
+// TestNewVMCreateCmd_CreateTimeCollision_SurfacesPVEsOwnError covers the
+// third and last collision path: the pre-check passes, VMCreate.Read sees
+// nothing, and the id is taken only by the time CreateVM itself runs.
+// There is nothing left to catch it client-side, so the requirement is
+// that PVE's own verbatim rejection reaches the caller — never swallowed,
+// and never retried into some other vmid the caller did not ask for.
+func TestNewVMCreateCmd_CreateTimeCollision_SurfacesPVEsOwnError(t *testing.T) {
+	f := &vmCreateFake{createRejects: true}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected the create-time collision to fail the command")
+	}
+	if !strings.Contains(err.Error(), "VM 100 already exists") {
+		t.Errorf("expected PVE's own verbatim rejection text to reach the caller, got: %v", err)
+	}
+	// Exactly one create attempt, at the vmid the caller named: a retry
+	// that silently moved to another id is the failure this must not ship.
+	if got := atomic.LoadInt32(&f.createCalls); got != 1 {
+		t.Errorf("expected exactly 1 create attempt and no substitution, got %d", got)
+	}
+	if got := f.form().Get("vmid"); got != "100" {
+		t.Errorf("the single create attempt must be at the requested vmid, got %q", got)
+	}
+}
+
+// TestNewVMCreateCmd_RejectsVMIDAsCreateParameter covers the one place a
+// user-typed value could vanish without a word. pve.CreateVM stamps
+// form.Set("vmid", ...) from the Op's VMID, so a `vmid=999` among the
+// create parameters is overwritten by the positional — the safe
+// resolution, but a silent one. On the command whose entire contract is
+// that the VMID is explicit, silently discarding an explicitly typed vmid
+// is the wrong shape even when the outcome is right.
+func TestNewVMCreateCmd_RejectsVMIDAsCreateParameter(t *testing.T) {
+	f := &vmCreateFake{}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4", "vmid=999"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected a vmid= create parameter to be REFUSED, not silently discarded")
+	}
+	if !strings.Contains(err.Error(), "vmid is the positional argument") {
+		t.Errorf("expected the positional-argument explanation, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("expected no create call, got %d", got)
+	}
+	// Refused before any network call at all: parameter parsing happens
+	// ahead of client resolution.
+	if got := atomic.LoadInt32(&f.nextIDChecks); got != 0 {
+		t.Errorf("expected the refusal before any PVE contact, got %d nextid calls", got)
+	}
+}
+
+// TestNewVMCreateCmd_PreCheckFailsClosedOnNonTakenError guards the
+// fail-closed direction of the pre-check, which nothing else in this suite
+// covers.
+//
+// vmidFree only reads a rejection as "taken" when it matches PVE's own
+// vmid-specific text (internal/pve.isVMIDTakenError); ANY other error —
+// here a 500 — propagates. The failure this catches is a fail-OPEN
+// regression: if that classification ever widened to treat an unknown
+// error as "free", a PVE outage would stop being a refusal and start being
+// a create against an id nobody verified.
+func TestNewVMCreateCmd_PreCheckFailsClosedOnNonTakenError(t *testing.T) {
+	f := &vmCreateFake{nextIDBroken: true}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected a failing vmid check to REFUSE the create, not fall through to it")
+	}
+	if !strings.Contains(err.Error(), "check pin 100") {
+		t.Errorf("expected NextVMID's own check-pin wrapping, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("a create must never run when the vmid check itself failed, got %d create calls", got)
 	}
 }
