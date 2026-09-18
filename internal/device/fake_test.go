@@ -3,7 +3,7 @@ package device
 import (
 	"context"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // fakeClient is a scriptable Client, shared by every resolver's tests in

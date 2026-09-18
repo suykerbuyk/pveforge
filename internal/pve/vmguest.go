@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // defaultAgentExecPollInterval is how often WaitForAgentExec polls a
@@ -139,7 +139,7 @@ func IsAgentUnavailableError(err error) bool {
 // own payload.
 //
 // A pveforge-owned type rather than go-proxmox's AgentExecStatus
-// (types.go:2204), for two reasons beyond this package's standing
+// (types.go:2217), for two reasons beyond this package's standing
 // preference for its own raw decode path. go-proxmox types Signal as a
 // bool, but QEMU Guest Agent's GuestExecStatus reports signal as the
 // signal NUMBER and omits exitcode entirely when a process was

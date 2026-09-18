@@ -104,7 +104,7 @@ func isMissingNetworkInterfaceError(err error) bool {
 // explicitly and by name because nothing about a normal code review or a
 // naive test would catch a regression here: go-proxmox's own
 // Node.NewNetwork and NodeNetwork.Delete (see
-// github.com/luthermonson/go-proxmox's nodes_network.go) each AUTO-COMMIT
+// github.com/suykerbuyk/go-proxmox's nodes_network.go) each AUTO-COMMIT
 // internally — every one of them calls n.NetworkReload(ctx) (PVE's own
 // PUT /nodes/{node}/network) itself, immediately after its own POST/DELETE,
 // with no way to opt out. Reaching for either of those "obviously simpler,

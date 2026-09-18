@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // defaultTaskPollInterval is how often WaitForTask polls a running task's

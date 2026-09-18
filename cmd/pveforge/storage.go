@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"

@@ -12,7 +12,7 @@ import (
 // — copying sourceVMID into a new VM at newVMID on node. params carries
 // every OTHER raw PVE clone parameter the caller wants set (full, storage,
 // target, name, pool, snapname — proxmox.VirtualMachineCloneOptions's own
-// field names 1:1, types.go:1473, but as raw url.Values for the same
+// field names 1:1, types.go:1486, but as raw url.Values for the same
 // schema-free reason CreateVM takes them that way).
 //
 // Returns the UPID of the PVE task the clone kicks off — cloning is always

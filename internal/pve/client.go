@@ -1,4 +1,4 @@
-// Package pve is pveforge's thin wrapper over github.com/luthermonson/
+// Package pve is pveforge's thin wrapper over github.com/suykerbuyk/
 // go-proxmox, scoped for now to exactly what the bootstrap flow needs: a
 // token-authenticated client and the ACL-grant validation step that proves
 // a freshly minted token actually has working grants. Later tasks (the
@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"time"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // DefaultAPIPort is Proxmox's default API port when a target doesn't

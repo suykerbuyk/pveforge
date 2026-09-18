@@ -3,7 +3,7 @@ package idempotent
 import (
 	"context"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )

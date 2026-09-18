@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // fakeClient is a scriptable Client, shared by every Op's tests in this
