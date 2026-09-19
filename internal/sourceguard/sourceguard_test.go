@@ -171,3 +171,62 @@ func contains(all []string, want string) bool {
 	}
 	return false
 }
+
+// methodsetDir is the fixture for ExportedMethods and TestCallees. Like
+// fixtureDir, it is only ever read as parser input.
+const methodsetDir = "testdata/methodset"
+
+// TestExportedMethods_ListsExactlyTheExportedMethods pins the whole answer at
+// once, so every way of getting it wrong shows up as a difference. The
+// fixture's T also has an unexported method, a method in a _test.go file, and
+// shares its package with U's Delta. Reporting any of those would be wrong,
+// and so would missing the value-receiver Gamma or the sibling file's Zeta.
+func TestExportedMethods_ListsExactlyTheExportedMethods(t *testing.T) {
+	got, err := ExportedMethods(methodsetDir, "T")
+	if err != nil {
+		t.Fatalf("ExportedMethods: %v", err)
+	}
+	if want := []string{"Alpha", "Gamma", "Zeta"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("ExportedMethods(T) = %v, want %v", got, want)
+	}
+}
+
+// TestExportedMethods_UnknownReceiverIsAnError: a completeness gate over a
+// renamed-away type must fail, not pass by enumerating nothing.
+func TestExportedMethods_UnknownReceiverIsAnError(t *testing.T) {
+	if got, err := ExportedMethods(methodsetDir, "Nope"); err == nil {
+		t.Fatalf("ExportedMethods(Nope) = %v with no error, want an error", got)
+	}
+}
+
+// TestCallees_FollowsClosuresAndTestHelpersButNotProduction pins both halves
+// of TestCallees' boundary. TestUsesAlpha calls Alpha only inside a closure,
+// and reaches Zeta only through a helper in its own test file: both must be
+// found. It also calls Epsilon, which lives in a non-test file and calls
+// Delta. Epsilon itself is a callee and must be found, but Delta must not,
+// because following into production code would credit a test with every
+// name that code mentions.
+func TestCallees_FollowsClosuresAndTestHelpersButNotProduction(t *testing.T) {
+	all, err := TestCallees(methodsetDir, "TestUsesAlpha")
+	if err != nil {
+		t.Fatalf("TestCallees: %v", err)
+	}
+	got := all["TestUsesAlpha"]
+	for _, want := range []string{"Alpha", "Zeta", "Epsilon"} {
+		if !contains(got, want) {
+			t.Errorf("TestCallees(TestUsesAlpha) = %v, missing %q", got, want)
+		}
+	}
+	if contains(got, "Delta") {
+		t.Errorf("TestCallees(TestUsesAlpha) = %v, includes Delta, which is reachable only through a non-test file", got)
+	}
+}
+
+// TestCallees_UnknownFunctionIsAnError: a table naming a test that does not
+// exist must fail the gate, not be credited with calling nothing. A known name
+// alongside it must not rescue the call.
+func TestCallees_UnknownFunctionIsAnError(t *testing.T) {
+	if got, err := TestCallees(methodsetDir, "TestUsesAlpha", "TestDoesNotExist"); err == nil {
+		t.Fatalf("TestCallees(TestUsesAlpha, TestDoesNotExist) = %v with no error, want an error", got)
+	}
+}
