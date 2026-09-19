@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
 func TestResolveRosterPath_PositionalArgWins(t *testing.T) {
@@ -91,13 +89,13 @@ func TestRosterValidate_ReportsPerTargetAuthStatus(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.toml")
 
-	tokenArmored, err := roster.EncryptString([]byte("tok-secret"), "pw")
+	tokenArmored, err := fixtureEncrypt([]byte("tok-secret"), "pw")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
-	sshArmored, err := roster.EncryptString([]byte("ssh-key"), "pw")
+	sshArmored, err := fixtureEncrypt([]byte("ssh-key"), "pw")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 
 	fixture := `[[targets]]

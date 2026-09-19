@@ -227,13 +227,13 @@ func bootstrappedIntegrationTarget(t *testing.T, restSrv *httptest.Server, fs *f
 	}
 	defer c.Close()
 
-	tokenArmored, err := roster.EncryptString([]byte("tok-secret-value"), passphrase)
+	tokenArmored, err := fixtureEncrypt([]byte("tok-secret-value"), passphrase)
 	if err != nil {
-		t.Fatalf("EncryptString token: %v", err)
+		t.Fatalf("fixtureEncrypt token: %v", err)
 	}
-	sshArmored, err := roster.EncryptString(kp.PrivateKeyPEM, passphrase)
+	sshArmored, err := fixtureEncrypt(kp.PrivateKeyPEM, passphrase)
 	if err != nil {
-		t.Fatalf("EncryptString ssh key: %v", err)
+		t.Fatalf("fixtureEncrypt ssh key: %v", err)
 	}
 
 	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(restSrv.URL, "https://"))

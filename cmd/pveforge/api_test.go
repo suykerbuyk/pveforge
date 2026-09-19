@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -251,6 +250,18 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand(t *testing.T) {
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
+	// Controls: a mutation on a DIFFERENT vm must block neither command.
+	other := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "101"}
+	vmControl := newVMGetCmd()
+	vmControl.SetOut(&bytes.Buffer{})
+	vmControl.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, other, vmControl)
+	apiControl := newAPIVerbCmd(http.MethodGet, "get")
+	apiControl.SetOut(&bytes.Buffer{})
+	apiControl.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/qemu/100/config", "qa-pve-01"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, other, apiControl)
+	atomic.StoreInt32(&hits, 0)
+
 	// Same key vm.go's own lock.Read call would use for vmid 100.
 	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
 	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
@@ -261,19 +272,23 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand(t *testing.T) {
 	vmGet := newVMGetCmd()
 	vmGet.SetOut(&bytes.Buffer{})
 	vmGet.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel1()
 	if err := vmGet.ExecuteContext(ctx1); err == nil {
 		t.Fatal("expected the typed `vm get` to be blocked by the api-shaped mutation lock")
+	} else if !strings.Contains(err.Error(), "acquire read lock") {
+		t.Errorf("expected a read-lock-acquisition error from `vm get`, got: %v", err)
 	}
 
 	apiGet := newAPIVerbCmd(http.MethodGet, "get")
 	apiGet.SetOut(&bytes.Buffer{})
 	apiGet.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/qemu/100/config", "qa-pve-01"})
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel2()
 	if err := apiGet.ExecuteContext(ctx2); err == nil {
 		t.Fatal("expected `api get` on the same vm path to be blocked by the same lock key")
+	} else if !strings.Contains(err.Error(), "acquire lock for") {
+		t.Errorf("expected a lock-acquisition error from `api get`, got: %v", err)
 	}
 
 	if got := atomic.LoadInt32(&hits); got != 0 {
@@ -319,6 +334,18 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_LeadingZeroVMID(t *testing.T) {
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
+	// Controls: a mutation on a DIFFERENT vm must block neither command.
+	other := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "101"}
+	vmControl := newVMGetCmd()
+	vmControl.SetOut(&bytes.Buffer{})
+	vmControl.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "0100"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, other, vmControl)
+	apiControl := newAPIVerbCmd(http.MethodGet, "get")
+	apiControl.SetOut(&bytes.Buffer{})
+	apiControl.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/qemu/0100/config", "qa-pve-01"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, other, apiControl)
+	atomic.StoreInt32(&hits, 0)
+
 	// The normalized key BOTH commands below must resolve to, despite
 	// neither of their own inputs being spelled "100" verbatim.
 	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
@@ -330,19 +357,23 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_LeadingZeroVMID(t *testing.T) {
 	vmGet := newVMGetCmd()
 	vmGet.SetOut(&bytes.Buffer{})
 	vmGet.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "0100"})
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel1()
 	if err := vmGet.ExecuteContext(ctx1); err == nil {
 		t.Fatal("expected `vm get ... 0100` to be blocked by the ID:\"100\" mutation lock")
+	} else if !strings.Contains(err.Error(), "acquire read lock") {
+		t.Errorf("expected a read-lock-acquisition error from `vm get`, got: %v", err)
 	}
 
 	apiGet := newAPIVerbCmd(http.MethodGet, "get")
 	apiGet.SetOut(&bytes.Buffer{})
 	apiGet.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/qemu/0100/config", "qa-pve-01"})
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel2()
 	if err := apiGet.ExecuteContext(ctx2); err == nil {
 		t.Fatal("expected `api get .../qemu/0100/config` to be blocked by the ID:\"100\" mutation lock")
+	} else if !strings.Contains(err.Error(), "acquire lock for") {
+		t.Errorf("expected a lock-acquisition error from `api get`, got: %v", err)
 	}
 
 	if got := atomic.LoadInt32(&hits); got != 0 {
@@ -382,12 +413,25 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_Network(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24"}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","cidr":"10.0.0.5/24"}}`))
 	}))
 	defer srv.Close()
 
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	// Controls: a network mutation on a DIFFERENT node must block neither
+	// command.
+	other := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "qa-pve-02"}
+	netControl := newNetworkGetCmd()
+	netControl.SetOut(&bytes.Buffer{})
+	netControl.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "vmbr0"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, other, netControl)
+	apiControl := newAPIVerbCmd(http.MethodPut, "put")
+	apiControl.SetOut(&bytes.Buffer{})
+	apiControl.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/network", "qa-pve-01"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, other, apiControl)
+	atomic.StoreInt32(&hits, 0)
 
 	// The node-keyed lock `network bridge create|destroy` will use once
 	// wired into the CLI, via NetworkBridgeEnsure's own NetworkLockKey.
@@ -400,10 +444,12 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_Network(t *testing.T) {
 	netGet := newNetworkGetCmd()
 	netGet.SetOut(&bytes.Buffer{})
 	netGet.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "vmbr0"})
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel1()
 	if err := netGet.ExecuteContext(ctx1); err == nil {
 		t.Fatal("expected the typed `network get` to be blocked by the node-keyed mutation lock")
+	} else if !strings.Contains(err.Error(), "acquire read lock") {
+		t.Errorf("expected a read-lock-acquisition error from `network get`, got: %v", err)
 	}
 
 	apiPut := newAPIVerbCmd(http.MethodPut, "put")
@@ -412,10 +458,12 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_Network(t *testing.T) {
 	// NetworkBridgeEnsure's own commit/PUT and whole-node-revert/DELETE
 	// calls use.
 	apiPut.SetArgs([]string{"--roster", rosterPath, "/nodes/qa-pve-01/network", "qa-pve-01"})
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel2()
 	if err := apiPut.ExecuteContext(ctx2); err == nil {
 		t.Fatal("expected `api put` on the bare network collection path to be blocked by the same node-keyed lock")
+	} else if !strings.Contains(err.Error(), "acquire lock for") {
+		t.Errorf("expected a lock-acquisition error from `api put`, got: %v", err)
 	}
 
 	if got := atomic.LoadInt32(&hits); got != 0 {
@@ -442,11 +490,28 @@ func TestNewAPICmd_SharesLockKeyWithTypedCommand_Network(t *testing.T) {
 // mutation held via lock.Mutation must block the EXISTING typed `vm get`
 // command, not just another `api` invocation.
 func TestNewAPICmd_APIMutationBlocksTypedRead(t *testing.T) {
-	rosterPath := newTestRosterWithTLSTarget(t, httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"status":"running","vmid":100}}`))
-	})), "qa-pve-01", "qa-pve-01")
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	// Control: the lock `api post` would take for a DIFFERENT vm must not
+	// block this read.
+	otherKey, ok := apiObjectKey("qa-pve-01", "/nodes/qa-pve-01/qemu/101/config")
+	if !ok {
+		t.Fatal("expected apiObjectKey to match the control path")
+	}
+	control := newVMGetCmd()
+	control.SetOut(&bytes.Buffer{})
+	control.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, otherKey, control)
+	atomic.StoreInt32(&hits, 0)
 
 	// Simulates the lock `api post /nodes/qa-pve-01/qemu/100/config` would
 	// take, via the exact key apiObjectKey derives for that path.
@@ -463,10 +528,15 @@ func TestNewAPICmd_APIMutationBlocksTypedRead(t *testing.T) {
 	vmGet := newVMGetCmd()
 	vmGet.SetOut(&bytes.Buffer{})
 	vmGet.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel()
 	if err := vmGet.ExecuteContext(ctx); err == nil {
 		t.Fatal("expected the typed `vm get` to be blocked by the api-derived mutation lock")
+	} else if !strings.Contains(err.Error(), "acquire read lock") {
+		t.Errorf("expected a read-lock-acquisition error, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("expected the read to never reach the PVE API while the mutation held the lock, got %d hits", got)
 	}
 }
 

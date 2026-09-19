@@ -160,6 +160,13 @@ func TestNewVMGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
+	// Control: a mutation on a DIFFERENT vm must not block this read.
+	control := newVMGetCmd()
+	control.SetOut(&bytes.Buffer{})
+	control.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "101"}, control)
+	atomic.StoreInt32(&hits, 0)
+
 	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
 	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
 	if err != nil {
@@ -170,7 +177,7 @@ func TestNewVMGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100"})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel()
 	if err := cmd.ExecuteContext(ctx); err == nil {
 		t.Fatal("expected the read to be blocked by the pending mutation and time out")
@@ -444,6 +451,16 @@ func TestNewVMSetCmd_BlocksOnPendingMutation(t *testing.T) {
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
+	// Control: a mutation on a DIFFERENT vm must not block this write. It
+	// writes cores=2, so the cores=4 write below is still a real change.
+	control := newVMSetCmd()
+	control.SetOut(&bytes.Buffer{})
+	control.SilenceUsage = true
+	control.SilenceErrors = true
+	control.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=2"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "101"}, control)
+	atomic.StoreInt32(&hits, 0)
+
 	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"}
 	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
 	if err != nil {
@@ -456,7 +473,7 @@ func TestNewVMSetCmd_BlocksOnPendingMutation(t *testing.T) {
 	cmd.SilenceErrors = true
 	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel()
 	if err := cmd.ExecuteContext(ctx); err == nil {
 		t.Fatal("expected the write to be blocked by the already-held mutation and time out")

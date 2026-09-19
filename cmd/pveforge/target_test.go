@@ -37,9 +37,9 @@ func newTestRosterWithTLSTarget(t *testing.T, srv *httptest.Server, targetID, no
 		t.Fatalf("parse port %q: %v", portStr, err)
 	}
 
-	armored, err := roster.EncryptString([]byte("test-secret"), rosterPassphrase)
+	armored, err := fixtureEncrypt([]byte("test-secret"), rosterPassphrase)
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 
 	tomlContent := fmt.Sprintf(`[[targets]]

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -63,6 +62,13 @@ func TestNewStorageGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
+	// Control: a mutation on a DIFFERENT storage must not block this read.
+	control := newStorageGetCmd()
+	control.SetOut(&bytes.Buffer{})
+	control.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "local-lvm"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "storage", ID: "local"}, control)
+	atomic.StoreInt32(&hits, 0)
+
 	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "storage", ID: "local-lvm"}
 	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
 	if err != nil {
@@ -73,7 +79,7 @@ func TestNewStorageGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "local-lvm"})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel()
 	if err := cmd.ExecuteContext(ctx); err == nil {
 		t.Fatal("expected the read to be blocked by the pending mutation and time out")
