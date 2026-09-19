@@ -104,6 +104,11 @@ func (c *Client) vmidFree(ctx context.Context, vmid int) (bool, error) {
 	var ret string
 	err := c.pc.Get(ctx, fmt.Sprintf("/cluster/nextid?vmid=%d", vmid), &ret)
 	if err == nil {
+		// PVE answers a free id with the id itself. An empty answer is a
+		// {"data":null} payload, which says nothing about whether it is free.
+		if ret == "" {
+			return false, fmt.Errorf("check vmid %d: %w: nextid payload was null", vmid, ErrUnverifiableRead)
+		}
 		return true, nil
 	}
 	if isVMIDTakenError(err, vmid) {

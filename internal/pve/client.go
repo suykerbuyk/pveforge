@@ -130,6 +130,9 @@ func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
 		}
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
+	if ns == nil {
+		return nil, fmt.Errorf("list nodes: %w: list payload was null", ErrUnverifiableRead)
+	}
 	names := make([]string, 0, len(ns))
 	for _, n := range ns {
 		names = append(names, n.Node)

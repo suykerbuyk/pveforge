@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
@@ -61,12 +63,13 @@ type NetworkBridgeClient interface {
 	WaitForTask(ctx context.Context, node, upid string) error
 }
 
-// networkInterfaceMissingSubstring is the text this project EXPECTS a
-// RawRequest error to contain when the target PVE network interface doesn't
-// exist (matched case-insensitively against the error's full formatted
-// text, which for a *pve.RoutedClient ultimately comes from
-// Client.RawRequest's "raw request: pve returned %s: %s" wrapping of PVE's
-// own HTTP status/body — see internal/pve/rawrequest.go). Chosen by analogy
+// networkInterfaceMissingSubstring is the phrase this project EXPECTS PVE
+// to use when the target network interface doesn't exist. It is consulted
+// only inside the "iface" entry of a parameter-verification body (form 2 in
+// isMissingNetworkInterfaceError), matched case-insensitively; form 1's
+// pattern spells the same phrase inline, adjacent to the quoted name. It is
+// never matched against the error's full text: that would let any
+// unrelated "does not exist" read as a missing interface. Chosen by analogy
 // with this project's OWN established convention for exactly this class of
 // "does this thing exist" question: sshexec.LinkState's
 // linkDoesNotExistSubstring uses the identical phrase for iproute2's `ip`
@@ -75,19 +78,102 @@ type NetworkBridgeClient interface {
 // node network interface is NOT independently verified against a live host
 // in this implementation session (same empirical-verification-gap
 // discipline flagged throughout this project — see sshexec.LinkState,
-// sshexec.RootOnlyFields, the digest-conflict error text). If a live host's
-// exact wording differs, fetchInterface falls back to treating the
-// RawRequest failure as a hard Read/Apply error instead of "does not
-// exist" — a safe failure mode: it can only ever narrow down a case this
-// function would otherwise misreport as "exists", it never masks a real
-// problem as benign.
+// sshexec.RootOnlyFields, the digest-conflict error text).
 const networkInterfaceMissingSubstring = "does not exist"
 
-func isMissingNetworkInterfaceError(err error) bool {
-	if err == nil {
+// isMissingNetworkInterfaceError reports whether err is PVE saying that
+// iface ITSELF does not exist. It fails CLOSED: reading a missing interface
+// as "absent" satisfies a destroy, so a false positive turns the destroy
+// into a silent no-op that reports success, while a false negative is a
+// loud error that surfaces on the first live run. Anything short of PVE
+// unambiguously naming iface as missing is therefore NOT a match.
+//
+// It must be an answer from PVE ("pve returned"), never a transport error,
+// whose text quotes the request URL and so always contains iface's name.
+// Then exactly one of two forms applies, form 2 checked first:
+//
+//   - Form 2, structured. If the body carries PVE's parameter-verification
+//     map ({"errors":{...}}), ONLY its "iface" entry is consulted, and it must
+//     say "does not exist". If that entry quotes an interface name, it
+//     must quote exactly one, equal to iface (case-sensitive, as interface
+//     names are). If it quotes none, it must be the generic phrase alone
+//     ("interface does not exist"), which counts as iface because the
+//     request path named iface. Every other parameter's entry (storage,
+//     vmid, ...) is ignored, even one that names iface. Form 1 is never
+//     consulted when the map is present.
+//   - Form 1, unstructured. Otherwise, the text must name iface with the
+//     interface noun, quoted, immediately followed by the phrase: iface
+//     'NAME' does not exist or interface "NAME" does not exist. The noun
+//     and the phrase match in any case; the name matches exactly. The
+//     quotes are what bound the name, so "eth0" never matches "eth0:1",
+//     "vmbr1" never matches "vmbr1.100", "vmbr10", "vmbr1_x" or "vmbr1-x",
+//     and "br0" never matches "vmbr0".
+//
+// UNVERIFIED against a live host: PVE's exact response for GET
+// /nodes/{node}/network/{iface} on a missing interface. The expectation is
+// a 400 parameter-verification error (raise_param_exc({ iface =>
+// "interface does not exist" })), which form 2 accepts. Form 1 is a hedge
+// for a response that names the interface in free text instead. If PVE
+// answers in any other shape, the error propagates as a hard Read/Apply
+// error instead of "absent", which is the safe direction for both create
+// and destroy.
+func isMissingNetworkInterfaceError(err error, iface string) bool {
+	if err == nil || iface == "" {
 		return false
 	}
-	return strings.Contains(strings.ToLower(err.Error()), networkInterfaceMissingSubstring)
+	msg := err.Error()
+	if !strings.Contains(msg, "pve returned") {
+		return false
+	}
+	if entries, structured := pveParameterErrors(msg); structured {
+		return ifaceEntryNamesTarget(entries["iface"], iface)
+	}
+	q := regexp.QuoteMeta(iface)
+	return regexp.MustCompile(`(?i:\b(?:iface|interface))\s+(?:'` + q + `'|"` + q + `")\s+(?i:does not exist)`).MatchString(msg)
+}
+
+// pveParameterErrors decodes the "errors" map of a PVE parameter-
+// verification body carried in msg. structured reports whether msg carries
+// such a body at all; a body that mentions "errors" but does not decode is
+// still reported as structured, with no usable entries, so that it can
+// never fall back to the unstructured form.
+func pveParameterErrors(msg string) (entries map[string]string, structured bool) {
+	i := strings.IndexByte(msg, '{')
+	if i < 0 {
+		return nil, false
+	}
+	var body struct {
+		Errors map[string]json.RawMessage `json:"errors"`
+	}
+	if err := json.NewDecoder(strings.NewReader(msg[i:])).Decode(&body); err != nil || body.Errors == nil {
+		return nil, strings.Contains(msg[i:], `"errors"`)
+	}
+	entries = make(map[string]string, len(body.Errors))
+	for k, raw := range body.Errors {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			entries[k] = text
+		}
+	}
+	return entries, true
+}
+
+var (
+	quotedInterfaceName     = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
+	genericInterfaceMissing = regexp.MustCompile(`(?i)^\s*(?:(?:iface|interface)\s+)?does not exist\.?\s*$`)
+)
+
+// ifaceEntryNamesTarget reports whether the "iface" parameter entry of a
+// PVE parameter-verification body says that iface does not exist.
+func ifaceEntryNamesTarget(entry, iface string) bool {
+	if !strings.Contains(strings.ToLower(entry), networkInterfaceMissingSubstring) {
+		return false
+	}
+	names := quotedInterfaceName.FindAllStringSubmatch(entry, -1)
+	if len(names) == 0 {
+		return genericInterfaceMissing.MatchString(entry)
+	}
+	return len(names) == 1 && names[0][1]+names[0][2] == iface
 }
 
 // NetworkBridgeEnsure is idempotent.Op for creating or destroying one PVE
@@ -523,15 +609,15 @@ func (op *NetworkBridgeEnsure) abortAndRevert(ctx context.Context, reason string
 }
 
 // fetchInterface issues GET /nodes/{node}/network/{iface} and reports
-// whether iface currently exists. A RawRequest error whose text matches
-// isMissingNetworkInterfaceError is treated as "doesn't exist" (exists ==
-// false, err == nil), not as a hard failure — see that function's own doc
-// comment on the exact detection method. A response body that is exactly
-// JSON null (PVE's own explicit "nothing to report" shape — see
-// pve.RawRequest's unwrapDataEnvelope) is treated the same way, as a
-// defensive second case alongside the error-text check, in case a future
-// PVE version reports a missing interface as an empty 2xx body instead of
-// an error.
+// whether iface currently exists. A RawRequest error that
+// isMissingNetworkInterfaceError classifies as iface itself missing is
+// treated as "doesn't exist" (exists == false, err == nil), not as a hard
+// failure — see that function's own doc comment on the exact detection
+// method. A 2xx body that is exactly JSON null is NOT: it is refused as
+// pve.ErrUnverifiableRead. It was once read as "doesn't exist" too, in case
+// a future PVE version reported a missing interface that way, but for a
+// destroy "absent" means "already done", so a null answer silently turned
+// the destroy into a no-op that reported success.
 //
 // Free function (not a NetworkBridgeEnsure method) so networkfields.go's
 // NetworkFieldsEnsure can call it directly for its own target-interface
@@ -541,13 +627,13 @@ func fetchInterface(ctx context.Context, client rawNetworkClient, node, iface st
 	path := fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(node), url.PathEscape(iface))
 	raw, err := client.RawRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		if isMissingNetworkInterfaceError(err) {
+		if isMissingNetworkInterfaceError(err, iface) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, false, nil
+		return nil, false, fmt.Errorf("interface %s: %w: payload was null", iface, pve.ErrUnverifiableRead)
 	}
 
 	var fields map[string]json.RawMessage
@@ -593,6 +679,13 @@ func fetchAllInterfaces(ctx context.Context, client rawNetworkClient, node strin
 	var entries []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
+	}
+	// A node always lists at least the interface being edited, so a null or
+	// empty list is a payload PVE never really answered. Accepting it would
+	// make both snapshots empty and the "every other interface unchanged"
+	// comparison vacuously true.
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("interface list on %s: %w: payload was null or empty", node, pve.ErrUnverifiableRead)
 	}
 
 	byIface := make(map[string]map[string]json.RawMessage, len(entries))

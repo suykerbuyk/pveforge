@@ -428,9 +428,10 @@ func (n *applyLockNode) handle(w http.ResponseWriter, r *http.Request) {
 			// pve.Client.RawRequest turns any non-2xx into an error
 			// carrying this body verbatim ("raw request: pve returned
 			// %s: %s"), and networkbridge.go's
-			// isMissingNetworkInterfaceError matches the substring "does
-			// not exist" inside exactly that text.
-			http.Error(w, fmt.Sprintf("interface %s does not exist", iface), http.StatusInternalServerError)
+			// isMissingNetworkInterfaceError accepts exactly this
+			// unstructured shape: the interface noun, the quoted name,
+			// then "does not exist", adjacent.
+			http.Error(w, fmt.Sprintf("interface '%s' does not exist", iface), http.StatusInternalServerError)
 			return
 		}
 		n.writeData(w, fields)

@@ -24,8 +24,16 @@ func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*proxmox.Vir
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", escapedNode, vmid), vm); err != nil {
 		return nil, fmt.Errorf("get vm %d status: %w", vmid, err)
 	}
+	if vm.Status == "" {
+		return nil, fmt.Errorf("get vm %d status: %w: payload carries no run status", vmid, ErrUnverifiableRead)
+	}
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/qemu/%d/config", escapedNode, vmid), &vm.VirtualMachineConfig); err != nil {
 		return nil, fmt.Errorf("get vm %d config: %w", vmid, err)
+	}
+	// A VM's config always carries at least its digest, so a nil config is
+	// a {"data":null} payload, not a VM with nothing configured.
+	if vm.VirtualMachineConfig == nil {
+		return nil, fmt.Errorf("get vm %d config: %w: config payload was null", vmid, ErrUnverifiableRead)
 	}
 	return vm, nil
 }
@@ -41,6 +49,9 @@ func (c *Client) GetVMs(ctx context.Context, node string) (proxmox.VirtualMachin
 	var vms proxmox.VirtualMachines
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/qemu", url.PathEscape(node)), &vms); err != nil {
 		return nil, fmt.Errorf("get vms on %q: %w", node, err)
+	}
+	if vms == nil {
+		return nil, fmt.Errorf("get vms on %q: %w: list payload was null", node, ErrUnverifiableRead)
 	}
 	for _, v := range vms {
 		v.Node = node

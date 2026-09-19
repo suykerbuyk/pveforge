@@ -28,7 +28,10 @@ const currentPseudoSnapshot = "current"
 // "current" pseudo-entry. The raw list is deliberately what this returns:
 // filtering is realSnapshots' job, kept separate so a caller that
 // genuinely wants to see the whole list as PVE reports it (a `snapshot
-// list` command rendering the chain, say) still can.
+// list` command rendering the chain, say) still can. The one thing it
+// refuses is a {"data":null} payload, which is no list at all: that is
+// ErrUnverifiableRead, never an empty list. A legitimately empty [] is
+// returned as is.
 //
 // Goes through c.pc.Get rather than RawRequest — this is a plain read, and
 // reads in this package go through go-proxmox while writes go through
@@ -53,6 +56,9 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]*p
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/snapshot", url.PathEscape(node), vmid)
 	if err := c.pc.Get(ctx, path, &snaps); err != nil {
 		return nil, fmt.Errorf("list snapshots for vm %d: %w", vmid, err)
+	}
+	if snaps == nil {
+		return nil, fmt.Errorf("list snapshots for vm %d: %w: list payload was null", vmid, ErrUnverifiableRead)
 	}
 	return snaps, nil
 }
@@ -290,13 +296,15 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name
 //
 // PVE's snapshot list always includes the "current" pseudo-entry (see
 // currentPseudoSnapshot), so no response describing a live VM can lack it.
-// An empty list lacks it, and an empty list is what go-proxmox's Get hands
-// back — with a NIL error — for a 404,
-// 502, 503, 504 or 595-599 response carrying a {"data":null} envelope:
-// measured by driving the real library against an httptest server (only
-// 400, 401/403, 500 and 501 become errors there). That is the open
-// pveforge-read-status-swallow thread, closed locally for the snapshot
-// reads here rather than waiting on it.
+// go-proxmox's Get decodes a {"data":null} envelope into an empty list
+// with a NIL error, for a 200 and, on the current pin, also for a 404,
+// 502, 503, 504 or 595-599 response (measured by driving the real library
+// against an httptest server; only 400, 401/403, 500 and 501 become errors
+// there). ListSnapshots itself now refuses that null payload as
+// ErrUnverifiableRead (pveforge-read-status-swallow's P1 guard), so it
+// never reaches this check. What is left for this check is every non-null
+// answer no live VM produces: an empty [] list, a list of JSON nulls, or a
+// list that lacks "current".
 //
 // Why every snapshot read that decides something goes through this, and
 // not just some of them: what a swallowed read does depends on the
@@ -324,9 +332,10 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name
 // read-status-swallow work shares, so callers match it with errors.Is
 // rather than by text.
 //
-// ListSnapshots itself is left returning the raw list exactly as PVE
-// reported it — its documented contract — and this is unexported because
-// the refusal is a policy of the operations below, not of a plain read.
+// ListSnapshots itself returns the raw list as PVE reported it, refusing
+// only a null payload — its documented contract — and this is unexported
+// because the "current" refusal is a policy of the operations below, not
+// of a plain read.
 func (c *Client) listSnapshotsVerifiable(ctx context.Context, node string, vmid int) ([]*proxmox.VirtualMachineSnapshot, error) {
 	snaps, err := c.ListSnapshots(ctx, node, vmid)
 	if err != nil {

@@ -464,7 +464,7 @@ func TestRoutedClient_TypedReadForwarding(t *testing.T) {
 		case "/nodes/qa-pve-01/storage/local/content":
 			_, _ = w.Write([]byte(`{"data":[{"volid":"local:iso/x.iso"}]}`))
 		case "/nodes/qa-pve-01/network/vmbr0":
-			_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24"}}`))
+			_, _ = w.Write([]byte(`{"data":{"type":"bridge","cidr":"10.0.0.5/24"}}`))
 		case "/nodes/qa-pve-01/network":
 			_, _ = w.Write([]byte(`{"data":[{"iface":"vmbr0"}]}`))
 		default:

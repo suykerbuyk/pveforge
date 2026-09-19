@@ -23,6 +23,9 @@ func (c *Client) GetNetworkInterface(ctx context.Context, node, iface string) (*
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(node), url.PathEscape(iface)), nw); err != nil {
 		return nil, fmt.Errorf("get network interface %q on %q: %w", iface, node, err)
 	}
+	if nw.Type == "" {
+		return nil, fmt.Errorf("get network interface %q on %q: %w: payload carries no interface type", iface, node, ErrUnverifiableRead)
+	}
 	nw.Node = node
 	nw.Iface = iface
 	return nw, nil
@@ -47,6 +50,9 @@ func (c *Client) GetNetworkInterfaces(ctx context.Context, node string, ifaceTyp
 	var networks proxmox.NodeNetworks
 	if err := c.pc.Get(ctx, path, &networks); err != nil {
 		return nil, fmt.Errorf("get network interfaces on %q: %w", node, err)
+	}
+	if networks == nil {
+		return nil, fmt.Errorf("get network interfaces on %q: %w: list payload was null", node, ErrUnverifiableRead)
 	}
 	for _, nw := range networks {
 		nw.Node = node
