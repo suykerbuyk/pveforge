@@ -13,7 +13,7 @@ func TestGetNetworkInterface_Success(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24","gateway":"10.0.0.1","bridge_ports":"eno1"}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","cidr":"10.0.0.5/24","gateway":"10.0.0.1","bridge_ports":"eno1"}}`))
 	})
 	c := testClient(t, srv)
 
@@ -45,7 +45,7 @@ func TestGetNetworkInterface_EscapesNodeAndIfaceInURL(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotEscapedPath = r.URL.EscapedPath()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge"}}`))
 	})
 	c := testClient(t, srv)
 
@@ -80,7 +80,7 @@ func TestGetNetworkInterface_RequiresNodeAndIface(t *testing.T) {
 func TestGetNetworkInterface_ReturnedObjectHasNoLiveClient(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24"}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","cidr":"10.0.0.5/24"}}`))
 	})
 	c := testClient(t, srv)
 

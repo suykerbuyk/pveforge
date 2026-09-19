@@ -42,7 +42,7 @@ func TestGetStorage_EscapesNodeAndNameInURL(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotEscapedPath = r.URL.EscapedPath()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"dir"}}`))
 	})
 	c := testClient(t, srv)
 

@@ -22,6 +22,12 @@ import (
 // touches unexported fields), so any accidental call to one of those
 // write methods panics immediately instead of silently doing the wrong
 // thing. See vms.go/storage.go/networks.go for the same pattern.
+//
+// Unlike GetStorage, GetVM and GetNetworkInterface, this read carries no
+// ErrUnverifiableRead guard: /nodes/{node}/status has no field confirmed to
+// be present on every healthy answer, and its only consumer (`node get`)
+// is display-only, so a {"data":null} answer prints zeros rather than
+// feeding a decision.
 func (c *Client) GetNode(ctx context.Context, node string) (*proxmox.Node, error) {
 	if node == "" {
 		return nil, fmt.Errorf("get node: node is required")
@@ -42,6 +48,9 @@ func (c *Client) GetNodes(ctx context.Context) (proxmox.NodeStatuses, error) {
 	ns, err := c.pc.Nodes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get nodes: %w", err)
+	}
+	if ns == nil {
+		return nil, fmt.Errorf("get nodes: %w: list payload was null", ErrUnverifiableRead)
 	}
 	return ns, nil
 }

@@ -22,6 +22,13 @@ func (c *Client) GetStorage(ctx context.Context, node, name string) (*proxmox.St
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/storage/%s/status", url.PathEscape(node), url.PathEscape(name)), storage); err != nil {
 		return nil, fmt.Errorf("get storage %q on %q: %w", name, node, err)
 	}
+	// PVE's status payload always names the storage's type; a payload
+	// without one is a zero value decoded from {"data":null}, and reading
+	// it as real would report Shared == 0 for a storage never confirmed
+	// unshared (the orphan scan's refusal keys on exactly that).
+	if storage.Type == "" {
+		return nil, fmt.Errorf("get storage %q on %q: %w: status payload carries no storage type", name, node, ErrUnverifiableRead)
+	}
 	storage.Node = node
 	storage.Name = name
 	return storage, nil
@@ -36,6 +43,9 @@ func (c *Client) GetStorages(ctx context.Context, node string) (proxmox.Storages
 	var storages proxmox.Storages
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/storage", url.PathEscape(node)), &storages); err != nil {
 		return nil, fmt.Errorf("get storages on %q: %w", node, err)
+	}
+	if storages == nil {
+		return nil, fmt.Errorf("get storages on %q: %w: list payload was null", node, ErrUnverifiableRead)
 	}
 	for _, s := range storages {
 		s.Node = node
@@ -80,6 +90,9 @@ func (c *Client) GetStorageVolumes(ctx context.Context, node, storage string) ([
 	var content []*proxmox.StorageContent
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content", url.PathEscape(node), url.PathEscape(storage)), &content); err != nil {
 		return nil, fmt.Errorf("get volumes on storage %q on %q: %w", storage, node, err)
+	}
+	if content == nil {
+		return nil, fmt.Errorf("get volumes on storage %q on %q: %w: list payload was null", storage, node, ErrUnverifiableRead)
 	}
 	return content, nil
 }

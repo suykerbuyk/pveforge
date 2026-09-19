@@ -52,6 +52,9 @@ func (c *Client) storageContentWithType(ctx context.Context, node, storage strin
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content", url.PathEscape(node), url.PathEscape(storage)), &raw); err != nil {
 		return nil, err
 	}
+	if raw == nil {
+		return nil, fmt.Errorf("storage %q on %q: %w: content list payload was null", storage, node, ErrUnverifiableRead)
+	}
 	return raw, nil
 }
 
@@ -95,9 +98,12 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 	}
 
 	claimed := make(map[string]bool)
+	// GetVM already refuses a nil config; kept as a second line of defence,
+	// because an empty claimed set here would report every one of this VM's
+	// disks as an orphan.
 	cfg := vm.VirtualMachineConfig
 	if cfg == nil {
-		return claimed, nil
+		return nil, fmt.Errorf("claimed volumes for vmid %d: %w: config payload was null", vmid, ErrUnverifiableRead)
 	}
 
 	add := func(slotValue string) {

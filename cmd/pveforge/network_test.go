@@ -21,7 +21,7 @@ func TestNewNetworkGetCmd_Success(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24","gateway":"10.0.0.1"}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","cidr":"10.0.0.5/24","gateway":"10.0.0.1"}}`))
 	}))
 	defer srv.Close()
 
@@ -55,7 +55,7 @@ func TestNewNetworkGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"cidr":"10.0.0.5/24"}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","cidr":"10.0.0.5/24"}}`))
 	}))
 	defer srv.Close()
 
