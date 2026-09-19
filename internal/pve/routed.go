@@ -602,3 +602,36 @@ func (c *RoutedClient) CloneVM(ctx context.Context, sourceVMID, newVMID int, par
 func (c *RoutedClient) StorageType(ctx context.Context, node, storageID string) (string, error) {
 	return c.rest.StorageType(ctx, node, storageID)
 }
+
+// NewerSnapshots lists the real snapshots of vmid on this target's node
+// that are newer than target, ascending — see Client.NewerSnapshots's own
+// doc comment, especially on why a Snaptime tie is refused rather than
+// broken. A thin pass-through with no node parameter, for the same reason
+// ListSnapshots above has none. A snapshot listing is a plain read and can
+// never hit a root-only config field, so there is nothing for RoutedClient
+// to route: it always goes over REST.
+func (c *RoutedClient) NewerSnapshots(ctx context.Context, vmid int, target string) ([]*proxmox.VirtualMachineSnapshot, error) {
+	return c.rest.NewerSnapshots(ctx, c.target.Node, vmid, target)
+}
+
+// Rollback rolls vmid on this target's node back to snapshot name, refusing
+// up front with *ErrNotNewestSnapshot if newer snapshots exist — see
+// Client.Rollback's own doc comment, especially on why it never deletes
+// anything and on newest-only being pveforge policy. A thin pass-through
+// with no node parameter, for the same reason CreateSnapshot above has
+// none. A rollback writes no VM config field, so it can never hit a
+// root-only field: there is nothing for RoutedClient to route.
+func (c *RoutedClient) Rollback(ctx context.Context, vmid int, name string) error {
+	return c.rest.Rollback(ctx, c.target.Node, vmid, name)
+}
+
+// CascadeDeleteSnapshots deletes names from vmid on this target's node,
+// strictly in the given order, returning the names actually deleted — see
+// Client.CascadeDeleteSnapshots's own doc comment, especially on passing
+// ErrNotNewestSnapshot.CascadeOrder() rather than its Newer field. A thin
+// pass-through with no node parameter, for the same reason CreateSnapshot
+// above has none. Deleting a snapshot writes no VM config field, so it can
+// never hit a root-only field: there is nothing for RoutedClient to route.
+func (c *RoutedClient) CascadeDeleteSnapshots(ctx context.Context, vmid int, names []string) ([]string, error) {
+	return c.rest.CascadeDeleteSnapshots(ctx, c.target.Node, vmid, names)
+}
