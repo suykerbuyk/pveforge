@@ -6,6 +6,11 @@
 // across packages, so the shared half lives here rather than being
 // copy-pasted into both.
 //
+// It also backs internal/pve's RoutedClient completeness gate, through
+// ExportedMethods and TestCallees below: a test that every exported method of
+// a type is accounted for in a table, and that each test the table names
+// really calls the method it is credited with.
+//
 // Production code must never call this, in the same spirit as
 // pve.SetSSHPortForIntegrationTests: it is a build-visible package purely
 // because the test files that use it live in two different packages.
@@ -52,6 +57,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"sort"
 	"strings"
 )
 
@@ -221,6 +227,129 @@ func FindForbidden(tokens map[string][]string, forbidden []string) []string {
 		}
 	}
 	return hits
+}
+
+// ExportedMethods parses every non-test .go file in dir — one package — and
+// returns the sorted names of the exported methods declared on receiver,
+// whether on a pointer or a value receiver.
+//
+// It scans the whole package, not one file, for the same reason
+// ReachableTokens does: a method declared in a sibling file is still a
+// method of the type, and a gate that read one file would miss it.
+//
+// A receiver with no exported methods is an error rather than an empty
+// result, matching ReachableTokens' rule for an unmatched root: a gate whose
+// type has been renamed away must fail loudly, not pass by enumerating
+// nothing.
+func ExportedMethods(dir, receiver string) ([]string, error) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		return nil, fmt.Errorf("sourceguard: parse %s: %w", dir, err)
+	}
+
+	var names []string
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				fd, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				if receiverTypeName(fd) == receiver && fd.Name.IsExported() {
+					names = append(names, fd.Name.Name)
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("sourceguard: no exported methods on %q in %s — has the type been renamed?", receiver, dir)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// TestCallees parses the _test.go files in dir once and, for each top-level
+// function named in fns, returns the sorted, de-duplicated names of everything
+// it calls. That covers its own body, including closures and composite
+// literals, and, transitively, any function it calls that is itself defined in
+// a test file. Names are bare, as calleeName gives them, so a call is matched
+// by name and not by receiver type.
+//
+// It deliberately does NOT follow calls into non-test files. A test that
+// calls rc.GetVM would otherwise reach RoutedClient.GetVM and Client.GetVM,
+// and pick up every name those bodies mention, so the answer would stop
+// meaning "what this test calls".
+//
+// It takes several names so that a gate checking many tests parses the
+// package's test files once rather than once per test; under the race
+// detector that difference is seconds. Any name not found among the test
+// files is an error, for the same reason an unmatched root is in
+// ReachableTokens.
+func TestCallees(dir string, fns ...string) (map[string][]string, error) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		return nil, fmt.Errorf("sourceguard: parse tests in %s: %w", dir, err)
+	}
+
+	byName := map[string][]*ast.FuncDecl{}
+	topLevel := map[string][]*ast.FuncDecl{}
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				fd, ok := decl.(*ast.FuncDecl)
+				if !ok || fd.Body == nil {
+					continue
+				}
+				byName[fd.Name.Name] = append(byName[fd.Name.Name], fd)
+				if fd.Recv == nil {
+					topLevel[fd.Name.Name] = append(topLevel[fd.Name.Name], fd)
+				}
+			}
+		}
+	}
+
+	result := make(map[string][]string, len(fns))
+	for _, fn := range fns {
+		roots := topLevel[fn]
+		if len(roots) == 0 {
+			return nil, fmt.Errorf("sourceguard: test function %q not found in %s", fn, dir)
+		}
+
+		found := map[string]bool{}
+		seen := map[*ast.FuncDecl]bool{}
+		queue := append([]*ast.FuncDecl(nil), roots...)
+		for len(queue) > 0 {
+			fd := queue[0]
+			queue = queue[1:]
+			if seen[fd] {
+				continue
+			}
+			seen[fd] = true
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if name := calleeName(call.Fun); name != "" {
+						found[name] = true
+						queue = append(queue, byName[name]...)
+					}
+				}
+				return true
+			})
+		}
+
+		names := make([]string, 0, len(found))
+		for name := range found {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		result[fn] = names
+	}
+	return result, nil
 }
 
 func receiverTypeName(fn *ast.FuncDecl) string {
