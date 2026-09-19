@@ -163,7 +163,6 @@ func TestNetworkFieldsEnsure_Apply_MTUSet_FullStack(t *testing.T) {
 		"GET /api2/json/nodes/qa-pve-01/network",
 		"PUT /api2/json/nodes/qa-pve-01/network",
 		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
-		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
 	}
 	if got := restScript.hitSequence(); !equalStringSlices(got, wantREST) {
 		t.Fatalf("REST hit sequence:\n got:  %v\n want: %v", got, wantREST)

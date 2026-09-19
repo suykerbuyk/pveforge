@@ -184,7 +184,8 @@ func (op *VMShutdown) Satisfied(current string) bool {
 
 // Apply asks the guest to shut itself down and waits for PVE's task to
 // finish. A WaitForTask failure — a genuine task failure
-// (pve.TaskFailedError) or a timeout (pve.IsTaskTimeoutError) — is this
+// (pve.TaskFailedError) or a task whose outcome was never observed
+// (pve.IsTaskOutcomeUnknown, which includes a timeout) — is this
 // Op's own Apply error, never swallowed: a guest that ignored the ACPI
 // request or hung on its own shutdown leaves the VM running, and reporting
 // that as success would be exactly the "command exits 0 but did something

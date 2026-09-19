@@ -595,7 +595,9 @@ func (c *Client) Rollback(ctx context.Context, node string, vmid int, name strin
 //   - It stops at the first failure (never batched, never parallel: a
 //     partial cascade must leave a known state — cite: quantum-ng
 //     snapshot.sh:468-538). The remedy is to re-run the same call.
-//   - A WaitForTask timeout (IsTaskTimeoutError) means that one delete's
+//   - A WaitForTask error for which IsTaskOutcomeUnknown is true (for
+//     example a timeout, a failed or canceled status poll, or a poll
+//     answer outside PVE's contract) means that one delete's
 //     outcome is unknown, and that name is NOT in deleted. Unlike a VM
 //     destroy, retrying here is safe: the retry's fresh pre-state read
 //     skips whatever actually landed.

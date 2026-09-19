@@ -58,17 +58,19 @@ import (
 // idempotent.Run, the first Op is mid-WaitForTask and holding it.
 //
 // WHY THE FAKE MUST REPORT "running" AT LEAST TWICE.
-// go-proxmox's Task.Wait (tasks.go:145 @ v0.8.1) pings ONCE up front
-// ("ping it quick to fill in all the details"), then pings AGAIN at the
-// top of its first loop iteration, and only sleeps for the poll interval
-// after that second ping still reports running. So a fake that reports
-// "running" for exactly one poll completes with the poll loop never
-// sleeping at all — a ZERO-LENGTH reload window, which is precisely the
-// vacuous-fake failure mode this test exists to avoid: it would show no
-// interleaving while never once exercising the window the lock covers.
-// applyLockRunningPolls is therefore 2, and the test ASSERTS the fake
-// actually served that many running polls per commit, so trimming it back
-// to 1 fails loudly instead of silently gutting the test.
+// WaitForTask polls immediately and sleeps for the poll interval after
+// every poll that still reports running, so each "running" answer buys
+// one real poll interval of reload window. A fake that reports "running"
+// zero times completes with the poll loop never sleeping at all — a
+// ZERO-LENGTH reload window, which is precisely the vacuous-fake failure
+// mode this test exists to avoid: it would show no interleaving while
+// never once exercising the window the lock covers. applyLockRunningPolls
+// is 2, so each commit's window spans two full poll intervals and the
+// second Op's contention lands well inside it rather than racing its
+// edge, and the test ASSERTS the fake actually served that many running
+// polls per commit, so trimming it fails loudly instead of silently
+// gutting the test. (Under go-proxmox's Task.Wait, which WaitForTask
+// replaced, 2 was the minimum: it pinged twice before its first sleep.)
 
 const (
 	applyLockNodeName     = "qa-pve-01"
@@ -571,8 +573,8 @@ func applyLockLastMatch(events []applyLockEvent, label, kind string) *applyLockE
 
 // recordingNetworkClient is the composite client both Ops run against:
 // RawRequest and WaitForTask are REAL — a genuine *pve.Client issuing real
-// HTTP against the shared fake node, and therefore go-proxmox's real
-// Task.Wait poll loop at the real production poll interval, not a
+// HTTP against the shared fake node, and therefore WaitForTask's real
+// poll loop at the real production poll interval, not a
 // synchronous stand-in — while LinkState is stubbed (see
 // applyLockNode.linkState for why, and for what that does not cover).
 //
@@ -864,18 +866,19 @@ func TestNetworkApplyLock_SerializesConcurrentNetworkOpsAcrossTheReloadWindow(t 
 
 	// Anti-vacuity, the part that matters most: prove the fake genuinely
 	// simulated an async reload rather than resolving the commit task
-	// synchronously. go-proxmox's Task.Wait pings once up front AND again
-	// at the top of its first loop iteration before it ever sleeps, so
-	// anything under applyLockRunningPolls running responses means the
-	// poll loop never slept and the reload window had zero length — a test
-	// that would show no interleaving while covering nothing.
+	// synchronously. WaitForTask sleeps one poll interval after every
+	// running response, so anything under applyLockRunningPolls running
+	// responses means the reload window was shorter than the test was
+	// built around — at zero, the poll loop never slept and the window had
+	// zero length: a test that would show no interleaving while covering
+	// nothing.
 	windows := run.node.reloadWindows()
 	if len(windows) != 2 {
 		t.Fatalf("expected exactly 2 simulated reloads (one per op), got %d", len(windows))
 	}
 	for _, w := range windows {
 		if got := run.node.runningPollsServed(w.upid); got < applyLockRunningPolls {
-			t.Fatalf("fake served only %d \"running\" task-status polls for %s, want >= %d: go-proxmox's Task.Wait pings once up front and again at the top of its first loop iteration BEFORE it ever sleeps, so fewer than %d completes with a ZERO-LENGTH reload window and this test covers nothing",
+			t.Fatalf("fake served only %d \"running\" task-status polls for %s, want >= %d: WaitForTask sleeps one poll interval per running poll, so fewer than %d leaves a reload window shorter than this test's interleaving was built around (and at zero, a ZERO-LENGTH window that covers nothing)",
 				got, w.upid, applyLockRunningPolls, applyLockRunningPolls)
 		}
 		if w.end.IsZero() {

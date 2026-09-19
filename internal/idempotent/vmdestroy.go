@@ -51,9 +51,12 @@ type VMDestroyClient interface {
 // against an already-locked vmid is NOT confirmed against a live host or
 // PVE's own documentation as of this writing — an explicit unverified
 // assumption, tracked in the vault task (pveforge-vm-destroy) this Op was
-// implemented from. Callers should use pve.IsTaskTimeoutError to recognize
-// this specific failure on the destroy step's WaitForTask call and avoid
-// blindly retrying, rather than treating it like any other Apply error.
+// implemented from. The same holds for every destroy-step WaitForTask
+// failure other than a pve.TaskFailedError: a status poll that kept
+// failing leaves the destroy's outcome just as unknown as a timeout does.
+// Callers should use pve.IsTaskOutcomeUnknown (true for the timeout too)
+// to recognize these on the destroy step's WaitForTask call and avoid
+// blindly retrying, rather than treating them like any other Apply error.
 type VMDestroy struct {
 	Client VMDestroyClient
 	VMID   int
