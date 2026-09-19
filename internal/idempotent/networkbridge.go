@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
@@ -375,6 +376,10 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 2: stage -----------------------------------------------
+	// A failed stage is NOT reverted. The revert discards every staged
+	// change on the node, and when our own stage failed, whatever is still
+	// pending most likely belongs to someone else. From here on, every
+	// failure before the commit reverts: our stage is known to exist.
 	if err := op.stage(ctx); err != nil {
 		return fmt.Errorf("network bridge ensure: %s: stage: %w", op.Iface, err)
 	}
@@ -382,14 +387,14 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	// --- Step 3: post-stage, pre-commit snapshot of ManagementBridge ---
 	pendingFields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.ManagementBridge)
 	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: post-stage snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: post-stage snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err))
 	}
 	if !exists {
-		return fmt.Errorf("network bridge ensure: %s: management bridge %s vanished immediately after staging", op.Iface, op.ManagementBridge)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: management bridge %s vanished immediately after staging", op.Iface, op.ManagementBridge))
 	}
 	pendingStanzaHash, err := canonicalHash(pendingFields)
 	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: %w", op.Iface, err))
 	}
 
 	// --- Step 4: guard self-check (critical — never omit or weaken) ---
@@ -414,9 +419,16 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 6: commit ----------------------------------------------
+	// A failed commit reverts. If PVE refused it, our stage is still
+	// pending and must not be left for the next apply to commit. If the
+	// outcome is unknown (a transport error, or no usable UPID), the apply
+	// worker may already be running; the revert is safe in either order,
+	// because it lands either after the worker has consumed interfaces.new
+	// (a no-op) or before (the apply then changes nothing). So the error
+	// says the outcome is unknown, and never claims "not applied".
 	upid, err := op.commit(ctx)
 	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: commit: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: commit failed, outcome unknown (the change may or may not have been applied): %w", op.Iface, err))
 	}
 
 	// --- Step 6b: poll to completion (critical, not optional) ---------
@@ -424,6 +436,11 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	// ever runs. A failure here is terminal: PVE's own apply already ran
 	// against interfaces.new by the time a task can report success or
 	// failure, so there is nothing "pending" left to revert.
+	//
+	// Do NOT add a revert here as a hedge. Once the commit has consumed
+	// our stage, anything still pending on the node belongs to someone
+	// else, and the revert is a whole-node discard: it would wipe their
+	// staged work, not ours.
 	if err := op.Client.WaitForTask(ctx, op.Node, upid); err != nil {
 		return fmt.Errorf("network bridge ensure: %s: commit task %s did not complete successfully (no revert attempted: pve may already have applied this change, in whole or in part): %w", op.Iface, upid, err)
 	}
@@ -469,14 +486,14 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 func (op *NetworkBridgeEnsure) guardSelfCheck(ctx context.Context) error {
 	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
 	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: guard self-check: read iface state: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: guard self-check: read iface state: %w", op.Iface, err))
 	}
 	active := false
 	if exists {
 		if raw, ok := fields["active"]; ok {
 			s, err := kvjson.Scalar(raw)
 			if err != nil {
-				return fmt.Errorf("network bridge ensure: %s: guard self-check: parse active flag: %w", op.Iface, err)
+				return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: guard self-check: parse active flag: %w", op.Iface, err))
 			}
 			active = activeTruthy(s)
 		}
@@ -484,7 +501,7 @@ func (op *NetworkBridgeEnsure) guardSelfCheck(ctx context.Context) error {
 
 	link, err := op.Client.LinkState(ctx, op.Iface)
 	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: guard self-check: read kernel link state: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: guard self-check: read kernel link state: %w", op.Iface, err))
 	}
 
 	creating := len(op.Wanted) > 0
@@ -595,12 +612,36 @@ func (op *NetworkBridgeEnsure) commit(ctx context.Context) (string, error) {
 // would be committing someone else's unreviewed staged change, which is
 // strictly worse. 3b inherits this unchanged from reviewed 3a.
 func revertNetworkStage(ctx context.Context, client rawNetworkClient, node, reason string) error {
+	return revertStagedAfter(ctx, client, node, errors.New(reason))
+}
+
+// revertTimeout bounds revertStagedAfter's own request, which runs detached
+// from the caller's context (see there).
+const revertTimeout = 30 * time.Second
+
+// revertStagedAfter is revertNetworkStage for a failure that already is an
+// error: it issues the same whole-node discard and returns cause itself,
+// annotated with the revert's own failure if that failed too. It never
+// flattens cause to text, so errors.Is and errors.As on the result still
+// reach it (pve.ErrUnverifiableRead from a post-stage read, for one).
+// Every failure after a successful stage and before a successful commit
+// returns through here, so a staged change is never left pending on the
+// node for whatever applies next to commit.
+//
+// The revert does NOT run on ctx. A cancelled or expired caller context is
+// exactly when a half-done Apply most needs to clean up, and a revert that
+// inherited the cancellation would never reach PVE, leaving the stage
+// pending for the next apply to commit. So it runs detached from ctx's
+// cancellation (context.WithoutCancel keeps ctx's values), bounded by
+// revertTimeout so a hung PVE cannot hold the caller forever.
+func revertStagedAfter(ctx context.Context, client rawNetworkClient, node string, cause error) error {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertTimeout)
+	defer cancel()
 	path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(node))
-	_, revertErr := client.RawRequest(ctx, http.MethodDelete, path, nil)
-	if revertErr != nil {
-		return fmt.Errorf("%s (reverting staged changes also failed: %v)", reason, revertErr)
+	if _, revertErr := client.RawRequest(rctx, http.MethodDelete, path, nil); revertErr != nil {
+		return fmt.Errorf("%w (reverting staged changes also failed: %v)", cause, revertErr)
 	}
-	return errors.New(reason)
+	return cause
 }
 
 func (op *NetworkBridgeEnsure) abortAndRevert(ctx context.Context, reason string) error {

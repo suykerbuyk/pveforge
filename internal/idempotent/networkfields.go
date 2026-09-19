@@ -196,6 +196,10 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 2: stage ---------------------------------------------------
+	// A failed stage is NOT reverted, for NetworkBridgeEnsure.Apply's
+	// reason: the revert is a whole-node discard, and when our own stage
+	// failed, whatever is pending most likely belongs to someone else. From
+	// here on, every failure before the commit reverts.
 	if err := op.stage(ctx); err != nil {
 		return fmt.Errorf("network fields ensure: %s: stage: %w", op.Iface, err)
 	}
@@ -203,11 +207,11 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 	// --- Step 3: post-stage, pre-commit snapshot of every OTHER interface
 	after, err := fetchAllInterfaces(ctx, op.Client, op.Node)
 	if err != nil {
-		return fmt.Errorf("network fields ensure: %s: post-stage snapshot of other interfaces: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network fields ensure: %s: post-stage snapshot of other interfaces: %w", op.Iface, err))
 	}
 	afterHashes, err := otherInterfaceHashes(after, op.Iface)
 	if err != nil {
-		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network fields ensure: %s: %w", op.Iface, err))
 	}
 
 	// --- Step 4: compare — NO --force bypass, same reasoning as 3a's own
@@ -220,12 +224,17 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 5: commit ----------------------------------------------
+	// A failed commit reverts, and the error says the outcome is unknown,
+	// for NetworkBridgeEnsure.Apply's step-6 reason.
 	upid, err := commitNetworkStage(ctx, op.Client, op.Node)
 	if err != nil {
-		return fmt.Errorf("network fields ensure: %s: commit: %w", op.Iface, err)
+		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network fields ensure: %s: commit failed, outcome unknown (the change may or may not have been applied): %w", op.Iface, err))
 	}
 
 	// --- Step 5b: poll to completion (critical, not optional) ----------
+	// No revert here, and none may be added as a hedge: once the commit
+	// has consumed our stage, anything still pending belongs to someone
+	// else, and the whole-node discard would wipe it.
 	if err := op.Client.WaitForTask(ctx, op.Node, upid); err != nil {
 		return fmt.Errorf("network fields ensure: %s: commit task %s did not complete successfully (no revert attempted: pve may already have applied this change, in whole or in part): %w", op.Iface, upid, err)
 	}
