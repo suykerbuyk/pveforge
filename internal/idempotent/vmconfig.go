@@ -3,7 +3,7 @@ package idempotent
 import (
 	"fmt"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // requireVMConfig returns vm's VirtualMachineConfig, or an error if PVE

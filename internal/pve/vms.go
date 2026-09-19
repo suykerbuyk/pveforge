@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/url"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // GetVM fetches one VM's current status and full config — mirrors

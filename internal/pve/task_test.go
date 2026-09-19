@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // wellFormedUPID returns a UPID string shaped like a real one PVE would

@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // StopVM issues PVE's stop-VM call — POST /nodes/{node}/qemu/{vmid}/status/stop

@@ -20,3 +20,7 @@ what was tested and what broke.
 ## License
 
 Dual-licensed under your choice of MIT or Apache-2.0. See [`LICENSE`](LICENSE).
+
+The compiled binary also contains third-party code under its own licenses —
+including Apache-2.0 code from `go-proxmox`, which pveforge forks. See
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

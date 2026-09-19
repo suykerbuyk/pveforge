@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/url"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // GetNetworkInterface fetches one node-level network interface's config

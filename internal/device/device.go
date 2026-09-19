@@ -23,7 +23,7 @@ package device
 import (
 	"context"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // Client is the subset of *pve.RoutedClient's capability a resolver

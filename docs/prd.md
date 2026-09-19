@@ -50,7 +50,7 @@ These were established empirically, against a live Proxmox VE 9.2.11 host
    identical error message and HTTP code. Any tool built on Proxmox's REST API
    will hit the same wall for these fields; there is no client-side way around
    it.
-3. **`luthermonson/go-proxmox`** is a mature (287★), actively maintained,
+3. **`suykerbuyk/go-proxmox`, our own fork of `luthermonson/go-proxmox`**, is a
    fully-typed Go client covering the entire PVE `/api2/json` surface for both
    8.x and 9.x. Verified directly from source: its `VirtualMachineConfig`
    struct exposes `Args`, `Hookscript`, `EFIDisk0`, and `Bios` as first-class
@@ -59,6 +59,27 @@ These were established empirically, against a live Proxmox VE 9.2.11 host
    schema-free passthrough of "the same names `qm create` takes" — so it never
    fights custom/exotic device configuration the way a rigid ORM-style client
    would. It supports native API-token auth (`WithAPIToken`).
+
+   **Why a fork (2026-09-18).** This entry previously justified the dependency
+   as "mature (287★), actively maintained". That described the upstream
+   project's popularity, and it is no longer the reason pveforge carries this
+   client: we carry it because we control it. The fork exists so that
+   transport-layer changes pveforge needs can be made on our own schedule,
+   rather than depending on an external maintainer accepting them — the
+   concrete limitation already driving that need is upstream's
+   `handleResponse` (`proxmox.go:446-449`), which returns
+   `errors.New(res.Status)` on HTTP 500/501 without ever reading the
+   response body, discarding exactly the PVE diagnostic text this project
+   treats as load-bearing. That single defect is why the whole `RawRequest`
+   subsystem exists; it is cited throughout `internal/pve` (`rawrequest.go:26`,
+   `vmshutdown.go:66-68`, `vmconfig.go:55`, `vmdestroy.go:49`, `vmcreate.go:29`,
+   `vmclone.go:25-26`, `snapshot.go:177`, `vmguest.go:285`, and in the tests
+   that pin the behaviour). Upstream
+   remains the canonical project and the better choice for anyone who does not
+   need those changes. As of this writing the fork is a module-path rename
+   only, with no behavioural divergence from upstream (see the fork's
+   `CHANGES`) — what has been acquired is the ability to diverge, not any
+   divergence itself.
 4. **A live trial of the leading alternative (`saltext-proxmox`, a
    community-maintained Salt Proxmox cloud driver) surfaced two independent,
    concrete problems within the first hour of real use**, not hypothetical

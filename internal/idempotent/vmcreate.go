@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // VMCreateClient is the subset of *pve.RoutedClient a VM-create Op needs:

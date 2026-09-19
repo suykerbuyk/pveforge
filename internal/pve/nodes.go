@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/url"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // GetNode fetches one node's detailed status (kernel version, load,

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // claimableContentTypes are the PVE storage "content" classifications that
@@ -136,13 +136,13 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 	// this function; the indexed-map frame below is not the whole claimed
 	// surface on its own.
 	//
-	// This list is exactly the 5 of go-proxmox@v0.8.1's 12 indexed device
-	// maps (types.go:1075-1086) that ever carry a volid — confirmed by
+	// This list is exactly the 5 of go-proxmox's 12 indexed device
+	// maps (types.go:1088-1099) that ever carry a volid — confirmed by
 	// direct source inspection: Nets, Numas, HostPCIs, Serials, USBs,
 	// Parallels, and IPConfigs are all real indexed maps too, but none of
 	// their values are ever a storage-resident volume. This is a MANUAL
 	// enumeration, not derived from go-proxmox's own routing table
-	// (indexedDeviceMaps(), types.go:1115) — that method is unexported and
+	// (indexedDeviceMaps(), types.go:1128) — that method is unexported and
 	// unreachable from this package. It is NOT automatically kept in sync
 	// with a future go-proxmox release: if a vendored upgrade ever adds a
 	// new disk-bearing indexed map, this list must be updated by hand or a

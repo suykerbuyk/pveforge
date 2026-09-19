@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 func TestRequireVMConfig_NilConfig_ReturnsError(t *testing.T) {

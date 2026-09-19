@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // VMCloneClient is the subset of *pve.RoutedClient a VM-clone Op needs: a
@@ -276,7 +276,7 @@ type sourceDisk struct {
 // diskKeyPrefixes are the config-key prefixes that carry a disk volume.
 //
 // Derived, not assumed: go-proxmox models PVE's repeating config keys as
-// separate maps (types.go:1074-1085) and splits them into disk-bearing
+// separate maps (types.go:1088-1099) and splits them into disk-bearing
 // groups — IDEs, SCSIs, SATAs, VirtIOs, Unuseds — and non-disk-bearing ones
 // — Nets, Numas, HostPCIs, Serials, USBs, Parallels, IPConfigs. The two
 // disk-bearing SINGLETONS are separate typed fields, EFIDisk0 ("efidisk0")
@@ -285,7 +285,7 @@ type sourceDisk struct {
 //
 // Matching is prefix-then-pure-digits (via interfaceIndexFromKey, shared
 // with VMCreate.Validate) — the same rule go-proxmox uses for the same
-// reason it documents at types.go:1182: it keeps "scsihw", which shares the
+// reason it documents at types.go:1194: it keeps "scsihw", which shares the
 // "scsi" prefix but has no numeric suffix, from being read as a disk.
 //
 // "unused" is included DELIBERATELY (operator ruling, 2026-09-17: the check

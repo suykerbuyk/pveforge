@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 func TestNVMeDrive_Validate(t *testing.T) {

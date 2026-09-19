@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // fakeVMCloneClient is a scriptable VMCloneClient, local to this test file

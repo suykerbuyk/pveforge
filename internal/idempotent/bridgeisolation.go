@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"

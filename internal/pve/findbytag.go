@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // ErrNotFound indicates FindByTag's tag matched no cluster resource.

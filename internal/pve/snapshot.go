@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // currentPseudoSnapshot is the name PVE gives the synthetic entry its

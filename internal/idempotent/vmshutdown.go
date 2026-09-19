@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	proxmox "github.com/luthermonson/go-proxmox"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 // VMShutdownClient is the subset of *pve.RoutedClient a VM-shutdown Op

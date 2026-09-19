@@ -557,7 +557,7 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_ConflictThenSuccess_ResumesNotRedoes(t *
 // kvjson.Scalar (via Read) into the literal text "true", must still
 // converge against a caller-supplied PVE-CLI-conventional "1" once it
 // reaches Satisfied. "protection" is a confirmed go-proxmox IntOrBool
-// field (types.go:1013) — the same field
+// field (types.go:1026) — the same field
 // TestVMFieldsEnsure_Read_CoercesJSONTypedValuesToComparableStrings above
 // already fixtures as PVE-boolean-true. Before Satisfied called
 // fieldsEqual (boolish.go), this case failed forever: "true" != "1".
