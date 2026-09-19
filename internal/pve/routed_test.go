@@ -54,13 +54,13 @@ func bootstrappedTarget(t *testing.T, fs *fakeSSHServer, passphrase string) *ros
 	}
 	defer c.Close()
 
-	tokenArmored, err := roster.EncryptString([]byte("tok-secret-value"), passphrase)
+	tokenArmored, err := fixtureEncrypt([]byte("tok-secret-value"), passphrase)
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
-	sshArmored, err := roster.EncryptString(kp.PrivateKeyPEM, passphrase)
+	sshArmored, err := fixtureEncrypt(kp.PrivateKeyPEM, passphrase)
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 
 	return &roster.Target{
@@ -133,9 +133,9 @@ func TestRoutedClient_NonRootOnlyField_UsesRESTOnly(t *testing.T) {
 	}))
 	defer restSrv.Close()
 
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:    "qa-pve-01",
@@ -201,9 +201,9 @@ func TestRoutedClient_UnregisteredRootOnlyField_BothFail_ReturnsOriginalRESTErro
 	}))
 	defer restSrv.Close()
 
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	// No SSH auth configured at all — the fallback must fail cleanly, and
 	// the ORIGINAL REST error (carrying PVE's diagnostic text) must win.
@@ -232,9 +232,9 @@ func TestRoutedClient_UnregisteredRootOnlyField_BothFail_ReturnsOriginalRESTErro
 }
 
 func TestRoutedClient_SetViaSSH_NoSSHAuthConfigured(t *testing.T) {
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:    "qa-pve-01",
@@ -258,13 +258,13 @@ func TestRoutedClient_SetViaSSH_NoSSHAuthConfigured(t *testing.T) {
 }
 
 func TestRoutedClient_SetViaSSH_NoHostKeyFingerprint(t *testing.T) {
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
-	sshArmored, err := roster.EncryptString([]byte("irrelevant"), "roster-pass")
+	sshArmored, err := fixtureEncrypt([]byte("irrelevant"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:    "qa-pve-01",
@@ -648,9 +648,9 @@ func TestRoutedClient_SetVMConfigFieldCAS_NonRootOnlyField_ForwardsToREST(t *tes
 	}))
 	defer restSrv.Close()
 
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:    "qa-pve-01",
@@ -691,9 +691,9 @@ func TestRoutedClient_SetVMConfigFieldCAS_RootOnlyField_Refuses(t *testing.T) {
 	}))
 	defer restSrv.Close()
 
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:    "qa-pve-01",

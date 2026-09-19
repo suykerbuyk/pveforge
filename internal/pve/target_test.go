@@ -1,6 +1,7 @@
 package pve
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -16,9 +17,9 @@ func TestNewClientForTarget_MissingToken(t *testing.T) {
 }
 
 func TestNewClientForTarget_Success(t *testing.T) {
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:   "qa-pve-01",
@@ -46,9 +47,9 @@ func TestNewClientForTarget_Success(t *testing.T) {
 }
 
 func TestNewClientForTarget_WrongPassphrase(t *testing.T) {
-	armored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	armored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:   "qa-pve-01",
@@ -60,8 +61,15 @@ func TestNewClientForTarget_WrongPassphrase(t *testing.T) {
 		},
 	}
 
-	if _, err := NewClientForTarget(tg, "wrong-passphrase"); err == nil {
+	// The error must be the decrypt failure itself. NewClient also rejects
+	// an empty secret, so a bare err != nil would still pass if the decrypt
+	// error were swallowed and the empty result used.
+	_, err = NewClientForTarget(tg, "wrong-passphrase")
+	if err == nil {
 		t.Fatal("expected an error decrypting the token with the wrong passphrase")
+	}
+	if !strings.Contains(err.Error(), `decrypt target "qa-pve-01" token`) {
+		t.Errorf("expected the token-decrypt error, got: %v", err)
 	}
 }
 
@@ -71,15 +79,15 @@ func TestNewClientForTarget_WrongPassphrase(t *testing.T) {
 // failure (corruption, format drift) on a target that also has SSH auth
 // persisted must not block building the REST client.
 func TestNewClientForTarget_IgnoresUndecryptableSSHData(t *testing.T) {
-	tokenArmored, err := roster.EncryptString([]byte("tok-secret-value"), "roster-pass")
+	tokenArmored, err := fixtureEncrypt([]byte("tok-secret-value"), "roster-pass")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	// SSH key encrypted under a DIFFERENT passphrase — undecryptable with
 	// "roster-pass", simulating corrupted/drifted ciphertext.
-	sshArmored, err := roster.EncryptString([]byte("ssh-key-bytes"), "a-completely-different-passphrase")
+	sshArmored, err := fixtureEncrypt([]byte("ssh-key-bytes"), "a-completely-different-passphrase")
 	if err != nil {
-		t.Fatalf("EncryptString: %v", err)
+		t.Fatalf("fixtureEncrypt: %v", err)
 	}
 	tg := &roster.Target{
 		ID:   "qa-pve-01",

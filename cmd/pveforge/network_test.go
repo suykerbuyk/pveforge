@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -68,6 +67,15 @@ func TestNewNetworkGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	// node-wide, matching NetworkBridgeEnsure's own NetworkLockKey (see
 	// internal/idempotent/networkbridge.go).
 	key := lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "qa-pve-01"}
+
+	// Control: a network mutation on a DIFFERENT node must not block this
+	// read.
+	control := newNetworkGetCmd()
+	control.SetOut(&bytes.Buffer{})
+	control.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "vmbr0"})
+	requireRunsBesideUnrelatedMutation(t, rosterPath, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "network", ID: "qa-pve-02"}, control)
+	atomic.StoreInt32(&hits, 0)
+
 	unlockMutation, err := lock.Mutation(context.Background(), rosterPath, key)
 	if err != nil {
 		t.Fatalf("acquire mutation: %v", err)
@@ -77,7 +85,7 @@ func TestNewNetworkGetCmd_BlocksOnPendingMutation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "vmbr0"})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), lockTestDeadline)
 	defer cancel()
 	if err := cmd.ExecuteContext(ctx); err == nil {
 		t.Fatal("expected the read to be blocked by the pending mutation and time out")
