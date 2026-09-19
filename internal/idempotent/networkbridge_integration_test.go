@@ -426,11 +426,10 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr0",
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr1",
 		"PUT /api2/json/nodes/qa-pve-01/network",
-		// go-proxmox's own Task.Wait always issues an initial "ping it
-		// quick" status poll BEFORE its own poll loop's first iteration
-		// (see tasks.go's Wait), so even a task that is already stopped
-		// by the very first poll is observed exactly twice, never once.
-		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
+		// WaitForTask polls immediately and stops at the first poll that
+		// reports the task stopped, so a task that is already stopped is
+		// observed exactly once. (go-proxmox's Task.Wait, which it
+		// replaced, pinged once up front and again in its loop: twice.)
 		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
 	}
 	if got := restScript.hitSequence(); !equalStringSlices(got, wantREST) {
@@ -517,11 +516,10 @@ func TestNetworkBridgeEnsure_Apply_Destroy_FullStack(t *testing.T) {
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr0",
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr1",
 		"PUT /api2/json/nodes/qa-pve-01/network",
-		// go-proxmox's own Task.Wait always issues an initial "ping it
-		// quick" status poll BEFORE its own poll loop's first iteration
-		// (see tasks.go's Wait), so even a task that is already stopped
-		// by the very first poll is observed exactly twice, never once.
-		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
+		// WaitForTask polls immediately and stops at the first poll that
+		// reports the task stopped, so a task that is already stopped is
+		// observed exactly once. (go-proxmox's Task.Wait, which it
+		// replaced, pinged once up front and again in its loop: twice.)
 		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
 	}
 	if got := restScript.hitSequence(); !equalStringSlices(got, wantREST) {

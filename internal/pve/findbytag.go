@@ -10,6 +10,13 @@ import (
 )
 
 // ErrNotFound indicates FindByTag's tag matched no cluster resource.
+//
+// Not to be confused with proxmox.ErrNotFound, which a *proxmox.StatusError
+// matches for an HTTP 404. A 404 on /cluster/resources makes FindByTag
+// return an error matching proxmox.ErrNotFound, NOT this sentinel: that
+// read failed (a wrong path or a proxy — PVE itself reports a missing
+// object as a 500), which says nothing about whether any resource carries
+// the tag. The two mean different things and are deliberately not unified.
 var ErrNotFound = errors.New("no resource matches the given tag")
 
 // ErrAmbiguousTag indicates FindByTag's tag matched more than one cluster

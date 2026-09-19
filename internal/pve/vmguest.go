@@ -38,7 +38,7 @@ var defaultAgentExecTimeout = 2 * time.Minute
 // This is NOT a failure of the command. The command may still be
 // running, may have already completed, or (if every status poll was
 // itself failing) may have been lost along with the agent. A caller must
-// treat it the way IsTaskTimeoutError's own doc comment describes: the
+// treat it the way IsTaskOutcomeUnknown's own doc comment describes: the
 // outcome is unknown, so do not re-execute a non-idempotent guest
 // command on the strength of it.
 //

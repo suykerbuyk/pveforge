@@ -1115,12 +1115,10 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				return rc.WaitForTask(ctx, fwdCallerNode, upid(fwdCallerNode))
 			}, []string{
-				"GET /nodes/qa-pve-02/tasks/" + upid(fwdCallerNode) + "/status",
 				"GET /nodes/qa-pve-02/tasks/" + upid(fwdCallerNode) + "/status"}},
 			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				return rc.WaitForTask(ctx, fwdCallerNode2, upid(fwdCallerNode2))
 			}, []string{
-				"GET /nodes/qa-pve-05/tasks/" + upid(fwdCallerNode2) + "/status",
 				"GET /nodes/qa-pve-05/tasks/" + upid(fwdCallerNode2) + "/status"}},
 		}},
 		{"StorageType", []bindingCase{
@@ -1250,14 +1248,12 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 				"GET /nodes/qa-pve-03/qemu/4242/snapshot",
 				"POST /nodes/qa-pve-03/qemu/4242/snapshot description=desc-one&snapname=seam-snap-1&vmstate=1",
 				"GET /nodes/qa-pve-03/tasks/" + upid(fwdTargetNode) + "/status",
-				"GET /nodes/qa-pve-03/tasks/" + upid(fwdTargetNode) + "/status",
 				"GET /nodes/qa-pve-03/qemu/4242/snapshot"}},
 			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				return rc.CreateSnapshot(ctx, fwdVMID2, "seam-snap-2", "desc-two")
 			}, []string{
 				"GET /nodes/qa-pve-04/qemu/5151/snapshot",
 				"POST /nodes/qa-pve-04/qemu/5151/snapshot description=desc-two&snapname=seam-snap-2&vmstate=1",
-				"GET /nodes/qa-pve-04/tasks/" + upid(fwdTargetNode2) + "/status",
 				"GET /nodes/qa-pve-04/tasks/" + upid(fwdTargetNode2) + "/status",
 				"GET /nodes/qa-pve-04/qemu/5151/snapshot"}},
 		}},

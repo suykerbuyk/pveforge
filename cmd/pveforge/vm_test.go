@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
@@ -667,6 +669,11 @@ type vmCreateFake struct {
 	// "taken" — a 500. vmidFree must propagate it rather than read it as
 	// "free" and wave the create through.
 	nextIDBroken bool
+	// nextIDStatus, when non-zero, makes that same check answer this
+	// status with a {"data":null} body: the shape pveproxy sends when it
+	// cannot reach the node (595), which go-proxmox v0.8.2-pveforge.0
+	// decoded as an empty success.
+	nextIDStatus int
 
 	// createRejects makes POST /nodes/{node}/qemu answer with PVE's own
 	// "VM N already exists" rejection — the collision that happens at the
@@ -776,6 +783,11 @@ func newVMCreateServer(t *testing.T, node string, vmid int, f *vmCreateFake) *ht
 			}
 			if f.nextIDBroken {
 				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if f.nextIDStatus != 0 {
+				w.WriteHeader(f.nextIDStatus)
+				_, _ = fmt.Fprint(w, `{"data":null}`)
 				return
 			}
 			if f.nextIDTaken {
@@ -915,6 +927,38 @@ func TestNewVMCreateCmd_TakenVMID_ErrorsAndNamesIt(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
 		t.Errorf("a refused vmid must never reach the create call, got %d create calls", got)
+	}
+}
+
+// TestNewVMCreateCmd_PinCheck595_RefusesNamingTheStatus pins the pin
+// pre-check's behaviour on a node pveproxy cannot reach: the create is
+// refused before any POST, and the refusal names the status. On
+// v0.8.2-pveforge.0 the 595 was swallowed and only P1's unverifiable-read
+// guard stopped the create, with an error that said nothing about the
+// status.
+func TestNewVMCreateCmd_PinCheck595_RefusesNamingTheStatus(t *testing.T) {
+	f := &vmCreateFake{nextIDStatus: 595}
+	srv := newVMCreateServer(t, "qa-pve-01", 100, f)
+	defer srv.Close()
+	rosterPath := vmCreateRoster(t, srv)
+
+	cmd := newVMCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected vm create to refuse when its pin check answers 595")
+	}
+	if !strings.Contains(err.Error(), "595") {
+		t.Errorf("the refusal must name the status 595, got: %v", err)
+	}
+	if errors.Is(err, pve.ErrUnverifiableRead) {
+		t.Errorf("the refusal is ErrUnverifiableRead: the status never reached the command, only its null payload did: %v", err)
+	}
+	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
+		t.Errorf("a refused pin check must never reach the create call, got %d create calls", got)
 	}
 }
 

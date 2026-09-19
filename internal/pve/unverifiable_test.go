@@ -123,6 +123,26 @@ func TestOrphanVolumes_Swallowed595SharedStatusRefuses(t *testing.T) {
 	}
 }
 
+// TestOrphanVolumes_Status595IsReportedAsTheStatus is the same incident,
+// discriminating the CAUSE: on v0.8.2-pveforge.0 the 595 was swallowed and
+// the scan refused only because P1's GetStorage guard saw a null payload,
+// so the error said "unverifiable read" and nothing about the node being
+// unreachable. With the typed status error the refusal names the 595.
+// Compiles on both pins (see statusLine in statuserror_test.go).
+func TestOrphanVolumes_Status595IsReportedAsTheStatus(t *testing.T) {
+	s := newRouteServer(t)
+	s.on("GET", "/nodes/n1/storage/nfs-shared/status", 595, nullData)
+	s.on("GET", "/nodes/n1/storage/nfs-shared/content", 200,
+		`{"data":[{"volid":"nfs-shared:200/vm-200-disk-0.qcow2","vmid":200,"content":"images","format":"qcow2","size":1}]}`)
+	s.on("GET", "/nodes/n1/qemu", 200, `{"data":[]}`)
+
+	orphans, err := s.client().OrphanVolumes(context.Background(), "n1", "nfs-shared")
+	if len(orphans) != 0 {
+		t.Fatalf("scan returned %d orphan(s) from a storage whose status read failed", len(orphans))
+	}
+	requireStatusCause(t, err, 595)
+}
+
 // --- P1-1 .. P1-5: the orphan scan and its reads -------------------------
 
 func TestOrphanVolumes_NullSharedStatusIsUnverifiable(t *testing.T) {
