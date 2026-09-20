@@ -314,6 +314,28 @@ func (op *NetworkBridgeEnsure) Read(ctx context.Context) (string, error) {
 // already matching, even against a wanted value that happens to be the
 // empty string). For a DESTROY (Wanted nil/empty), satisfied only if Iface
 // currently does NOT exist.
+//
+// A present field is compared via fieldsEqual (boolish.go), NOT a plain ==,
+// exactly as NetworkFieldsEnsure.Satisfied and VMFieldsEnsure.Satisfied
+// already do. Wanted carries whatever the caller typed while PVE answers in
+// its own encoding, so a boolean-shaped bridge field — vlan_filtering,
+// autostart, bridge_vlan_aware, all typed as plain ints or IntOrBool on
+// go-proxmox's own NodeNetwork — converges regardless of which literal form
+// each side used. This was a real, shipped defect (found 2026-09-20, while
+// reviewing pveforge-mutation-success-second-signal's plan): with a plain
+// !=, `network bridge create ... vlan_filtering=true` could never report
+// satisfied against PVE's own "1", so every invocation re-drove the entire
+// stage -> guard -> commit -> ifreload sequence against a live node — the
+// exact blast radius this Op's two-phase guard exists to avoid. See
+// TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge.
+//
+// This is the only field-VALUE comparison in this file. The four plain !=
+// that remain are deliberately not fieldsEqual, because none of them
+// compares a caller-supplied value against a PVE-reported one: current's
+// emptiness (Satisfied's own exists check), the staged-stanza hash the
+// guard compares against its pre-stage snapshot, and the two post-apply
+// kernel-state checks, which compare Go bools from LinkState to Go bools.
+// fieldsEqual would be meaningless on all four.
 func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 	exists := current != ""
 
@@ -337,7 +359,7 @@ func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 			return false
 		}
 		got, err := kvjson.Scalar(raw)
-		if err != nil || got != wanted {
+		if err != nil || !fieldsEqual(got, wanted) {
 			return false
 		}
 	}

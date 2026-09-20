@@ -321,3 +321,136 @@ func TestNewNetworkSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied(t *test
 		t.Error("expected no write to be attempted: Validate should reject the batch before any write")
 	}
 }
+
+// --- Already-satisfied no-op reporting -----------------------------------
+//
+// The two tests below pin a user-visible output contract that nothing
+// covered before (found 2026-09-20): both `network bridge create` and
+// `network bridge destroy` printed their past-tense success line
+// unconditionally, without ever consulting idempotent.Result.Changed, so an
+// already-satisfied invocation reported work it had not done.
+//
+// Deliberately NOT following `vm create`'s !res.Changed-is-an-error branch
+// (cmd/pveforge/vm.go:198-201): that error is contingent on a pre-check
+// unique to that command — it has already refused the "vmid taken" case
+// itself via NextVMID, so a no-op there can only mean a lost race, and its
+// own comment says as much ("it is a legitimate no-op for a library caller
+// of the Op"). These two commands have no such pre-check, so a no-op here is
+// the ordinary idempotent outcome and erroring on it would make the
+// commands non-re-runnable — breaking the premise of the mutation engine
+// they are built on.
+//
+// Both tests assert the write counter is zero as a SEPARATE observer: a
+// no-op line printed while the Op actually staged and committed against the
+// node would be a worse lie than the one being fixed, and the output string
+// alone cannot distinguish the two.
+
+// TestNewNetworkBridgeCreateCmd_AlreadySatisfied_ReportsNoOpAndDoesNotStage
+// uses vlan_filtering=true against PVE's own JSON number 1 on purpose: that
+// is exactly the pairing NetworkBridgeEnsure.Satisfied could never match
+// before the boolish fix (see
+// TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge), which is what
+// made this no-op path unreachable for such a bridge in the first place.
+func TestNewNetworkBridgeCreateCmd_AlreadySatisfied_ReportsNoOpAndDoesNotStage(t *testing.T) {
+	var writeHit, ifaceGets int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			atomic.AddInt32(&writeHit, 1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/nodes/qa-pve-01/network/vmbr5") {
+			atomic.AddInt32(&ifaceGets, 1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// The bridge already exists with exactly the wanted fields, and
+		// PVE answers vlan_filtering in its own encoding (a JSON number),
+		// not the caller's ("true").
+		_, _ = w.Write([]byte(`{"data":{"bridge_ports":"eth0","vlan_filtering":1,"active":1}}`))
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newNetworkBridgeCreateCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--roster", rosterPath, "--management-bridge", "vmbr0",
+		"qa-pve-01", "vmbr5", "bridge_ports=eth0", "vlan_filtering=true",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("an already-satisfied create must succeed, not error: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "already up to date") {
+		t.Errorf("expected an explicit no-op line for an already-satisfied bridge, got: %q", got)
+	}
+	if got := out.String(); strings.Contains(got, "created") {
+		t.Errorf("an already-satisfied create must NOT claim it created anything, got: %q", got)
+	}
+	if got := atomic.LoadInt32(&writeHit); got != 0 {
+		t.Errorf("expected no stage/commit against the node for a satisfied op, got %d write(s)", got)
+	}
+	if got := atomic.LoadInt32(&ifaceGets); got == 0 {
+		t.Error("expected the op to have actually read the interface — a no-op line printed without reading anything would be vacuous")
+	}
+}
+
+// TestNewNetworkBridgeDestroyCmd_AlreadyAbsent_ReportsNoOpAndDoesNotStage is
+// the destroy half. "Absent" is expressed the way isMissingNetworkInterfaceError
+// expects it (a PVE 400 parameter-verification body naming iface), so this
+// also exercises that detection path through the CLI rather than asserting
+// absence by fiat.
+func TestNewNetworkBridgeDestroyCmd_AlreadyAbsent_ReportsNoOpAndDoesNotStage(t *testing.T) {
+	var writeHit, ifaceGets int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			atomic.AddInt32(&writeHit, 1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Count only reads of the interface under test, matching the
+		// create test's own counter: an unfiltered count would pass even
+		// if the Op had read something else entirely.
+		if strings.HasSuffix(r.URL.Path, "/nodes/qa-pve-01/network/vmbr5") {
+			atomic.AddInt32(&ifaceGets, 1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":{"iface":"interface does not exist"},"data":null}`))
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newNetworkBridgeDestroyCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--roster", rosterPath, "--management-bridge", "vmbr0",
+		"qa-pve-01", "vmbr5",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("destroying an already-absent bridge must succeed, not error: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "already absent") {
+		t.Errorf("expected an explicit no-op line for an already-absent bridge, got: %q", got)
+	}
+	if got := out.String(); strings.Contains(got, "destroyed") {
+		t.Errorf("an already-absent destroy must NOT claim it destroyed anything, got: %q", got)
+	}
+	if got := atomic.LoadInt32(&writeHit); got != 0 {
+		t.Errorf("expected no stage/commit against the node for a satisfied op, got %d write(s)", got)
+	}
+	if got := atomic.LoadInt32(&ifaceGets); got == 0 {
+		t.Error("expected the op to have actually read the interface — a no-op line printed without reading anything would be vacuous")
+	}
+}
