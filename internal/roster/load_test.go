@@ -41,6 +41,7 @@ node = "qa-pve-01"
 }
 
 func TestLoad_Basic(t *testing.T) {
+	withTestWorkFactor(t)
 	r, err := Decode([]byte(fixtureBasic))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
@@ -57,6 +58,7 @@ func TestLoad_Basic(t *testing.T) {
 }
 
 func TestLoad_WithAuth(t *testing.T) {
+	withTestWorkFactor(t)
 	r, err := Decode([]byte(fixtureWithAuth(t)))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
@@ -81,6 +83,7 @@ func TestLoad_WithAuth(t *testing.T) {
 }
 
 func TestLoad_RejectsNonArmoredSecret(t *testing.T) {
+	withTestWorkFactor(t)
 	cases := []string{
 		`[[targets]]
 id   = "qa-pve-01"
@@ -110,6 +113,7 @@ node = "qa-pve-01"
 }
 
 func TestLoad_DuplicateID(t *testing.T) {
+	withTestWorkFactor(t)
 	doc := `[[targets]]
 id = "a"
 host = "h"
@@ -126,6 +130,7 @@ node = "n2"
 }
 
 func TestLoad_FromFile(t *testing.T) {
+	withTestWorkFactor(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.toml")
 	if err := os.WriteFile(path, []byte(fixtureBasic), 0o600); err != nil {
@@ -141,12 +146,14 @@ func TestLoad_FromFile(t *testing.T) {
 }
 
 func TestLoad_FileNotFound(t *testing.T) {
+	withTestWorkFactor(t)
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.toml")); err == nil {
 		t.Fatal("expected error for missing file")
 	}
 }
 
 func TestLoad_MissingRequiredFields(t *testing.T) {
+	withTestWorkFactor(t)
 	cases := []string{
 		`[[targets]]
 host = "h"

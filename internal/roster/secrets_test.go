@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+// TestEncryptDecryptString_RoundTrip deliberately does NOT lower the work
+// factor. It is this package's one end-to-end check that a genuine
+// production-parameter header — age's default 18, the factor every roster
+// file a user owns is written at — survives armor, age and back again. A
+// logN-10 round trip cannot show that.
+//
+// It is the ONLY test here that keeps production parameters, and one is
+// enough: kdf_guard_test.go pins what EncryptString WRITES (exactly 18, over
+// a table of inputs), this pins what DecryptString can READ, and nothing else
+// in this file adds a third property. The three tests below exercise salt
+// freshness, error propagation and Target.Resolve's wiring, none of which
+// behaves differently at 10 than at 18, and each of which cost ~12-25s under
+// -race to prove something the work factor has no bearing on.
 func TestEncryptDecryptString_RoundTrip(t *testing.T) {
 	plaintext := []byte("super-secret-token-value")
 	passphrase := "correct horse battery staple"
@@ -27,7 +40,10 @@ func TestEncryptDecryptString_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestDecryptString_WrongPassphrase asserts error propagation, which is
+// independent of the work factor.
 func TestDecryptString_WrongPassphrase(t *testing.T) {
+	withTestWorkFactor(t)
 	armored, err := EncryptString([]byte("secret"), "right-passphrase")
 	if err != nil {
 		t.Fatalf("EncryptString: %v", err)
@@ -41,6 +57,10 @@ func TestEncryptString_NondeterministicCiphertext(t *testing.T) {
 	// Same plaintext + passphrase must not produce identical ciphertext on
 	// repeated calls (fresh salt/nonce each time) — a rotation that writes
 	// the "same" secret back still changes the file.
+	//
+	// The salt is 16 random bytes at every work factor, so this property
+	// holds identically at 10.
+	withTestWorkFactor(t)
 	a, err := EncryptString([]byte("secret"), "pw")
 	if err != nil {
 		t.Fatalf("EncryptString: %v", err)
@@ -75,7 +95,10 @@ func TestResolvePassphrase_NonInteractiveNoEnv(t *testing.T) {
 	}
 }
 
+// TestTarget_Resolve asserts that Resolve decrypts the right field into the
+// right place. That is wiring, not cryptography.
 func TestTarget_Resolve(t *testing.T) {
+	withTestWorkFactor(t)
 	passphrase := "pw"
 	tokenSecret := []byte("tok-secret")
 	sshKey := []byte("ssh-priv-key-bytes")
