@@ -38,6 +38,18 @@ import (
 // the whole base64 payload is embedded as one shell command-line argument,
 // which is fine well past that size (Linux's ARG_MAX is generally in the
 // hundreds of KB) but this is not intended for large file transfer.
+//
+// The payload travels in argv and never over the session's stdin, which is
+// what keeps Client.Run's stdin-isolation property intact for uploads —
+// see Run's doc comment, and the explicit separate channel a larger
+// transfer would have to open instead.
+//
+// NOT VERIFIABLE WITHOUT A LIVE PVE HOST: the real bound here is the
+// REMOTE host's ARG_MAX, which no test in this repo can observe. The fake
+// SSH server the tests drive imposes no argv limit at all, so the largest
+// content that actually works against a real PVE node is unmeasured. The
+// "hundreds of KB" figure above is the usual Linux default, not something
+// this suite has confirmed for any particular target.
 func (c *Client) WriteFile(ctx context.Context, remotePath string, content []byte, mode string) error {
 	if remotePath == "" {
 		return fmt.Errorf("write file: remote path is required")
