@@ -334,6 +334,147 @@ func TestNetworkBridgeEnsure_Satisfied(t *testing.T) {
 	})
 }
 
+// TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge is the regression
+// test for a real, shipped defect found 2026-09-20 while reviewing
+// pveforge-mutation-success-second-signal's plan: Satisfied compared each
+// field's current value against its wanted value with a plain !=, while
+// BOTH sibling Ops already went through fieldsEqual for exactly this reason
+// (networkfields.go's Satisfied, vmfields.go's Satisfied) — and boolish.go's
+// own doc comment names vlan_filtering, a bridge field, as the motivating
+// case.
+//
+// The consequence was not cosmetic. NetworkBridgeEnsure is the Op that
+// drives a live stage -> guard -> commit -> ifreload sequence against a real
+// node. An Op that can never report satisfied re-drives that entire sequence
+// on every single invocation — precisely the blast radius the two-phase
+// guard exists to avoid.
+//
+// Wanted carries whatever the caller typed (cmd/pveforge/network.go passes
+// key=value args through unvalidated), while PVE answers with its own
+// encoding: go-proxmox types NodeNetwork.Autostart and
+// NodeNetwork.BridgeVLANAware as plain ints, and its IntOrBool exists
+// upstream precisely because these fields arrive either way. Read preserves
+// that raw JSON (fetchInterface returns map[string]json.RawMessage), so the
+// cases below use PVE's NATIVE encodings — a JSON number and a JSON bool —
+// rather than pre-stringified ones.
+//
+// The four want:false cases are the specificity control: a "fix" that simply
+// returned true, or one that coerced every value through a boolean, would
+// fail this test rather than pass it.
+func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
+	tests := []struct {
+		name    string
+		wanted  map[string]string
+		current string
+		want    bool
+	}{
+		// The headline case: this is what `network bridge create vmbr1
+		// vlan_filtering=true` actually compares once PVE has applied it.
+		{
+			name:    "vlan_filtering: caller typed true, pve answers json number 1",
+			wanted:  map[string]string{"vlan_filtering": "true"},
+			current: `{"vlan_filtering":1,"active":1}`,
+			want:    true,
+		},
+		{
+			name:    "vlan_filtering: caller typed PVE-CLI 1, pve answers json bool true",
+			wanted:  map[string]string{"vlan_filtering": "1"},
+			current: `{"vlan_filtering":true}`,
+			want:    true,
+		},
+		{
+			name:    "autostart: caller typed false, pve answers json number 0",
+			wanted:  map[string]string{"autostart": "false"},
+			current: `{"autostart":0}`,
+			want:    true,
+		},
+		{
+			name:    "bridge_vlan_aware: caller typed 0, pve answers json bool false",
+			wanted:  map[string]string{"bridge_vlan_aware": "0"},
+			current: `{"bridge_vlan_aware":false}`,
+			want:    true,
+		},
+
+		// Specificity controls.
+		{
+			name:    "vlan_filtering: wanted 0 against a live true stays unsatisfied",
+			wanted:  map[string]string{"vlan_filtering": "0"},
+			current: `{"vlan_filtering":true}`,
+			want:    false,
+		},
+		{
+			// boolish.go deliberately excludes "" from its four-token set:
+			// a field genuinely present-but-empty must never read as
+			// boolean-false-shaped. Same case the sibling pins.
+			name:    "empty string is not boolean-false-shaped",
+			wanted:  map[string]string{"vlan_filtering": "false"},
+			current: `{"vlan_filtering":""}`,
+			want:    false,
+		},
+		{
+			// "yes"/"on" are outside parseBoolish's domain, so this falls
+			// through to an exact compare and correctly does not match.
+			name:    "yes is not boolish, so it does not match 1",
+			wanted:  map[string]string{"vlan_filtering": "yes"},
+			current: `{"vlan_filtering":1}`,
+			want:    false,
+		},
+		{
+			name:    "non-boolish mismatch still unsatisfied",
+			wanted:  map[string]string{"bridge_ports": "eth0"},
+			current: `{"bridge_ports":"eth1"}`,
+			want:    false,
+		},
+
+		// The absent-key guard. Satisfied's own doc (and boolish.go's)
+		// claim a key ABSENT from current state can never count as
+		// already-matching, even against a wanted value that happens to
+		// be the empty string — otherwise the Op would skip a live
+		// stage/commit/ifreload it genuinely owed. Nothing pinned that
+		// branch before: mutating its `return false` to `continue`
+		// compiles and leaves the whole suite green (measured).
+		// The nearest pre-existing case has the field PRESENT and wrong,
+		// which exercises a different branch entirely.
+		{
+			name:    "absent key is never already-matching",
+			wanted:  map[string]string{"vlan_filtering": "1"},
+			current: `{"bridge_ports":"eth0"}`,
+			want:    false,
+		},
+		{
+			// The edge boolish.go calls out by name: "" must not be
+			// confused with absent, in either direction.
+			name:    "absent key is not already-matching even for a wanted empty string",
+			wanted:  map[string]string{"bridge_stp": ""},
+			current: `{"bridge_ports":"eth0"}`,
+			want:    false,
+		},
+
+		// Non-boolish equality must be untouched by the fix.
+		{
+			name:    "non-boolish string match unaffected",
+			wanted:  map[string]string{"bridge_ports": "eth0"},
+			current: `{"bridge_ports":"eth0"}`,
+			want:    true,
+		},
+		{
+			name:    "non-boolish numeric match unaffected",
+			wanted:  map[string]string{"mtu": "9000"},
+			current: `{"mtu":9000}`,
+			want:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			op := &NetworkBridgeEnsure{Wanted: tc.wanted}
+			if got := op.Satisfied(tc.current); got != tc.want {
+				t.Fatalf("Satisfied(%s) with Wanted %v = %v, want %v", tc.current, tc.wanted, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- Apply: helpers to build common scenario fields ---------------------
 
 func mgmtFields(v string) map[string]json.RawMessage {

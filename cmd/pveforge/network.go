@@ -163,8 +163,25 @@ there is no safe way to force past that, so no bypass is offered.`,
 				return err
 			}
 
-			if _, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false); err != nil {
+			// Report what actually happened, not what was asked for.
+			// idempotent.Run returns Changed == false when Satisfied was
+			// already true and Apply never ran, and printing the
+			// past-tense line on that path claims work the command did not
+			// do. Deliberately NOT vm create's !Changed-is-an-error branch
+			// (vm.go:198-201): that error is contingent on a pre-check
+			// unique to vm create, which has already refused the "vmid
+			// taken" case itself, so a no-op there can only be a lost race
+			// — its own comment notes a no-op is legitimate for a library
+			// caller of the Op. This command has no such pre-check, so an
+			// already-satisfied run is the ordinary idempotent outcome and
+			// erroring on it would make the command non-re-runnable.
+			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
+			if err != nil {
 				return err
+			}
+			if !res.Changed {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: bridge %s already up to date\n", args[0], args[1])
+				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: bridge %s created\n", args[0], args[1])
 			return nil
@@ -224,8 +241,25 @@ depends on iface before running this.`,
 				return err
 			}
 
-			if _, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false); err != nil {
+			// Report what actually happened, not what was asked for.
+			// idempotent.Run returns Changed == false when Satisfied was
+			// already true and Apply never ran, and printing the
+			// past-tense line on that path claims work the command did not
+			// do. Deliberately NOT vm create's !Changed-is-an-error branch
+			// (vm.go:198-201): that error is contingent on a pre-check
+			// unique to vm create, which has already refused the "vmid
+			// taken" case itself, so a no-op there can only be a lost race
+			// — its own comment notes a no-op is legitimate for a library
+			// caller of the Op. Destroy has no such pre-check, so an
+			// already-satisfied run is the ordinary idempotent outcome and
+			// erroring on it would make the command non-re-runnable.
+			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
+			if err != nil {
 				return err
+			}
+			if !res.Changed {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: bridge %s already absent\n", args[0], args[1])
+				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: bridge %s destroyed\n", args[0], args[1])
 			return nil
