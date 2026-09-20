@@ -47,6 +47,7 @@ func sampleArmored(t *testing.T, plaintext, passphrase string) string {
 }
 
 func TestWriteTokenAuth_FirstBootstrap_PreservesOtherTarget(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 
 	secondBlockStart := strings.Index(fixtureTwoTargets, "# a deliberately weird comment")
@@ -102,6 +103,7 @@ func TestWriteTokenAuth_FirstBootstrap_PreservesOtherTarget(t *testing.T) {
 }
 
 func TestWriteTokenAuth_Rotation_ReplacesOnlySecretValue(t *testing.T) {
+	withTestWorkFactor(t)
 	oldArmored := sampleArmored(t, "old-secret", "test-passphrase")
 	fixture := `[[targets]]
 id   = "qa-pve-01"
@@ -164,6 +166,7 @@ node = "qa-pve-01"
 }
 
 func TestWriteSSHAuth_CoexistsWithToken(t *testing.T) {
+	withTestWorkFactor(t)
 	tokenArmored := sampleArmored(t, "token-secret", "test-passphrase")
 	fixture := `[[targets]]
 id   = "qa-pve-01"
@@ -227,6 +230,7 @@ node = "qa-pve-01"
 // a bug there would previously only be caught if it also corrupted some
 // OTHER target, not a sibling subtable on the same target.
 func TestWriteTokenAuth_PreservesExistingSSHValue(t *testing.T) {
+	withTestWorkFactor(t)
 	sshArmored := sampleArmored(t, "ssh-priv-key-original", "test-passphrase")
 	fixture := `[[targets]]
 id   = "qa-pve-01"
@@ -278,6 +282,7 @@ node = "qa-pve-01"
 }
 
 func TestWriteTokenAuth_UnknownTarget(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := WriteTokenAuth(path, "does-not-exist", TokenWrite{
 		TokenID:         "x",
@@ -289,6 +294,7 @@ func TestWriteTokenAuth_UnknownTarget(t *testing.T) {
 }
 
 func TestWriteTokenAuth_TargetMissingID(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 host = "h1"
 node = "n1"
@@ -304,6 +310,7 @@ node = "n1"
 }
 
 func TestQuoteTOMLBasicString_Escapes(t *testing.T) {
+	withTestWorkFactor(t)
 	cases := map[string]string{
 		`plain`:            `"plain"`,
 		`with "quote"`:     `"with \"quote\""`,
@@ -319,6 +326,7 @@ func TestQuoteTOMLBasicString_Escapes(t *testing.T) {
 }
 
 func TestWriteSSHAuth_QuotesSpecialCharsInPublicKey(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := WriteSSHAuth(path, "qa-pve-01", SSHWrite{
 		User:                "root",
@@ -351,6 +359,7 @@ func TestWriteSSHAuth_QuotesSpecialCharsInPublicKey(t *testing.T) {
 // nothing is ever inserted after it — its block must appear as an exact,
 // untouched suffix of the resulting file.
 func TestWriteTokenAuth_FirstTarget_PreservesLaterTargetBytes(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 
 	secondBlockStart := strings.Index(fixtureTwoTargets, "# a deliberately weird comment")
@@ -390,6 +399,7 @@ func TestWriteTokenAuth_FirstTarget_PreservesLaterTargetBytes(t *testing.T) {
 // prefix/substring instead of exact string equality: "pve-1" is a prefix
 // of "pve-10", so writing to "pve-1" must never touch "pve-10"'s bytes.
 func TestWriteTokenAuth_ExactIDMatch_DoesNotAffectPrefixTarget(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 id   = "pve-1"
 host = "pve-1.example.com"
@@ -438,6 +448,7 @@ node = "pve-10"
 }
 
 func TestWriteSSHAuth_WritesHostKeyFingerprint(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := WriteSSHAuth(path, "qa-pve-01", SSHWrite{
 		User:                "root",
@@ -463,6 +474,7 @@ func TestWriteSSHAuth_WritesHostKeyFingerprint(t *testing.T) {
 }
 
 func TestWriteSSHAuth_RotationPreservesHostKeyFingerprint(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := WriteSSHAuth(path, "qa-pve-01", SSHWrite{
 		User:                "root",
@@ -502,6 +514,7 @@ func TestWriteSSHAuth_RotationPreservesHostKeyFingerprint(t *testing.T) {
 }
 
 func TestAppendTarget_NewRoster(t *testing.T) {
+	withTestWorkFactor(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.toml")
 	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
@@ -534,6 +547,7 @@ func TestAppendTarget_NewRoster(t *testing.T) {
 }
 
 func TestAppendTarget_PreservesExistingTargets(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 
 	err := AppendTarget(path, Target{
@@ -576,6 +590,7 @@ func TestAppendTarget_PreservesExistingTargets(t *testing.T) {
 }
 
 func TestAppendTarget_DuplicateID(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := AppendTarget(path, Target{
 		ID:   "qa-pve-01",
@@ -588,6 +603,7 @@ func TestAppendTarget_DuplicateID(t *testing.T) {
 }
 
 func TestAppendTarget_MissingRequiredFields(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	cases := []Target{
 		{Host: "h", Node: "n"},
@@ -602,6 +618,7 @@ func TestAppendTarget_MissingRequiredFields(t *testing.T) {
 }
 
 func TestAppendTarget_RejectsAuthSubtables(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := AppendTarget(path, Target{
 		ID:    "qa-pve-03",
@@ -617,6 +634,7 @@ func TestAppendTarget_RejectsAuthSubtables(t *testing.T) {
 // --- UpdateTargetFields ---------------------------------------------
 
 func TestUpdateTargetFields_AddsInsecureTLSToTargetWithoutIt(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 
 	err := UpdateTargetFields(path, "qa-pve-01", TargetMeta{
@@ -659,6 +677,7 @@ func TestUpdateTargetFields_AddsInsecureTLSToTargetWithoutIt(t *testing.T) {
 }
 
 func TestUpdateTargetFields_UpdatesExistingValue(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 id   = "qa-pve-01"
 host = "qa-pve-01.example.com"
@@ -700,6 +719,7 @@ insecure_tls = false
 }
 
 func TestUpdateTargetFields_ClearsToExplicitFalse(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 id   = "qa-pve-01"
 host = "qa-pve-01.example.com"
@@ -740,6 +760,7 @@ insecure_tls = true
 // always renames a fresh temp file into place, which always advances
 // mtime, even when the new content is byte-identical to the old.
 func TestUpdateTargetFields_NoOp_FileUntouched(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 id   = "qa-pve-01"
 host = "qa-pve-01.example.com"
@@ -786,6 +807,7 @@ insecure_tls = true
 }
 
 func TestUpdateTargetFields_UnknownTarget(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	err := UpdateTargetFields(path, "does-not-exist", TargetMeta{Host: "h", Node: "n"})
 	if err == nil {
@@ -794,6 +816,7 @@ func TestUpdateTargetFields_UnknownTarget(t *testing.T) {
 }
 
 func TestUpdateTargetFields_DuplicateTargetID(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 id = "dup"
 host = "h1"
@@ -816,6 +839,7 @@ node = "n2"
 // qa-pve-01 must leave qa-pve-02's own block (and the comment preceding
 // it) byte-for-byte untouched.
 func TestUpdateTargetFields_PreservesOtherTarget(t *testing.T) {
+	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 
 	secondBlockStart := strings.Index(fixtureTwoTargets, "# a deliberately weird comment")
@@ -849,6 +873,7 @@ func TestUpdateTargetFields_PreservesOtherTarget(t *testing.T) {
 // "still present") after its top-level fields are updated, and the new
 // field must be inserted BEFORE the first subtable, not after it.
 func TestUpdateTargetFields_PreservesAuthSubtables(t *testing.T) {
+	withTestWorkFactor(t)
 	tokenArmored := sampleArmored(t, "token-secret", "test-passphrase")
 	sshArmored := sampleArmored(t, "ssh-priv-key", "test-passphrase")
 	fixture := `[[targets]]
@@ -914,6 +939,7 @@ node = "qa-pve-01"
 // other own fields, and the blank line stays where it was, immediately
 // before the subtable header.
 func TestUpdateTargetFields_BlankLineBeforeExistingSubtablePreserved(t *testing.T) {
+	withTestWorkFactor(t)
 	tokenArmored := sampleArmored(t, "token-secret", "test-passphrase")
 	fixture := `[[targets]]
 id   = "qa-pve-01"
@@ -969,6 +995,7 @@ node = "qa-pve-01"
 // guard for its own append case — by using a fixture whose last line has
 // no trailing newline at all.
 func TestUpdateTargetFields_TrailingNewlineGuard(t *testing.T) {
+	withTestWorkFactor(t)
 	fixture := "[[targets]]\nid = \"qa-pve-01\"\nhost = \"h\"\nnode = \"n\""
 	path := writeTempRoster(t, fixture)
 
@@ -993,6 +1020,7 @@ func TestUpdateTargetFields_TrailingNewlineGuard(t *testing.T) {
 }
 
 func TestWriteTokenAuth_DuplicateTargetID(t *testing.T) {
+	withTestWorkFactor(t)
 	const fixture = `[[targets]]
 id = "dup"
 host = "h1"
