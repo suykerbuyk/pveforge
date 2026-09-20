@@ -89,6 +89,31 @@ type Result struct {
 // connection dropped, ctx was cancelled before the command finished).
 // Callers that need "the command failed" to be a Go error should check
 // ExitCode themselves.
+//
+// STDIN ISOLATION. The session below sets Stdout and Stderr and
+// deliberately never sets Stdin. x/crypto/ssh substitutes an empty buffer
+// for a nil Session.Stdin, so the remote command sees an immediate EOF and
+// not one byte of THIS process's stdin ever reaches it. That matters
+// because pveforge runs as an interactive CLI: os.Stdin here is the
+// operator's terminal, holding a passphrase prompt's input among other
+// things, and a remote `qm`/`pvesh` invocation has no business consuming
+// it. The property is pinned by TestRun_NeverForwardsCallerStdin, which
+// the mutation `session.Stdin = os.Stdin` turns red.
+//
+// A future feature that genuinely needs to STREAM data to the remote side
+// — a large upload, say, too big for WriteFile's argv-embedded payload —
+// must open its own explicit, separate channel for it rather than reusing
+// this command session's stdin. Keeping the data plane out of the command
+// plane is the point; sharing them is how a command ends up eating input
+// that was never meant for it.
+//
+// NOT VERIFIABLE WITHOUT A LIVE PVE HOST: the test above proves pveforge
+// SENDS no stdin. It cannot prove the remote never WANTED any, because it
+// asserts against an in-process fake SSH server rather than a real
+// pvesh/qm/pvesm/ifreload. If some remote command were to block waiting on
+// stdin instead of tolerating EOF, the suite would stay green and the call
+// would hang against a real host. Nothing observed so far suggests one
+// does; it is recorded here because no test in this repo can settle it.
 func (c *Client) Run(ctx context.Context, cmd string) (*Result, error) {
 	session, err := c.conn.NewSession()
 	if err != nil {

@@ -1,10 +1,13 @@
 package sshexec
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -22,6 +25,72 @@ type fakeServer struct {
 	// handleExec is invoked for every "exec" request accepted by the
 	// server; it returns (stdout, stderr, exitStatus).
 	handleExec func(cmd string) (string, string, int)
+
+	// stdinSeen holds one entry per session this server has finished
+	// handling, recording what that session received on its STDIN. It
+	// exists so a test can assert what the client actually forwarded
+	// rather than inferring it from the client's own source — see
+	// stdinisolation_test.go.
+	//
+	// stdinMu guards it, and guards nothing else. Every other field on
+	// fakeServer is written by the test goroutine before Start and never
+	// again (see newFakeServer's doc comment for why that ordering is
+	// load-bearing), whereas stdinSeen is written from each accepted
+	// session's own goroutine while the test goroutine reads it.
+	stdinMu   sync.Mutex
+	stdinSeen []stdinRecord
+}
+
+// drainJoinTimeout bounds how long handleSession waits for a session's
+// stdin to reach EOF before it gives up, records what arrived and replies
+// anyway.
+//
+// It races an in-process EOF on a loopback SSH channel, which for every
+// session this package opens arrives in microseconds — x/crypto/ssh
+// CloseWrite()s as soon as the session's Stdin source is exhausted, and
+// for a nil Stdin that is immediate. Five seconds is roughly six orders of
+// magnitude of headroom, chosen so that expiring means "the client is not
+// closing stdin", never "the machine was busy under -race".
+//
+// A var, not a const, only so TestFakeServer_BoundedDrainRecordsTruncation
+// can lower it to prove the bound fires; it lives in a _test.go file, so
+// there is no production surface to guard.
+var drainJoinTimeout = 5 * time.Second
+
+// stdinRecord is one session's stdin observation.
+type stdinRecord struct {
+	// data is every byte that arrived on the session's stdin.
+	data []byte
+	// truncated reports that the drain did NOT reach EOF within
+	// drainJoinTimeout, so data may be short.
+	//
+	// This field is the whole reason the bound is safe to add. A bound
+	// that silently recorded a partial read would convert a hang into a
+	// quiet "0 bytes received", and the isolation assertion would then
+	// pass for exactly the wrong reason — a check that reports success
+	// because its observer gave up. Every assertion on a record must
+	// therefore reject a truncated one.
+	truncated bool
+}
+
+// recordStdin records one finished session's stdin observation.
+func (fs *fakeServer) recordStdin(r stdinRecord) {
+	fs.stdinMu.Lock()
+	defer fs.stdinMu.Unlock()
+	fs.stdinSeen = append(fs.stdinSeen, r)
+}
+
+// stdinRecords returns one entry per session the server has finished
+// handling, in completion order. A session appears here only once its
+// stdin has reached EOF or drainJoinTimeout has expired, so a caller that
+// has observed Run return can read these without racing the drain — see
+// handleSession.
+func (fs *fakeServer) stdinRecords() []stdinRecord {
+	fs.stdinMu.Lock()
+	defer fs.stdinMu.Unlock()
+	out := make([]stdinRecord, len(fs.stdinSeen))
+	copy(out, fs.stdinSeen)
+	return out
 }
 
 // newFakeServer constructs the fake server and binds its listening port,
@@ -128,6 +197,50 @@ func (fs *fakeServer) handleConn(t *testing.T, conn net.Conn) {
 
 func (fs *fakeServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer func() { _ = ch.Close() }()
+
+	// Read this session's STDIN to EOF, in its own goroutine, so that what
+	// the client forwarded is observed rather than assumed. Reading the
+	// ssh.Channel itself is reading the session's stdin: the bytes the
+	// CLIENT wrote into the channel.
+	//
+	// This must be a separate goroutine, not an inline read: the client
+	// writes stdin concurrently with waiting for the command's output, and
+	// x/crypto/ssh's Session.Start launches its stdin copy in a goroutine
+	// of its own. It CloseWrite()s as soon as the source is exhausted, so
+	// for a session whose Stdin was never set — which is every session
+	// Client.Run opens — this returns immediately with zero bytes.
+	//
+	// The join below is BOUNDED by drainJoinTimeout. Unbounded, a session
+	// whose stdin is never closed would deadlock this handler and hang the
+	// whole package to the Makefile's 20m timeout instead of failing it —
+	// and a suite that hangs is an instrument that lies, which is this
+	// project's cardinal defect class. Bounding it turns that into a
+	// recorded truncation the assertions reject by name.
+	//
+	// The read accumulates incrementally rather than using io.ReadAll,
+	// because ReadAll yields nothing at all until EOF: on timeout it would
+	// hand back an empty slice indistinguishable from "the client sent
+	// nothing", which is precisely the confusion stdinRecord.truncated
+	// exists to prevent.
+	buf := &bytes.Buffer{}
+	var bufMu sync.Mutex
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		chunk := make([]byte, 4096)
+		for {
+			n, err := ch.Read(chunk)
+			if n > 0 {
+				bufMu.Lock()
+				buf.Write(chunk[:n])
+				bufMu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for req := range reqs {
 		switch req.Type {
 		case "exec":
@@ -136,6 +249,26 @@ func (fs *fakeServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 				_ = req.Reply(true, nil)
 			}
 			stdout, stderr, code := fs.handleExec(cmd)
+			// Join the drain and record BEFORE the exit-status goes out.
+			// Client.Run returns once it has the exit status, so joining
+			// here is what lets a test read stdinRecords() straight after
+			// Run without racing this goroutine. Recording asynchronously
+			// instead would turn the isolation assertion into a race the
+			// test usually wins — a check that passes without having
+			// observed anything, which is the exact defect class this
+			// test exists to rule out.
+			timer := time.NewTimer(drainJoinTimeout)
+			truncated := false
+			select {
+			case <-drained:
+			case <-timer.C:
+				truncated = true
+			}
+			timer.Stop()
+			bufMu.Lock()
+			got := append([]byte(nil), buf.Bytes()...)
+			bufMu.Unlock()
+			fs.recordStdin(stdinRecord{data: got, truncated: truncated})
 			_, _ = ch.Write([]byte(stdout))
 			_, _ = ch.Stderr().Write([]byte(stderr))
 			_, _ = ch.SendRequest("exit-status", false, exitStatusPayload(code))
