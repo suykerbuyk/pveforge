@@ -47,10 +47,9 @@ func ParseFormat(s string) (Format, error) {
 //
 // v must marshal to a JSON object at the top level (a struct or
 // map[string]...) — Render returns an error for anything else (a slice,
-// a bare scalar), since KV mode has no defined shape for those. This
-// package's callers only ever pass single-object getter results
-// (GetNode/GetVM/GetStorage/GetNetworkInterface) — see the task's own
-// scope decision to leave list rendering for a later task.
+// a bare scalar, null), since KV mode has no defined shape for those. A
+// caller holding anything else wraps it under one field first, as
+// cmd/pveforge's storage orphan listing and `api` verbs do.
 func Render(w io.Writer, f Format, v interface{}) error {
 	compact, err := json.Marshal(v)
 	if err != nil {
@@ -74,10 +73,19 @@ func Render(w io.Writer, f Format, v interface{}) error {
 }
 
 // renderKV flattens compact (a JSON object) to sorted "key=value" lines.
+//
+// A top-level null is refused like any other non-object. encoding/json
+// unmarshals the literal null into a map as a documented no-op (no error,
+// nil map), so without the explicit check below a null would render as no
+// output at all and exit successfully — indistinguishable from an empty
+// object, and contrary to Render's own contract.
 func renderKV(w io.Writer, compact []byte) error {
 	var flat map[string]json.RawMessage
 	if err := json.Unmarshal(compact, &flat); err != nil {
 		return fmt.Errorf("render: kv output requires a JSON object at the top level: %w", err)
+	}
+	if flat == nil {
+		return fmt.Errorf("render: kv output requires a JSON object at the top level, got null")
 	}
 
 	keys := make([]string, 0, len(flat))

@@ -165,6 +165,38 @@ func TestRender_KV_RejectsNonObjectTopLevel(t *testing.T) {
 	}
 }
 
+// TestRender_KV_RejectsTopLevelNull (K1) pins that a top-level null is a
+// non-object like any other in kv mode, both as a nil interface and as a
+// raw JSON null — encoding/json would otherwise unmarshal it into a nil map
+// without error and print nothing. JSON mode still renders it as null.
+func TestRender_KV_RejectsTopLevelNull(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		v    interface{}
+	}{
+		{"nil", nil},
+		{"raw null", json.RawMessage("null")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := Render(&buf, KV, c.v); err == nil {
+				t.Fatal("expected an error rendering a top-level null as kv")
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("expected nothing written, got %q", buf.String())
+			}
+
+			buf.Reset()
+			if err := Render(&buf, JSON, c.v); err != nil {
+				t.Fatalf("JSON mode must still render null: %v", err)
+			}
+			if got := buf.String(); got != "null\n" {
+				t.Fatalf("JSON render = %q, want %q", got, "null\n")
+			}
+		})
+	}
+}
+
 // failingWriter always returns an error from Write — used to prove
 // Render propagates a downstream write failure instead of swallowing it.
 type failingWriter struct{}

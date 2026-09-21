@@ -1,14 +1,21 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 // newAPICmd is pveforge-raw-api-escape-hatch's (PRD §3.1 / docs/prd.md
@@ -43,21 +50,47 @@ func newAPICmd() *cobra.Command {
 // would only add friction (and a confusingly-named flag) to exactly the
 // case this command exists for: read-only exploration of a path with no
 // dedicated command yet, e.g. `pveforge api get /version`.
+//
+// For post/put/delete, a response that is a PVE task id (a bare JSON string
+// with the "UPID:" prefix) is WAITED ON by default, and the command reports
+// the task's own outcome rather than the HTTP call's: see apiMutationLong
+// for the user-facing contract and waitForAPITask for the mechanism. The
+// wait happens inside RunE, before the deferred unlock, so the object lock
+// spans the task — PRD §6 item 6's lock-spans-the-task half.
 func newAPIVerbCmd(method, use string) *cobra.Command {
 	var dataPairs []string
 	var unsafeNoLock bool
+	var noWait bool
+	var waitTimeout time.Duration
 
 	cmd := &cobra.Command{
 		Use:   use + " <path> <target-id>",
 		Short: fmt.Sprintf("Raw PVE REST %s against <path>", method),
+		Long:  apiLong,
 		Args:  cobra.ExactArgs(2),
 	}
 	addRosterFlag(cmd)
 	resolveFormat := addOutputFlag(cmd)
 	cmd.Flags().StringArrayVar(&dataPairs, "data", nil, "a key=value request parameter (repeatable)")
 	cmd.Flags().BoolVar(&unsafeNoLock, "unsafe-no-lock", false, "proceed without internal/lock protection when <path> doesn't match a known pveforge-managed object type")
+	// The wait flags exist on the mutating verbs only: GET is never waited
+	// on, so on `api get` they would be accepted and mean nothing.
+	if method != http.MethodGet {
+		cmd.Long = apiMutationLong
+		cmd.Flags().BoolVar(&noWait, "no-wait", false, "if PVE returns a task id (UPID), print it and exit without waiting for the task; the object lock is released before the task finishes")
+		cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 0, fmt.Sprintf("give up waiting for a returned task after this long (0 = the %s ceiling; may not exceed it)", pve.TaskWaitCeiling))
+	}
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		// Flag validation comes before the roster, the client, the lock and
+		// the dispatch: a bad value must never send the mutation first and
+		// report the failure afterwards.
+		if method != http.MethodGet {
+			if err := validateAPIWaitFlags(noWait, waitTimeout, cmd.Flags().Changed("wait-timeout")); err != nil {
+				return err
+			}
+		}
+
 		format, err := resolveFormat()
 		if err != nil {
 			return err
@@ -90,7 +123,8 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 		// see this function's own doc comment); post/put/delete still
 		// refuse unless --unsafe-no-lock is given, printing a stderr
 		// warning naming exactly what it bypasses when it is.
-		if key, ok := apiObjectKey(targetID, rawPath); ok {
+		key, locked := apiObjectKey(targetID, rawPath)
+		if locked {
 			var unlock func() error
 			if method == http.MethodGet {
 				unlock, err = lock.Read(cmd.Context(), rosterPath, key)
@@ -112,7 +146,21 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return kvjson.Render(cmd.OutOrStdout(), format, result)
+		if upid, ok := responseUPID(method, result); ok {
+			// stderr, at dispatch: the caller has the task id even while the
+			// wait below blocks, and even if the wait then fails.
+			fmt.Fprintf(cmd.ErrOrStderr(), "dispatched PVE task %s\n", upid)
+			if noWait {
+				if locked {
+					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; the lock on %s is released now, before the task finishes, so a concurrent pveforge mutation of the same object is no longer serialized against it\n", upid, key)
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; its outcome is not checked\n", upid)
+				}
+			} else if err := waitForAPITask(cmd.Context(), client, rawPath, upid, waitTimeout); err != nil {
+				return err
+			}
+		}
+		return renderAPIResult(cmd.OutOrStdout(), format, result)
 	}
 
 	// GET is always safe (read-only, full stop). post/put/delete are ALL
@@ -155,4 +203,120 @@ func parseDataParams(dataPairs []string) (url.Values, error) {
 		params.Add(p.Field, p.Value)
 	}
 	return params, nil
+}
+
+// apiLong is `api get`'s help body; apiMutationLong is post/put/delete's.
+const apiLong = `Raw PVE REST passthrough for a path with no dedicated pveforge command yet.
+
+Output: -o json prints PVE's "data" payload as-is. -o kv prints a JSON
+object's top-level fields as key=value lines, and any other payload (a
+string, a number, null, a list) as ONE line, data=<value>, keyed by PVE's
+own envelope name.`
+
+var apiMutationLong = apiLong + fmt.Sprintf(`
+
+Tasks: when PVE answers with a task id (a UPID — a bare string starting
+"UPID:"), this command WAITS for the task and reports its outcome: exit 0
+only if the task ends with exit status OK. The UPID is printed to stderr as
+soon as the task is dispatched; stdout is printed only after the task
+succeeds. The wait can take up to %[1]s (lower it with --wait-timeout), and
+the object lock is held for the whole wait.
+
+A wait that times out (--wait-timeout, or the %[1]s ceiling) reports an
+outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C ends
+pveforge immediately, without any report, and the task may likewise still be
+running. Either way, follow it up with the UPID printed at dispatch:
+  pveforge api get /nodes/<node>/tasks/<upid>/status <target-id>
+
+--no-wait prints the UPID and exits without checking the task. On a path
+pveforge locks, that releases the lock before the task finishes.
+
+A task id nested inside an object (rather than returned as the bare
+payload) is not recognized and is not waited on.`, pve.TaskWaitCeiling)
+
+// validateAPIWaitFlags rejects wait-flag combinations that have no honest
+// meaning, before anything is dispatched. timeoutSet is whether
+// --wait-timeout was given explicitly, so "--no-wait --wait-timeout 0" is
+// rejected too.
+func validateAPIWaitFlags(noWait bool, waitTimeout time.Duration, timeoutSet bool) error {
+	if waitTimeout < 0 {
+		return fmt.Errorf("--wait-timeout must not be negative, got %s", waitTimeout)
+	}
+	if waitTimeout > pve.TaskWaitCeiling {
+		return fmt.Errorf("--wait-timeout %s exceeds the %s ceiling on waiting for a PVE task", waitTimeout, pve.TaskWaitCeiling)
+	}
+	if noWait && timeoutSet {
+		return errors.New("--no-wait and --wait-timeout are mutually exclusive")
+	}
+	return nil
+}
+
+// responseUPID reports whether a mutating verb's decoded response is a PVE
+// task id: a bare JSON string with the "UPID:" prefix. GET is never a task.
+// A string that claims the prefix but is malformed is still returned here —
+// the wait refuses it loudly rather than this silently skipping it.
+//
+// NOT LIVE-VERIFIED, three ways, none checkable without a real PVE host:
+// which post/put/delete endpoints actually answer with a bare UPID scalar
+// is taken from PVE's documented convention, not observed, so an endpoint
+// that returns a task id in some other shape keeps the old unwaited
+// behaviour; the 10-minute ceiling has never been observed against a real
+// long task (a large clone, a storage migration); and for a path addressing
+// a node other than the target's own, which PVE proxies, whether the UPID's
+// node field carries the addressed node or the proxying one is unverified —
+// if it is the proxying node, the path-node check in waitForAPITask refuses
+// a legitimate cross-node task as outcome-unknown, failing closed.
+func responseUPID(method string, result json.RawMessage) (string, bool) {
+	if method == http.MethodGet {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(result, &s); err != nil || !strings.HasPrefix(s, "UPID:") {
+		return "", false
+	}
+	return s, true
+}
+
+// waitForAPITask waits on a task an `api` verb dispatched. The node is the
+// raw path's own /nodes/{node} segment, so WaitForTask's check that the UPID
+// names that node is a real check. Only a path with no node segment
+// (/storage/{name}, or an unmatched path taken with --unsafe-no-lock) falls
+// back to the UPID's own node, and there that check is tautological: on
+// those paths the wait's value is the task's exit status alone. Never
+// client.Node() — see apiPathNode.
+func waitForAPITask(ctx context.Context, client *pve.RoutedClient, rawPath, upid string, waitTimeout time.Duration) error {
+	node, ok := apiPathNode(rawPath)
+	if !ok {
+		// A malformed UPID yields "" here, and WaitForTask then refuses it
+		// on its own shape check — as outcome-unknown, exactly as it does
+		// on a path that carries a node.
+		node, _ = pve.UPIDNode(upid)
+	}
+	if waitTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, waitTimeout)
+		defer cancel()
+	}
+	return client.WaitForTask(ctx, node, upid)
+}
+
+// renderAPIResult renders an `api` response. kvjson.Render's kv mode is
+// object-only by contract, so — as storage.go's orphan listing does — a
+// non-object payload is wrapped under one field before it is rendered:
+// data=<value>, PVE's own envelope key. One rule for every non-object (a
+// UPID, any other string, a number, null, a list), so a script never has to
+// know in advance which shape an endpoint returns. JSON mode is unchanged.
+// result is never empty: RawRequest normalizes an empty body to null.
+func renderAPIResult(w io.Writer, f kvjson.Format, result json.RawMessage) error {
+	if f == kvjson.KV && !isJSONObject(result) {
+		return kvjson.Render(w, f, map[string]json.RawMessage{"data": result})
+	}
+	return kvjson.Render(w, f, result)
+}
+
+// isJSONObject reports whether raw is a JSON object (not null, which
+// encoding/json would happily unmarshal into a nil map).
+func isJSONObject(raw json.RawMessage) bool {
+	var m map[string]json.RawMessage
+	return json.Unmarshal(raw, &m) == nil && m != nil
 }
