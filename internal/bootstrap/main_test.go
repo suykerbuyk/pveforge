@@ -1,10 +1,13 @@
 package bootstrap
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
+	"github.com/suykerbuyk/pveforge/internal/netguard"
 	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
 // testWorkFactor is the scrypt work factor this package's tests encrypt at.
@@ -34,10 +37,28 @@ const testWorkFactor = 10
 func TestMain(m *testing.M) {
 	restoreWorkFactor := roster.SetScryptWorkFactorForTests(testWorkFactor)
 	// --- additional process-wide setup installs here ---
+	// internal/netguard's loopback trip-wire, over BOTH seams: Install swaps
+	// http.DefaultTransport for a loopback-only clone, and the sshexec dial
+	// guard covers internal/sshexec's own net.Dialer, which the HTTP seam
+	// cannot see. Install MUST precede m.Run — a swap installed after a
+	// pve.NewClient(InsecureTLS: true) is invisible to it, because that
+	// client already took its own Clone() of the global at construction.
+	restoreDial := netguard.Install()
+	restoreSSHGuard := sshexec.SetDialGuardForTests(netguard.Guard)
 
 	code := m.Run()
 
+	// Check BEFORE the restores: it reads the recorder restoreDial tears
+	// down. And it must never turn a red suite green, so it only ever raises
+	// the code.
+	if err := netguard.Check(); err != nil && code == 0 {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+
 	// --- and tears down here, in reverse order of installation ---
+	restoreSSHGuard()
+	restoreDial()
 	restoreWorkFactor()
 
 	os.Exit(code)

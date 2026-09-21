@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -56,7 +57,60 @@ func DialWithPassword(ctx context.Context, addr, user, password string, hostKeyC
 	return dial(ctx, addr, cfg)
 }
 
+// dialGuard, when non-nil, vets every address this package is about to dial
+// and may refuse it. Nil in production, and nothing but
+// SetDialGuardForTests ever assigns it.
+//
+// This package's dial is the one network egress in pveforge that an
+// http.DefaultTransport hook cannot see — it builds its own net.Dialer below
+// — which is why internal/netguard needs a second seam here rather than one
+// hook covering both. See that package's doc comment.
+//
+// NOT SAFE for two test packages to use concurrently: it mutates
+// process-wide state with no locking, matching SetSSHPortForIntegrationTests
+// (internal/pve/routed.go:29-49) and roster.SetScryptWorkFactorForTests,
+// whose caveat and shape this deliberately copies. Each package's tests run
+// in their own process, so the hazard is only ever intra-package.
+var dialGuard func(addr string) error
+
+// SetDialGuardForTests installs guard as the vetting hook every dial in this
+// process passes through, restoring the previous hook via the returned func.
+// internal/netguard.Guard is the only intended argument.
+//
+// It PANICS unless called from a binary built by `go test`, so the seam is
+// inert in a shipped pveforge no matter who calls it.
+//
+// Production code must never call this. That is not left to convention:
+// internal/netguard's TestSeam_NoProductionReferences forbids this name,
+// setDialGuard and dialGuard in every non-test file in the module except this
+// one.
+func SetDialGuardForTests(guard func(addr string) error) (restore func()) {
+	return setDialGuard(guard, testing.Testing())
+}
+
+// setDialGuard holds the whole decision with the "am I in a test binary"
+// answer PASSED IN rather than read, for the same reason
+// roster.setScryptWorkFactor does it (internal/roster/secrets.go:131): the
+// refusal branch is then reachable from an ordinary in-process test, so the
+// suite's own coverage profile covers it rather than only a subprocess whose
+// coverage the profile never sees.
+func setDialGuard(guard func(addr string) error, inTestBinary bool) (restore func()) {
+	if !inTestBinary {
+		panic("sshexec: SetDialGuardForTests called outside a test binary")
+	}
+	orig := dialGuard
+	dialGuard = guard
+	return func() { dialGuard = orig }
+}
+
 func dial(ctx context.Context, addr string, cfg *ssh.ClientConfig) (*Client, error) {
+	// Vet BEFORE dialing, so a refused address produces no DNS query and no
+	// SYN — the refusal is the whole point, not a post-hoc report.
+	if dialGuard != nil {
+		if err := dialGuard(addr); err != nil {
+			return nil, fmt.Errorf("dial %s: %w", addr, err)
+		}
+	}
 	d := net.Dialer{Timeout: cfg.Timeout}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
