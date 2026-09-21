@@ -55,16 +55,12 @@ func taskStatusHandler(t *testing.T, upid, node string, respondRunning int, exit
 // withTaskTimings overrides the package-level poll interval/timeout for
 // the duration of one test, restoring the originals afterward — the same
 // reason these are vars and not consts: none of these tests can be
-// allowed to actually wait out the real 1s/10m production defaults.
+// allowed to actually wait out the real 1s/10m production defaults. It
+// goes through the exported SetTaskTimingsForTests rather than assigning
+// the vars itself, so this package and cmd/pveforge share one mechanism.
 func withTaskTimings(t *testing.T, interval, timeout time.Duration) {
 	t.Helper()
-	origInterval, origTimeout := defaultTaskPollInterval, defaultTaskWaitTimeout
-	defaultTaskPollInterval = interval
-	defaultTaskWaitTimeout = timeout
-	t.Cleanup(func() {
-		defaultTaskPollInterval = origInterval
-		defaultTaskWaitTimeout = origTimeout
-	})
+	t.Cleanup(SetTaskTimingsForTests(interval, timeout))
 }
 
 // TestWaitForTask_ImmediatelySuccessful covers the case where the very
@@ -287,6 +283,8 @@ func TestWaitForTask_RequiresNodeAndUPID(t *testing.T) {
 
 	if err := c.WaitForTask(context.Background(), "", wellFormedUPID("qa-pve-01")); err == nil || !IsTaskOutcomeUnknown(err) {
 		t.Fatalf("expected an outcome-unknown error for an empty node, got %v", err)
+	} else if !strings.Contains(err.Error(), "node is required") {
+		t.Fatalf("expected the empty-node refusal to say node is required, got %v", err)
 	}
 	if err := c.WaitForTask(context.Background(), "qa-pve-01", ""); err == nil || !IsTaskOutcomeUnknown(err) {
 		t.Fatalf("expected an outcome-unknown error for an empty upid, got %v", err)
@@ -700,5 +698,76 @@ func TestIsTaskOutcomeUnknown(t *testing.T) {
 		if IsTaskOutcomeUnknown(tc.err) {
 			t.Errorf("%s: IsTaskOutcomeUnknown = true, want false", tc.name)
 		}
+	}
+}
+
+// TestUPIDNode_AgreesWithValidateUPIDShape (A9) pins the one shape rule
+// WaitForTask and UPIDNode share. For every row, UPIDNode errors exactly
+// when validateUPIDShape does — the two can only drift if one of them grows
+// shape logic of its own — and never panics, which a 7-field string handed
+// to proxmox.NewTask would. The boundary rows are the ones each rule turns
+// on: 6 vs 7 colons for the field count, "XPID:" and "upid:" for the
+// prefix, and an empty second field for the node.
+func TestUPIDNode_AgreesWithValidateUPIDShape(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		upid     string
+		wantNode string // "" means the shape must be refused
+	}{
+		{"real", wellFormedUPID("pve1"), "pve1"},
+		{"8 fields (7 colons)", "UPID:n:1:2:3:4:5:6", "n"},
+		{"7 fields (6 colons)", "UPID:n:1:2:3:4:5", ""},
+		{"empty", "", ""},
+		{"no prefix", "XPID:pve1:00001234:0000ABCD:5F000000:qmstart:100:root@pam:", ""},
+		{"lowercase prefix", "upid:pve1:00001234:0000ABCD:5F000000:qmstart:100:root@pam:", ""},
+		{"empty node", "UPID::1:2:3:4:5:6:", ""},
+		// A real task with an EMPTY ID field (vzdump of all guests,
+		// startall, aptupdate). "::" alone is not an empty node.
+		{"empty id field", "UPID:pve1:0001:0002:5F000000:vzdump::root@pam:", "pve1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			shapeErr := validateUPIDShape(c.upid)
+			node, nodeErr := UPIDNode(c.upid)
+			if (shapeErr == nil) != (nodeErr == nil) {
+				t.Fatalf("the two guards disagree on %q: validateUPIDShape=%v, UPIDNode=%v", c.upid, shapeErr, nodeErr)
+			}
+			if c.wantNode == "" {
+				if nodeErr == nil {
+					t.Fatalf("UPIDNode(%q) = %q, want a shape error", c.upid, node)
+				}
+				if !strings.Contains(nodeErr.Error(), "malformed upid") {
+					t.Fatalf("UPIDNode(%q) error %q does not say malformed upid", c.upid, nodeErr)
+				}
+				return
+			}
+			if nodeErr != nil || node != c.wantNode {
+				t.Fatalf("UPIDNode(%q) = %q, %v; want %q, nil", c.upid, node, nodeErr, c.wantNode)
+			}
+		})
+	}
+}
+
+// TestWaitForTask_RefusesPrefixAndNodeShapeErrorsBeforePolling covers the
+// two rules validateUPIDShape added on top of the colon count: a UPID
+// without the "UPID:" prefix and one with an empty node field are refused
+// as outcome-unknown before any status poll.
+func TestWaitForTask_RefusesPrefixAndNodeShapeErrorsBeforePolling(t *testing.T) {
+	for _, upid := range []string{
+		"XPID:qa-pve-01:00001234:0000ABCD:5F000000:qmstart:100:root@pam:",
+		"UPID::00001234:0000ABCD:5F000000:qmstart:100:root@pam:",
+	} {
+		t.Run(upid, func(t *testing.T) {
+			handler, calls := taskStatusHandler(t, upid, "qa-pve-01", 0, "OK")
+			c := testClient(t, newFakeAPIServer(t, handler))
+
+			err := c.WaitForTask(context.Background(), "qa-pve-01", upid)
+			requireOutcomeUnknown(t, err)
+			if !strings.Contains(err.Error(), "malformed upid") {
+				t.Fatalf("expected a malformed-upid refusal, got: %v", err)
+			}
+			if got := atomic.LoadInt32(calls); got != 0 {
+				t.Fatalf("expected no status poll, got %d", got)
+			}
+		})
 	}
 }

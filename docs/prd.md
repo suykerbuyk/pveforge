@@ -410,10 +410,25 @@ roster or Ansible inventory plays.
    layer of the architecture.
 5. Multi-operator secret access (`age` recipients vs. a single passphrase) —
    deferred past v1.
-6. Whether `pveforge api post/put` (planned, `pveforge-raw-api-escape-hatch`,
+6. ~~Whether `pveforge api post/put` (planned, `pveforge-raw-api-escape-hatch`,
    §3.1) gets §3.4's idempotent-mutation-engine locking for object types the
    engine already models, or an explicit unsafe/no-locking posture for paths
    it doesn't cover. Not cosmetic: a raw passthrough that silently bypasses
    locking would undercut this project's whole multi-agent-safety premise
    (§3.4) for exactly the paths it's meant to reach. Must be resolved before
-   that task is implemented, not while.
+   that task is implemented, not while.~~
+   **Resolved in two steps.** `pveforge-raw-api-escape-hatch` (2026-09-14):
+   a path matching a modeled object type (vm/storage/network/node) takes
+   that object's §3.4 lock with no opt-out, and any other path refuses to
+   mutate without an explicit `--unsafe-no-lock`. What that left open was
+   the lock's REACH: it was released when the HTTP call returned, while PVE
+   was still running the task the call started.
+   `pveforge-mutation-success-second-signal` (2026-09-21) closed it:
+   `api post/put/delete` now waits on a returned task id (UPID), up to the
+   10-minute task ceiling, before reporting success or failure, and holds
+   the lock for the whole wait. `--no-wait` opts out, and states that the
+   lock is then released before the task ends. The same change altered kv
+   output for every `api` verb: a payload that is not a JSON object (a task
+   id, any other string, a number, null, a list) now renders as one
+   `data=<value>` line. Before, it was a render error, or no output at all
+   for null.

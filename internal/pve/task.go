@@ -6,23 +6,90 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"testing"
 	"time"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
+// TaskWaitCeiling is the longest WaitForTask will ever wait for a task to
+// leave the "running" state: defaultTaskWaitTimeout's production value, and
+// the ceiling a caller-supplied shorter bound (cmd/pveforge's
+// `api --wait-timeout`) is checked against. A const, so it is one source
+// for both and adds no seam of its own.
+const TaskWaitCeiling = 10 * time.Minute
+
 // defaultTaskPollInterval is how often WaitForTask polls a running task's
-// status. A var, not a const, purely so this package's own tests can point
-// it at a few milliseconds instead of waiting out a real second per poll
-// tick — production code never changes it. Mirrors the same pattern
-// routed.go already uses for sshPort.
+// status. A var, not a const, purely so tests can point it at a few
+// milliseconds instead of waiting out a real second per poll tick —
+// production code never changes it. The only writer is setTaskTimings,
+// below.
 var defaultTaskPollInterval = time.Second
 
 // defaultTaskWaitTimeout bounds how long WaitForTask will keep polling a
 // task that never leaves the "running" state before giving up with
 // proxmox.ErrTimeout. A var for the same test-override reason as
-// defaultTaskPollInterval above.
-var defaultTaskWaitTimeout = 10 * time.Minute
+// defaultTaskPollInterval above; its production value is TaskWaitCeiling.
+var defaultTaskWaitTimeout = TaskWaitCeiling
+
+// SetTaskTimingsForTests overrides WaitForTask's poll interval and wait
+// timeout process-wide, restoring the previous values via the returned
+// func (call it, typically via t.Cleanup, once the test is done). It exists
+// so a test in ANOTHER package — cmd/pveforge's `api` tests are the reason
+// it was added — can drive a task that stays "running" for several polls
+// without waiting out a real second per poll, and so a fake that never
+// flips to "stopped" ends in a bounded failure rather than the 10-minute
+// TaskWaitCeiling.
+//
+// It PANICS unless called from a binary built by `go test`, so the seam is
+// inert in a shipped pveforge no matter who calls it. That is the
+// sshexec.SetDialGuardForTests / roster.SetScryptWorkFactorForTests shape,
+// deliberately, rather than the older ungated SetSSHPortForIntegrationTests:
+// internal/pve/testdata/weakprobe is a non-test `package main` that calls
+// this, and TestTaskTimingsSeam_WeakProbeIsRejectedOutsideATestBinary runs
+// it with `go run` and requires it to die. That probe is also the ONLY
+// observer of the argument this wrapper passes below — an in-process test
+// can call setTaskTimings with false, but cannot see a wrapper that passes
+// true.
+//
+// Production code must never call this. That is not left to convention:
+// TestTaskTimingsSeam_NoProductionReferences forbids this name,
+// setTaskTimings and both timing vars in every non-test file in the module
+// except this one. Like every AST-based guard in this repo, it does not see
+// a //go:linkname onto the vars themselves
+// (pveforge-golinkname-defeats-source-guards).
+//
+// Not safe for two test packages to use concurrently: it mutates
+// process-wide state with no locking, matching the seams named above. Each
+// package's tests run in their own process, so the hazard is only ever
+// intra-package, and TestNoParallelTests in this package and in
+// cmd/pveforge pins that neither uses t.Parallel. A test that leaves a
+// WaitForTask goroutine running must join it BEFORE restore runs, or the
+// race detector reports the restore's write against the poll loop's read.
+func SetTaskTimingsForTests(interval, timeout time.Duration) (restore func()) {
+	return setTaskTimings(interval, timeout, testing.Testing())
+}
+
+// setTaskTimings holds the whole decision, with the "am I in a test binary"
+// answer PASSED IN rather than read, for the same reason
+// roster.setScryptWorkFactor does: the refusal branch is then reachable from
+// an ordinary in-process test, so the suite's own coverage profile covers it.
+func setTaskTimings(interval, timeout time.Duration, inTestBinary bool) (restore func()) {
+	if !inTestBinary {
+		panic("pve: SetTaskTimingsForTests called outside a test binary")
+	}
+	// A non-positive interval makes the poll loop spin; a non-positive
+	// timeout, or one shorter than a single interval, makes every wait end
+	// before it could observe a second poll. None is a timing any test wants.
+	if interval <= 0 || timeout <= 0 || timeout < interval {
+		panic(fmt.Sprintf("pve: SetTaskTimingsForTests: invalid timings interval=%s timeout=%s", interval, timeout))
+	}
+	origInterval, origTimeout := defaultTaskPollInterval, defaultTaskWaitTimeout
+	defaultTaskPollInterval, defaultTaskWaitTimeout = interval, timeout
+	return func() {
+		defaultTaskPollInterval, defaultTaskWaitTimeout = origInterval, origTimeout
+	}
+}
 
 // TaskFailedError reports that a PVE task ran to completion and PVE
 // reported it unsuccessful: status "stopped" with an ExitStatus other than
@@ -130,14 +197,18 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 	outcomeUnknown := func(cause error) error {
 		return fmt.Errorf("%s: %w", prefix, &taskOutcomeUnknownError{cause: cause})
 	}
-	if node == "" {
-		return outcomeUnknown(errors.New("node is required"))
-	}
+	// The UPID's own shape is checked before the node, so a caller with no
+	// independent node (cmd/pveforge's `api` verbs on a node-less path pass
+	// UPIDNode's "" for a malformed UPID) still gets the shape error, with
+	// the same outcome-unknown classification as every other caller.
 	if upid == "" {
 		return outcomeUnknown(errors.New("upid is required"))
 	}
-	if strings.Count(upid, ":") < 7 {
-		return outcomeUnknown(fmt.Errorf("malformed upid %q: expected at least 8 colon-separated fields", upid))
+	if err := validateUPIDShape(upid); err != nil {
+		return outcomeUnknown(err)
+	}
+	if node == "" {
+		return outcomeUnknown(errors.New("node is required"))
 	}
 
 	parsed := proxmox.NewTask(proxmox.UPID(upid), c.pc)
@@ -194,6 +265,45 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 		case <-time.After(defaultTaskPollInterval):
 		}
 	}
+}
+
+// validateUPIDShape is the ONE statement of what a UPID must look like
+// before anything parses it. WaitForTask and UPIDNode both call it and
+// neither carries any shape logic of its own, so the two cannot drift.
+//
+// The rules: the "UPID:" prefix PVE always writes; at least 8
+// colon-separated fields (a real UPID has 9), which is what keeps a
+// 7-field string away from proxmox.NewTask's sp[7] panic described on
+// WaitForTask; and a non-empty node field, since an empty node can never
+// match the node a caller waits on and would otherwise reach NewTask as a
+// task with no node at all.
+func validateUPIDShape(upid string) error {
+	if !strings.HasPrefix(upid, "UPID:") {
+		return fmt.Errorf("malformed upid %q: missing UPID: prefix", upid)
+	}
+	if strings.Count(upid, ":") < 7 {
+		return fmt.Errorf("malformed upid %q: expected at least 8 colon-separated fields", upid)
+	}
+	if strings.SplitN(upid, ":", 3)[1] == "" {
+		return fmt.Errorf("malformed upid %q: empty node field", upid)
+	}
+	return nil
+}
+
+// UPIDNode returns the node a UPID names (its second field), after
+// validating its shape with validateUPIDShape. It never calls
+// proxmox.NewTask, which panics on a 7-field UPID at the pinned fork.
+//
+// A caller that already knows which node it dispatched to must pass THAT
+// node to WaitForTask, not this one: a node taken from the UPID itself makes
+// WaitForTask's own node check tautological. This is for the case where no
+// independent node exists — cmd/pveforge's `api` verbs on a path with no
+// /nodes/{node} segment.
+func UPIDNode(upid string) (string, error) {
+	if err := validateUPIDShape(upid); err != nil {
+		return "", err
+	}
+	return strings.SplitN(upid, ":", 3)[1], nil
 }
 
 // errNoTaskStatus is pollTask's cause for a poll that answered without any
