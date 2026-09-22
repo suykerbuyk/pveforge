@@ -72,6 +72,16 @@ type SSHTransport interface {
 	// before anything is persisted.
 	DialWithKey(ctx context.Context, addr, user string, privateKeyPEM []byte, hostKeyFingerprint string) (SSHSession, error)
 
+	// DialWithPassword connects to addr as user with password auth, for a
+	// run that installs no key (Options.NoSSHKey). pin is "" on a run's
+	// FIRST connection — the presented host key is trusted on first use,
+	// captured, and returned — or the fingerprint this run already
+	// captured, in which case the connection is refused unless the host
+	// presents that same key. One method rather than two: the pin argument
+	// IS the difference between the two trust models, the same distinction
+	// InstallPubkeyViaPassword (capture) and DialWithKey (pin) draw.
+	DialWithPassword(ctx context.Context, addr, user, password, pin string) (session SSHSession, hostKeyFingerprint string, err error)
+
 	// ReconnectWithPinnedKey connects using a keypair and host key
 	// fingerprint already persisted from a PRIOR successful bootstrap of
 	// this target — no password auth, no TOFU capture. Unlike DialWithKey
@@ -116,7 +126,27 @@ type Options struct {
 	// realm users are supported — anything else has no corresponding
 	// SSH-reachable Linux system account. The token's OWNER is TokenOwner.
 	PVEUsername string
+	// PVEPassword is the login's password. In the ordinary flow it is used
+	// ONCE, for the pubkey-install step. With NoSSHKey it authenticates
+	// EVERY connection this run makes, including the in-run redial after a
+	// transport error (TestRun_CT2_KeylessRedialIsPinnedToThisRun), so it
+	// must still be available after the first dial.
 	PVEPassword string
+
+	// NoSSHKey runs keyless: this run authenticates with PVEPassword for
+	// its own duration only, installs no key on the target and persists no
+	// SSH auth in the roster. The host key is trusted on FIRST USE on every
+	// such run — there is no stored fingerprint to pin against — and the
+	// fingerprint actually accepted is reported as Result.HostKeyFingerprint,
+	// so a run can be audited afterwards. Within one run a later connection
+	// is pinned to that same fingerprint, so a redial cannot reach a
+	// different host.
+	//
+	// A target bootstrapped this way holds a token and no [targets.ssh]
+	// block, so every later run of it needs the flag again
+	// (ErrKeylessTargetNeedsFlag); and the flag is refused against a target
+	// that does hold an SSH block (ErrKeylessWithPersistedSSH).
+	NoSSHKey bool
 
 	// TokenOwner is the PVE principal that owns the token, e.g.
 	// "pveforge-harness@pve". It is NOT a Linux login and needs no SSH
@@ -281,6 +311,14 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 
+	// Then the transport question, on the same terms: the roster's SSH
+	// state must match what this run says it is. Identity is checked first
+	// (above), so a run tripping both reports the owner. Also before any
+	// SSH, and decrypting nothing.
+	if err := checkKeylessState(opts); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+
 	addr := fmt.Sprintf("%s:%d", opts.Host, opts.SSHPort)
 	fullTokenID := opts.TokenOwner + "!" + opts.TokenID
 
@@ -291,7 +329,32 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 	r := &runner{ctx: ctx, opts: opts, transport: transport, api: api, fullID: fullTokenID, want: want}
 
-	if existing != nil {
+	switch {
+	case opts.NoSSHKey:
+		// Keyless: one password session for this run only. No keypair is
+		// generated, no key is installed on the target, and nothing is
+		// written to the roster's [targets.ssh]. The host key is trusted
+		// on first use (pin ""), and the fingerprint it returns is both
+		// reported (r.res below) and pinned for any redial this run makes
+		// (freshSession).
+		session, fp, err := transport.DialWithPassword(ctx, addr, sshUser, opts.PVEPassword, "")
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap %s: connect with password (no ssh key): %w", opts.TargetID, err)
+		}
+		if fp == "" {
+			// A capture that yields nothing would silently degrade this
+			// run's later redial to a SECOND trust-on-first-use, and drop
+			// host_key_fingerprint from the result (omitempty), so the run
+			// could not be audited afterwards. Refuse instead, as
+			// PinnedHostKeyCallback refuses its own empty input.
+			_ = session.Close()
+			return nil, fmt.Errorf("bootstrap %s: connect with password (no ssh key): the transport captured no host key fingerprint", opts.TargetID)
+		}
+		r.session = session
+		defer func() { _ = r.session.Close() }()
+		r.ident = sshIdentity{addr: addr, user: sshUser, password: opts.PVEPassword, hostKeyFP: fp, keyless: true}
+
+	case existing != nil:
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — this needs deliberate operator reconciliation; pveforge will not silently re-trust and re-pin a different host key", opts.TargetID, err)
@@ -299,7 +362,8 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		r.session = session
 		defer func() { _ = r.session.Close() }()
 		r.ident = sshIdentity{addr: addr, user: sshUser, privateKeyPEM: existing.PrivateKeyPEM, hostKeyFP: existing.HostKeyFingerprint}
-	} else {
+
+	default:
 		keypair, genErr := sshexec.GenerateEd25519Keypair(fmt.Sprintf("pveforge@%s", opts.TargetID))
 		if genErr != nil {
 			return nil, fmt.Errorf("bootstrap %s: generate keypair: %w", opts.TargetID, genErr)
@@ -712,6 +776,72 @@ func heldTokenID(opts Options) (string, error) {
 		return "", nil
 	}
 	return tg.Token.ID, nil
+}
+
+// heldSSHBlock reports whether this target's roster entry carries an
+// [targets.ssh] block AT ALL — present with or without a fingerprint. It
+// decrypts NOTHING, mirroring heldTokenID.
+//
+// This is deliberately a different question from loadExistingSSHAuth's,
+// which answers "is there usable, pinned auth" and so returns nil for a
+// block whose host_key_fingerprint is empty (bootstrap.go, its tg.SSH
+// check) as well as for no block at all. A keypair on file is a credential
+// whether or not it is pinned, so the keyless checks must not use that
+// summary. tg == nil or tg.SSH == nil is false, so a first bootstrap never
+// refuses.
+func heldSSHBlock(opts Options) (bool, error) {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return false, fmt.Errorf("load roster %s: %w", opts.RosterPath, err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil || tg.SSH == nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+// checkKeylessState refuses a run whose SSH posture contradicts the
+// roster's, before any SSH and without decrypting anything:
+//
+//   - --no-ssh-key against a target that holds an SSH block
+//     (ErrKeylessWithPersistedSSH): the key would stay on file and on the
+//     host while the flag says there is none;
+//   - no --no-ssh-key against a target that holds a token and no block
+//     (ErrKeylessTargetNeedsFlag): the state a keyless bootstrap leaves, so
+//     the run would install and persist a key on a target kept keyless.
+//
+// The two are mutually exclusive (one needs the flag, the other its
+// absence), and both run after checkHeldTokenOwner, so an overlapping run
+// reports the identity error first. Each message carries its own remedy;
+// they are mirror images, so the pairing is asserted as ordered substrings
+// (TestRun_CT4…, TestRun_CT5…).
+//
+// pveforge-roster-token-import will legitimately produce "a token and no
+// SSH block" for a target that was never keyless; such a target then needs
+// --no-ssh-key, or its token block removed, to bootstrap. That task names
+// the same interaction.
+func checkKeylessState(opts Options) error {
+	block, err := heldSSHBlock(opts)
+	if err != nil {
+		return err
+	}
+	if opts.NoSSHKey {
+		if !block {
+			return nil
+		}
+		return fmt.Errorf("%w: %s; remove that target's [targets.ssh] block by hand to keep it keyless (this revokes no token), or drop --no-ssh-key to keep using the stored key",
+			ErrKeylessWithPersistedSSH, opts.TargetID)
+	}
+	if block {
+		return nil
+	}
+	heldID, err := heldTokenID(opts)
+	if err != nil || heldID == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s holds the token %s and no SSH auth; pass --no-ssh-key to keep this target keyless, or remove its [targets.token] block by hand to re-bootstrap it with an SSH key",
+		ErrKeylessTargetNeedsFlag, opts.TargetID, heldID)
 }
 
 // checkHeldTokenOwner refuses an ACCIDENTAL change of principal: the roster

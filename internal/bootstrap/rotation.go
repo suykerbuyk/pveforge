@@ -103,6 +103,24 @@ var (
 	// before any SSH. Naming the owner explicitly is what makes such a
 	// change deliberate. Never a verdict: nothing is removed.
 	ErrTokenOwnerMismatch = errors.New("the roster's token belongs to another owner and no --token-owner was given")
+	// ErrKeylessWithPersistedSSH: --no-ssh-key was given for a target whose
+	// roster entry carries an [targets.ssh] block. Using that key would
+	// contradict the flag, and ignoring it would leave a credential the
+	// operator believes is gone, so the run is refused before any SSH.
+	// Never a verdict: nothing is removed.
+	ErrKeylessWithPersistedSSH = errors.New("--no-ssh-key, but this roster holds an SSH keypair for the target")
+	// ErrKeylessTargetNeedsFlag: the roster holds a token for this target
+	// and NO SSH block — the state a keyless bootstrap leaves — and this
+	// run did not pass --no-ssh-key, so it would install and persist an SSH
+	// key on a target kept deliberately keyless. Refused before any SSH.
+	// Never a verdict.
+	//
+	// This and ErrKeylessWithPersistedSSH are MUTUALLY EXCLUSIVE: that one
+	// requires the flag, this one requires its absence. Both run after
+	// ErrTokenOwnerMismatch, so a run tripping both an identity and a
+	// transport condition reports the identity one (TestRun_CT4c…,
+	// TestRun_CT5d…).
+	ErrKeylessTargetNeedsFlag = errors.New("this target was bootstrapped without an SSH key, so --no-ssh-key is required")
 	// ErrRoleHasNoPrivileges: a requested role exists on PVE but grants
 	// nothing (NoAccess), so no token holding it could ever validate.
 	ErrRoleHasNoPrivileges = errors.New("the requested ACL role grants no privileges")
@@ -584,6 +602,12 @@ type sshIdentity struct {
 	addr, user    string
 	privateKeyPEM []byte
 	hostKeyFP     string
+	// password and keyless are set only by a --no-ssh-key run: it holds no
+	// keypair, so a redial re-authenticates with the password, pinned to
+	// the fingerprint this run captured. Both live here for the run's
+	// duration and nowhere else — runner does not outlive Run.
+	password string
+	keyless  bool
 }
 
 type tokenState int
@@ -627,13 +651,25 @@ func (r *runner) cleanupCtx() (context.Context, context.CancelFunc) {
 // it cannot reach a different host or key). The old session is closed and
 // every later step uses the new one. One attempt; no loop.
 func (r *runner) freshSession(ctx context.Context) error {
-	s, err := r.transport.ReconnectWithPinnedKey(ctx, r.ident.addr, r.ident.user, r.ident.privateKeyPEM, r.ident.hostKeyFP)
+	s, err := r.reconnect(ctx)
 	if err != nil {
 		return err
 	}
 	_ = r.session.Close()
 	r.session = s
 	return nil
+}
+
+// reconnect re-establishes this run's session with this run's own identity.
+// A keyless run has no keypair, so it re-authenticates with the password,
+// PINNED to the fingerprint captured on this run's first connection: a
+// redial can no more reach a different host than a keyed reconnect can.
+func (r *runner) reconnect(ctx context.Context) (SSHSession, error) {
+	if r.ident.keyless {
+		s, _, err := r.transport.DialWithPassword(ctx, r.ident.addr, r.ident.user, r.ident.password, r.ident.hostKeyFP)
+		return s, err
+	}
+	return r.transport.ReconnectWithPinnedKey(ctx, r.ident.addr, r.ident.user, r.ident.privateKeyPEM, r.ident.hostKeyFP)
 }
 
 // reread establishes, after a transport error, whether the requested token

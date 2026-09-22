@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -165,4 +166,38 @@ func TestRenderBootstrapResult_AT8_Grants(t *testing.T) {
 			}
 		}
 	})
+}
+
+// C-T8b (CR-1): --no-ssh-key must reach Options. Dropping the field from
+// the Options literal is invisible to every internal/bootstrap test — they
+// set Options.NoSSHKey directly — so the flag could be a no-op and a run
+// the operator believes is keyless would install and persist a key. This
+// drives the real RunE through runRoot and requires the run to stop at the
+// KEYLESS dial, never at the install path.
+//
+// It also asserts (FO-1) that the PVE password reaches neither rendered
+// stream, which is the one leak site C-T6 cannot see from inside the
+// bootstrap package.
+func TestBootstrap_CT8b_NoSSHKeyReachesOptions(t *testing.T) {
+	tr := &fakeBootstrapTransport{installErr: errors.New("install must not run")}
+	withBootstrapFakes(t, tr)
+	root := newRootCmd()
+	root.SetArgs([]string{"bootstrap", "qa-test", "--host", "h", "--node", "n",
+		"--grant", "/:PVEVMAdmin::1", "--no-ssh-key"})
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	if code := runRoot(root, &stderr); code != 1 {
+		t.Fatalf("exit = %d", code)
+	}
+	if tr.pwCalls != 1 || tr.installCalls != 0 {
+		t.Fatalf("keyless dials = %d, install calls = %d: the flag did not reach Options", tr.pwCalls, tr.installCalls)
+	}
+	if !strings.Contains(stderr.String(), "connect with password (no ssh key)") {
+		t.Fatalf("stderr = %q, want the keyless dial's failure", stderr.String())
+	}
+	// FO-1: the password is in neither rendered stream.
+	if pw := os.Getenv(pvePasswordEnvVar); pw == "" ||
+		strings.Contains(stdout.String(), pw) || strings.Contains(stderr.String(), pw) {
+		t.Fatalf("the PVE password reached the output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
 }

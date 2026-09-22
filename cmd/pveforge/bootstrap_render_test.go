@@ -189,10 +189,15 @@ func TestNewBootstrapCmd_C3_OutputFlagIsTheSharedOne(t *testing.T) {
 type fakeBootstrapTransport struct {
 	installErr error
 	calls      int
+	// per-method counters: `calls` alone cannot tell the keyless dial from
+	// the install path, which is what C-T8b has to observe.
+	installCalls int
+	pwCalls      int
 }
 
 func (f *fakeBootstrapTransport) InstallPubkeyViaPassword(context.Context, string, string, string, string) (string, error) {
 	f.calls++
+	f.installCalls++
 	return "", f.installErr
 }
 func (f *fakeBootstrapTransport) DialWithKey(context.Context, string, string, []byte, string) (bootstrap.SSHSession, error) {
@@ -202,6 +207,12 @@ func (f *fakeBootstrapTransport) DialWithKey(context.Context, string, string, []
 func (f *fakeBootstrapTransport) ReconnectWithPinnedKey(context.Context, string, string, []byte, string) (bootstrap.SSHSession, error) {
 	f.calls++
 	return nil, errors.New("unexpected reconnect")
+}
+
+func (f *fakeBootstrapTransport) DialWithPassword(context.Context, string, string, string, string) (bootstrap.SSHSession, string, error) {
+	f.calls++
+	f.pwCalls++
+	return nil, "", errors.New("unexpected keyless dial")
 }
 
 type nopValidator struct{}

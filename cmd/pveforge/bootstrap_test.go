@@ -98,6 +98,7 @@ func TestNewBootstrapCmd_FlagDefaults(t *testing.T) {
 		"pve-user":     "root@pam",
 		"token-id":     "pveforge",
 		"grant":        "[]",
+		"no-ssh-key":   "false",
 		"token-owner":  "",
 		"insecure-tls": "false",
 		"roster":       "",
@@ -199,5 +200,22 @@ func TestResolveRosterPathFromFlagOrEnv_Precedence(t *testing.T) {
 	}
 	if got != "/flag/roster.toml" {
 		t.Fatalf("flag: got %q, want %q", got, "/flag/roster.toml")
+	}
+}
+
+// C-T8: --no-ssh-key's help states what the flag actually does, including
+// the two refusals a target can meet later.
+func TestNewBootstrapCmd_NoSSHKeyFlagIsExplained(t *testing.T) {
+	u := newBootstrapCmd().Flags().Lookup("no-ssh-key").Usage
+	for _, want := range []string{
+		"no key is installed on the target and none is stored in the roster",
+		"trusted on first use on EVERY such run",
+		"reported as host_key_fingerprint",
+		"needs this flag on every later run",
+		"refused against a target whose roster entry holds an SSH keypair",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("--no-ssh-key help does not say %q: %q", want, u)
+		}
 	}
 }

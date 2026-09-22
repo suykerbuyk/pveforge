@@ -256,6 +256,9 @@ var transportWitnesses = []struct {
 	{"internal/pve/routed.go", tgtSshexecDial},          // :528, inside an AllowDir
 	{"internal/bootstrap/deps.go", tgtSshexecDial},      // :52, the AllowFile
 	{"internal/bootstrap/deps.go", tgtSshexecInstall},   // :20, the AllowFile
+	// U-C's keyless path: the one-shot password session. This entry is why
+	// tgtSshexecDialPW is no longer fixture-only.
+	{"internal/bootstrap/deps.go", tgtSshexecDialPW},
 	// The two netguard files, each exempt for its own reason. Both are
 	// witnessed on net/http.DefaultTransport, the target this unit added
 	// on its own initiative last round -- the one that catches the
@@ -274,7 +277,7 @@ func transportFixtureOnly() []sourceguard.Target {
 	return []sourceguard.Target{
 		tgtHTTPDefaultClient,
 		tgtHTTPGet, tgtHTTPPost, tgtHTTPHead, tgtHTTPPostForm,
-		tgtSSHDial, tgtSshexecDialPW,
+		tgtSSHDial,
 		tgtTermWebSocket, tgtVNCWebSocket,
 	}
 }
