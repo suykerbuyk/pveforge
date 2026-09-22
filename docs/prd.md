@@ -348,6 +348,21 @@ was never used.)
 
 - Getters/setters accept and emit plain `key=value` pairs for simple,
   scriptable one-liners.
+- kv output is one field per line, and a line-oriented consumer reads it by
+  two rules (`internal/kvjson` package doc):
+  1. **Key:** if the line starts with `"`, the key is exactly one JSON string
+     token and the next character is `=`; otherwise the key is everything
+     before the first `=`.
+  2. **Value:** everything after that `=`; if it starts with `"` it is
+     exactly one JSON string, otherwise literal text.
+
+  A key or string value is JSON-quoted only when it could otherwise be
+  misread — it contains a control character (C0 or C1, e.g. U+0085) or
+  U+2028/U+2029, starts or ends with whitespace, or starts with `"`; a key
+  also when it contains `=`, a value also when it is the string `"null"` (JSON
+  null prints as a bare `null`). No line splitter, Python's `splitlines()`
+  included, can find a second line in one field. kv does not preserve JSON
+  types; `-o json` is the exact form.
 - Full JSON is supported as the primary structured format for both reading
   (`-o json`) and writing (a JSON body/file for multi-field set operations) —
   the efficient, well-structured path for anything beyond a single field.

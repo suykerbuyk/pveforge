@@ -92,6 +92,29 @@ func TestVMFieldsEnsure_Read_CoercesJSONTypedValuesToComparableStrings(t *testin
 	}
 }
 
+// TestVMFieldsEnsure_Read_MultilineValueUnescaped pins that Read compares
+// the RAW value, never kv's display quoting: PVE stores a multi-line
+// description, and a field whose value is the string "null" is legal. If
+// kvjson.Scalar ever returned kv's quoted form, an already-correct value
+// would read as different and be rewritten on every run.
+func TestVMFieldsEnsure_Read_MultilineValueUnescaped(t *testing.T) {
+	client := &fakeClient{
+		node: "qa-pve-01",
+		rawRequestResults: []json.RawMessage{
+			json.RawMessage(`{"digest":"d1","description":"line1\nline2\n","name":"null"}`),
+		},
+	}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("description", "line1\nline2\n", "name", "null")}
+
+	current, err := op.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !op.Satisfied(current) {
+		t.Fatalf("Satisfied(%s) = false for values already equal to the wanted ones", current)
+	}
+}
+
 // TestVMFieldsEnsure_Read_FieldAbsentFromConfig proves a field never set
 // on the VM is simply absent from Read's map, not an error and not a
 // spurious empty-string entry.

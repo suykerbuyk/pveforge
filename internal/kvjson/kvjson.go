@@ -8,6 +8,23 @@
 // what any given field means — it only converts between shapes. Anything
 // about what a field means belongs in the object-model or discoverability
 // layers, not here.
+//
+// The kv line contract, for a consumer reading one line at a time:
+//
+//   - Key: if the line starts with `"`, the key is exactly one JSON string
+//     token and the character after its closing quote is `=`. Otherwise the
+//     key is everything before the first `=`.
+//   - Value: everything after that `=`. If it starts with `"`, it is exactly
+//     one JSON string. Otherwise it is literal text.
+//
+// A key or string value is written as a JSON string only when it could
+// otherwise be misread: it contains a control character (C0 or C1), U+2028
+// or U+2029 (so no line splitter, Python's str.splitlines included, sees a
+// second line), starts or ends with whitespace, or starts with `"`; a key
+// also when it contains `=`, a value also when it is exactly "null" (so it
+// stays distinct from JSON null, which prints as a bare null). Everything
+// else is written as-is. kv does not preserve JSON types — the string
+// "true" and the bool true print alike — so use -o json for exact data.
 package kvjson
 
 import (
@@ -17,6 +34,8 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Format names one of the two supported I/O formats.
@@ -45,6 +64,10 @@ func ParseFormat(s string) (Format, error) {
 // struct's own `omitempty` tags) and what their values are — KV is a view
 // of the same data, not a separately-maintained rendering.
 //
+// KV lines follow the package doc's line contract: a key or string value
+// that could be misread is written as a JSON string (QuoteKey,
+// QuoteValue), everything else as-is.
+//
 // v must marshal to a JSON object at the top level (a struct or
 // map[string]...) — Render returns an error for anything else (a slice,
 // a bare scalar, null), since KV mode has no defined shape for those. A
@@ -72,7 +95,10 @@ func Render(w io.Writer, f Format, v interface{}) error {
 	}
 }
 
-// renderKV flattens compact (a JSON object) to sorted "key=value" lines.
+// renderKV flattens compact (a JSON object) to sorted "key=value" lines,
+// following the package doc's line contract: keys through QuoteKey, string
+// values through QuoteValue, and any other value as its own compact JSON
+// with the C1 range escaped (escapeC1) so it stays on one line.
 //
 // A top-level null is refused like any other non-object. encoding/json
 // unmarshals the literal null into a map as a documented no-op (no error,
@@ -95,16 +121,115 @@ func renderKV(w io.Writer, compact []byte) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		val, err := Scalar(flat[k])
+		val, err := kvValue(flat[k])
 		if err != nil {
 			return fmt.Errorf("render: field %q: %w", k, err)
 		}
-		if _, err := fmt.Fprintf(w, "%s=%s\n", k, val); err != nil {
+		if _, err := fmt.Fprintf(w, "%s=%s\n", QuoteKey(k), val); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+// kvValue renders one field's JSON value for a kv line: a JSON string
+// through QuoteValue, null as a bare null, anything else as its compact
+// JSON with escapeC1 applied. Scalar is deliberately NOT changed to do
+// this: internal/idempotent compares PVE values through Scalar, and
+// quoting there would change what converges.
+func kvValue(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return "", err
+		}
+		return QuoteValue(s), nil
+	}
+	s, err := Scalar(raw)
+	if err != nil {
+		return "", err
+	}
+	return escapeC1(s), nil
+}
+
+// QuoteKey returns k as it should appear before the `=` of a kv line: k
+// itself, or its JSON-quoted form when k could be misread — it contains a
+// control character, U+2028/U+2029 or `=`, starts or ends with whitespace,
+// or starts with `"`. See the package doc for the full line contract.
+func QuoteKey(k string) string {
+	if needsQuote(k) || strings.Contains(k, "=") {
+		return quoteString(k)
+	}
+	return k
+}
+
+// QuoteValue returns v as it should appear after the `=` of a kv line: v
+// itself, or its JSON-quoted form when v could be misread — the same
+// triggers as QuoteKey except `=` (a value runs to end of line, so `=` in
+// it is harmless), plus v == "null", so the string stays distinct from a
+// JSON null's bare null.
+func QuoteValue(v string) string {
+	if needsQuote(v) || v == "null" {
+		return quoteString(v)
+	}
+	return v
+}
+
+// needsQuote reports the triggers QuoteKey and QuoteValue share. The
+// control test is unicode.IsControl, i.e. the whole Cc category: C0
+// (U+0000-U+001F) and U+007F-U+009F, which includes U+0085 (NEL), a line
+// break for Python's str.splitlines().
+func needsQuote(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, `"`) {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(s)
+	last, _ := utf8.DecodeLastRuneInString(s)
+	if unicode.IsSpace(first) || unicode.IsSpace(last) {
+		return true
+	}
+	return strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+	})
+}
+
+// quoteString JSON-quotes s for a kv line. encoding/json escapes C0 and
+// U+2028/U+2029 but leaves U+007F-U+009F raw, so escapeC1 finishes the
+// job; HTML escaping is off because kv is read by people and scripts, not
+// embedded in HTML, and `<` inside quotes should look like `<`.
+func quoteString(s string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s) // a string always encodes
+	return escapeC1(strings.TrimSuffix(b.String(), "\n"))
+}
+
+// escapeC1 replaces every rune in U+007F-U+009F with its \u00XX JSON
+// escape. It is applied only to JSON text (a quoted string, or a nested
+// value's compact JSON), where those runes can occur only inside string
+// literals, so the result is still valid JSON that decodes to the same
+// value, and no line splitter finds a break in it.
+func escapeC1(s string) string {
+	if !strings.ContainsFunc(s, isC1) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if isC1(r) {
+			fmt.Fprintf(&b, `\u%04x`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isC1(r rune) bool { return r >= 0x7f && r <= 0x9f }
 
 // Scalar renders one JSON value as a single comparable/displayable
 // string: a JSON string is unquoted; anything else (number, bool, null, a
@@ -119,6 +244,11 @@ func renderKV(w io.Writer, compact []byte) error {
 // string, but a CLI caller always types "cores=4") — reusing this rather
 // than re-deriving the same non-obvious null-handling logic in a second
 // package.
+//
+// Scalar returns the RAW string — never kv's quoted form. That is load-
+// bearing: internal/idempotent compares PVE values with it, so quoting
+// here would make an already-correct multi-line value look different on
+// every run. kv quoting lives in renderKV (kvValue) instead.
 //
 // null is checked for explicitly, before attempting the string-unmarshal
 // below: per encoding/json, unmarshaling the JSON literal null into a
