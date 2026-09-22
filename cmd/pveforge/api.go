@@ -149,12 +149,12 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 		if upid, ok := responseUPID(method, result); ok {
 			// stderr, at dispatch: the caller has the task id even while the
 			// wait below blocks, and even if the wait then fails.
-			fmt.Fprintf(cmd.ErrOrStderr(), "dispatched PVE task %s\n", upid)
+			fmt.Fprintf(cmd.ErrOrStderr(), "dispatched PVE task %s\n", kvjson.QuoteValue(upid))
 			if noWait {
 				if locked {
-					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; the lock on %s is released now, before the task finishes, so a concurrent pveforge mutation of the same object is no longer serialized against it\n", upid, key)
+					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; the lock on %s is released now, before the task finishes, so a concurrent pveforge mutation of the same object is no longer serialized against it\n", kvjson.QuoteValue(upid), key)
 				} else {
-					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; its outcome is not checked\n", upid)
+					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; its outcome is not checked\n", kvjson.QuoteValue(upid))
 				}
 			} else if err := waitForAPITask(cmd.Context(), client, rawPath, upid, waitTimeout); err != nil {
 				return err

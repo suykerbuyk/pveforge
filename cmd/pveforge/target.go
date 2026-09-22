@@ -43,8 +43,10 @@ func addRosterFlag(cmd *cobra.Command) {
 }
 
 // addOutputFlag registers the shared -o/--output flag (kv|json, default
-// kv) on a read command. The returned func resolves and validates the
-// flag's value at RunE time.
+// kv) on a command that renders a result. The returned func resolves and
+// validates the flag's value at RunE time; a mutating command resolves it
+// FIRST, so a bad value never lets the mutation run and then fail to be
+// reported.
 func addOutputFlag(cmd *cobra.Command) func() (kvjson.Format, error) {
 	var output string
 	cmd.Flags().StringVarP(&output, "output", "o", "kv", `output format: "kv" or "json"`)
