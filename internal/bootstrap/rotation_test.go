@@ -243,6 +243,8 @@ func TestRun_R3_VerdictPresent_RemoveClearAdd(t *testing.T) {
 		"ErrNoGrants":      fmt.Errorf("%w", ErrNoGrants),
 		"ErrWrongScope":    fmt.Errorf("%w", ErrWrongScope),
 		"ErrNotAuthorized": fmt.Errorf("%w", ErrNotAuthorized),
+		// R3′: a held token wider than requested is a verdict too.
+		"ErrScopeTooWide": fmt.Errorf("%w: at / the token holds VM.Allocate", ErrScopeTooWide),
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := seedRoster(t, heldID, "")
@@ -920,9 +922,12 @@ func TestRun_R11_R12_ParseOrGrantFails(t *testing.T) {
 
 // ---- R13: post-mint validation ----
 
+// R13 / R13′: a post-mint ErrScopeTooWide is a verdict at once: never
+// retried ("too wide" cannot be lag), never persisted, the fresh token
+// removed. The retried verdicts are R13i-R13l.
 func TestRun_R13_PostMintVerdict(t *testing.T) {
 	t.Run("with a prior remove", func(t *testing.T) {
-		s, session, tr, v := prior(t, nil, fmt.Errorf("%w", ErrWrongScope))
+		s, session, tr, v := prior(t, nil, fmt.Errorf("%w", ErrScopeTooWide))
 		res, err := Run(context.Background(), s.opts, tr, v)
 		wantRevoked(t, res, err)
 		if res.Validation != ValidationFailed || v.calls != 2 || session.count("pveum user token remove") != 2 {
@@ -933,7 +938,7 @@ func TestRun_R13_PostMintVerdict(t *testing.T) {
 	t.Run("first mint (R13b)", func(t *testing.T) {
 		path := newTestRoster(t, "")
 		session := &fakeSession{}
-		v := &fakeValidator{err: fmt.Errorf("%w", ErrWrongScope)}
+		v := &fakeValidator{err: fmt.Errorf("%w", ErrScopeTooWide)}
 		res, err := Run(context.Background(), baseOptions(path), &fakeTransport{installFingerprint: "SHA256:abc", session: session}, v)
 		if err == nil || res.TokenOutcome != OutcomeDiscarded || res.Validation != ValidationFailed || v.calls != 1 {
 			t.Fatalf("result = %+v, calls = %d, err = %v", res, v.calls, err)
@@ -948,6 +953,8 @@ func TestRun_R13_PostMintRetryLoop(t *testing.T) {
 	plain := errors.New("dial tcp: connection refused")
 	na := fmt.Errorf("%w", ErrNotAuthorized)
 	ws := fmt.Errorf("%w", ErrWrongScope)
+	ng := fmt.Errorf("%w", ErrNoGrants)
+	tw := fmt.Errorf("%w", ErrScopeTooWide)
 	for name, tc := range map[string]struct {
 		errs       []error
 		calls      int
@@ -958,7 +965,12 @@ func TestRun_R13_PostMintRetryLoop(t *testing.T) {
 		"R13d 401 x3 (x4 then nil)":     {[]error{na, na, na, na, nil}, 3, ValidationFailed, false},
 		"R13e 401 then plain twice":     {[]error{na, plain, plain}, 3, ValidationFailed, false},
 		"R13f 401, plain, OK":           {[]error{na, plain, nil}, 3, ValidationVerified, true},
-		"R13g 401 then a non-retryable": {[]error{na, ws}, 2, ValidationFailed, false},
+		"R13g 401 then a non-retryable": {[]error{na, tw}, 2, ValidationFailed, false},
+		"R13i WrongScope then OK":       {[]error{ws, nil}, 2, ValidationVerified, true},
+		"R13j NoGrants then OK":         {[]error{ng, nil}, 2, ValidationVerified, true},
+		"R13k WrongScope x3 (then nil)": {[]error{ws, ws, ws, nil}, 3, ValidationFailed, false},
+		"R13l 401 then TooWide stops":   {[]error{na, tw, nil}, 2, ValidationFailed, false},
+		"R13m NoGrants, plain, OK":      {[]error{ng, plain, nil}, 3, ValidationVerified, true},
 		"R14 plain first: not retried":  {[]error{plain}, 1, ValidationUnverified, true},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1216,9 +1228,10 @@ func TestRun_R18c_CleanupStepTimesOut(t *testing.T) {
 
 func TestIsVerdict_RV1(t *testing.T) {
 	for e, want := range map[error]bool{
-		ErrNoGrants: true, ErrWrongScope: true, ErrNotAuthorized: true,
-		fmt.Errorf("wrapped: %w", ErrNoGrants): true,
-		errors.New("plain"):                    false, errors.New("unverifiable read"): false, context.DeadlineExceeded: false,
+		ErrNoGrants: true, ErrWrongScope: true, ErrNotAuthorized: true, ErrScopeTooWide: true,
+		fmt.Errorf("wrapped: %w", ErrNoGrants): true, fmt.Errorf("w: %w", ErrScopeTooWide): true,
+		ErrOwnerLacksPrivileges: false, ErrOwnerDisabled: false, ErrRoleHasNoPrivileges: false, ErrInvalidGrant: false,
+		errors.New("plain"): false, errors.New("unverifiable read"): false, context.DeadlineExceeded: false,
 	} {
 		if got := isVerdict(e); got != want {
 			t.Errorf("isVerdict(%v) = %v, want %v", e, got, want)
@@ -1229,7 +1242,8 @@ func TestIsVerdict_RV1(t *testing.T) {
 func TestPostMintRetryable_RV2(t *testing.T) {
 	for e, want := range map[error]bool{
 		ErrNotAuthorized: true, fmt.Errorf("w: %w", ErrNotAuthorized): true,
-		ErrNoGrants: false, ErrWrongScope: false, // U-validator makes these true; ErrScopeTooWide never
+		ErrNoGrants: true, ErrWrongScope: true, fmt.Errorf("w: %w", ErrWrongScope): true,
+		ErrScopeTooWide: false, fmt.Errorf("w: %w", ErrScopeTooWide): false, // never: "too wide" cannot be lag
 		errors.New("plain"): false, context.DeadlineExceeded: false,
 	} {
 		if got := postMintRetryable(e); got != want {

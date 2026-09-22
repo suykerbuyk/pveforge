@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,25 @@ func TestNewBootstrapCmd_RequiresExactlyOneArg(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, []string{"only-one"}); err != nil {
 		t.Fatalf("expected exactly one positional arg to be accepted: %v", err)
+	}
+}
+
+// F2: --acl-path and --acl-role say that a re-run with a different request
+// revokes the held token, since the validator's upper bound makes a
+// narrower or different request a verdict about it.
+func TestNewBootstrapCmd_ACLFlagsWarnOfRevocation(t *testing.T) {
+	cmd := newBootstrapCmd()
+	for _, name := range []string{"acl-path", "acl-role"} {
+		u := cmd.Flags().Lookup(name).Usage
+		for _, want := range []string{
+			"the role's privileges, differ from the held token's effective grants",
+			"revokes that token on PVE (for every holder)",
+			"tries to mint a replacement",
+		} {
+			if !strings.Contains(u, want) {
+				t.Errorf("--%s help does not say %q: %q", name, want, u)
+			}
+		}
 	}
 }
 

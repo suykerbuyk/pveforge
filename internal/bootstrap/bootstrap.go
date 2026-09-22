@@ -91,10 +91,12 @@ type APIConfig struct {
 }
 
 // APIValidator is the subset of pve's capability bootstrap needs to prove
-// a freshly created token actually has working grants. NewAPIValidator
-// (deps.go) provides the production implementation, backed by internal/pve.
+// a token holds exactly the requested grants: PVE's own answer for what the
+// token can do must cover want and reach no further (pve.ValidateTokenGrants
+// and its known limits). NewAPIValidator (deps.go) provides the production
+// implementation, backed by internal/pve.
 type APIValidator interface {
-	ValidateTokenGrants(ctx context.Context, cfg APIConfig, expectNode string) error
+	ValidateTokenGrants(ctx context.Context, cfg APIConfig, want []Grant) error
 }
 
 // Options configures one bootstrap run against a single target.
@@ -107,16 +109,19 @@ type Options struct {
 	SSHPort     int // 0 => 22
 
 	// PVEUsername is a PAM/realm username, e.g. "root@pam". Only @pam (or
-	// bare, defaulting to pam) realm users are supported — anything else
-	// has no corresponding SSH-reachable Linux system account.
+	// bare, defaulting to pam: "root" becomes "root@pam") realm users are
+	// supported — anything else has no corresponding SSH-reachable Linux
+	// system account.
 	PVEUsername string
 	PVEPassword string
 
 	// TokenID is the token's own name (not including the userid prefix),
 	// e.g. "pveforge" -> full token id "root@pam!pveforge".
 	TokenID string
-	// ACLPath and ACLRole scope the freshly created token's grant.
-	// Defaults: "/" and "PVEVMAdmin" (see applyDefaults).
+	// ACLPath and ACLRole scope the freshly created token's grant, one
+	// propagating Grant (requestedGrants). Defaults: "/" and "PVEVMAdmin"
+	// (see applyDefaults). Run normalizes ACLPath as PVE does
+	// (checkedACLPath) before anything else uses it.
 	ACLPath string
 	ACLRole string
 
@@ -224,6 +229,12 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	if err != nil {
 		return nil, err
 	}
+	// The one requested grant list: issued, owner-checked, skip-checked and
+	// validated post-mint as this same value. Checked before any SSH.
+	want := requestedGrants(opts)
+	if err := checkGrants(want); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
 
 	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
 	if err != nil {
@@ -243,7 +254,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 
-	r := &runner{ctx: ctx, opts: opts, transport: transport, api: api, fullID: fullTokenID}
+	r := &runner{ctx: ctx, opts: opts, transport: transport, api: api, fullID: fullTokenID, want: want}
 
 	if existing != nil {
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
@@ -286,7 +297,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	}
 	r.res = &Result{HostKeyFingerprint: r.ident.hostKeyFP, TokenID: fullTokenID}
 
-	present, err := preflight(ctx, r.session, opts)
+	present, err := preflight(ctx, r.session, opts, want, sshOwnerReader{r.session})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
@@ -409,6 +420,12 @@ func applyDefaults(opts *Options) {
 	if opts.PVEUsername == "" {
 		opts.PVEUsername = "root@pam"
 	}
+	// A bare name defaults to pam (pamLocalUser), and it must say so
+	// everywhere it is used: PVE's userid format requires "@realm", so a
+	// bare "root" would build the invalid token id "root!pveforge".
+	if !strings.Contains(opts.PVEUsername, "@") {
+		opts.PVEUsername += "@pam"
+	}
 }
 
 func validateOptions(opts *Options) error {
@@ -438,7 +455,13 @@ func validateOptions(opts *Options) error {
 func pamLocalUser(pveUsername string) (string, error) {
 	name, realm, found := strings.Cut(pveUsername, "@")
 	if !found {
-		return pveUsername, nil
+		name = pveUsername
+	}
+	if name == "" {
+		return "", fmt.Errorf("pve username %q: the user name is empty", pveUsername)
+	}
+	if !found {
+		return name, nil
 	}
 	if realm != "pam" {
 		return "", fmt.Errorf("pve username %q: only @pam realm users have a corresponding SSH-reachable system account, got @%s", pveUsername, realm)
@@ -561,18 +584,42 @@ func parseTokenSecret(stdout string) (string, error) {
 	return "", fmt.Errorf("parse pveum token add output: unexpected output shape (%d bytes, not a JSON object)", len(stdout))
 }
 
-// grantACL grants role at path to the token identified by fullTokenID
-// (userid!tokenname). The exact `pveum acl modify` flag names are reproduced
-// from PVE documentation, like the token add/remove commands in rotation.go.
-func grantACL(ctx context.Context, session SSHSession, fullTokenID, path, role string) error {
-	cmd := fmt.Sprintf("pveum acl modify %s --tokens %s --roles %s",
-		sshexec.ShellQuote(path), sshexec.ShellQuote(fullTokenID), sshexec.ShellQuote(role))
+// requestedGrants is the grant list today's flags request: --acl-role on
+// --acl-path (already normalized), propagating, as pveum's own default has
+// always applied it. It is the single construction site of Run's want.
+func requestedGrants(opts Options) []Grant {
+	return []Grant{{Path: opts.ACLPath, Role: opts.ACLRole, Propagate: true}}
+}
+
+// grantACL grants g to the token identified by fullTokenID
+// (userid!tokenname), stating the whole grant: path, role and an explicit
+// --propagate 0|1 (pveum's default is 1). The exact `pveum acl modify` flag
+// names are reproduced from PVE documentation (`pveum help acl modify`),
+// like the token add/remove commands in rotation.go.
+func grantACL(ctx context.Context, session SSHSession, fullTokenID string, g Grant) error {
+	propagate := 0
+	if g.Propagate {
+		propagate = 1
+	}
+	cmd := fmt.Sprintf("pveum acl modify %s --tokens %s --roles %s --propagate %d",
+		sshexec.ShellQuote(g.Path), sshexec.ShellQuote(fullTokenID), sshexec.ShellQuote(g.Role), propagate)
 	res, err := session.Run(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("run pveum acl modify: %w", err)
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("pveum acl modify exited %d: %s", res.ExitCode, res.Stderr)
+	}
+	return nil
+}
+
+// grantAll issues every grant of want, in order, stopping at the first
+// failure.
+func grantAll(ctx context.Context, session SSHSession, fullTokenID string, want []Grant) error {
+	for _, g := range want {
+		if err := grantACL(ctx, session, fullTokenID, g); err != nil {
+			return err
+		}
 	}
 	return nil
 }

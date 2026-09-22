@@ -88,8 +88,8 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port on the target host")
 	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with (must be an @pam user)")
 	cmd.Flags().StringVar(&tokenID, "token-id", "pveforge", "name of the scoped API token to create")
-	cmd.Flags().StringVar(&aclPath, "acl-path", "/", "ACL path to grant the new token")
-	cmd.Flags().StringVar(&aclRole, "acl-role", "PVEVMAdmin", "ACL role to grant the new token")
+	cmd.Flags().StringVar(&aclPath, "acl-path", "/", "ACL path to grant the new token; if the path, or the role's privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
+	cmd.Flags().StringVar(&aclRole, "acl-role", "PVEVMAdmin", "ACL role to grant the new token; if the path, or the role's privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
 
 	// destructive, not mutating: a verdict about the held token makes
 	// bootstrap remove it on PVE, which revokes its secret for EVERY roster

@@ -2,10 +2,14 @@ package pve
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
+
+	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
 func TestRawRequest_GetSendsParamsAsQueryString(t *testing.T) {
@@ -199,5 +203,47 @@ func TestRawRequest_RejectsUnsupportedMethod(t *testing.T) {
 	}))
 	if _, err := c.RawRequest(context.Background(), http.MethodPatch, "/version", nil); err == nil {
 		t.Fatal("expected an error for an unsupported HTTP method")
+	}
+}
+
+// MV2 / MV2b: a non-2xx answer keeps its exact historical text (callers
+// such as idempotent/networkbridge.go parse it), satisfies
+// errors.Is(err, ErrNotAuthorized) for 401 and 403 only, and is never a
+// *proxmox.StatusError, so no existing classification of a RawRequest
+// error changes.
+func TestRawRequest_StatusErrorTyping(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		auth bool
+	}{
+		{http.StatusUnauthorized, true},
+		{http.StatusForbidden, true},
+		{http.StatusNotFound, false},
+		{http.StatusInternalServerError, false},
+	} {
+		t.Run(http.StatusText(tc.code), func(t *testing.T) {
+			srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(" {\"errors\":\"why\"} \n"))
+			})
+			_, err := testClient(t, srv).RawRequest(context.Background(), http.MethodGet, "/x", nil)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			want := fmt.Sprintf("raw request: pve returned %d %s: %s", tc.code, http.StatusText(tc.code), `{"errors":"why"}`)
+			if err.Error() != want {
+				t.Errorf("text = %q, want exactly %q", err.Error(), want)
+			}
+			if got := errors.Is(err, ErrNotAuthorized); got != tc.auth {
+				t.Errorf("errors.Is(err, ErrNotAuthorized) = %v, want %v", got, tc.auth)
+			}
+			if errors.Is(err, ErrUnverifiableRead) || errors.Is(err, proxmox.ErrNotFound) {
+				t.Errorf("the status error matches an unrelated sentinel: %v", err)
+			}
+			var se *proxmox.StatusError
+			if errors.As(err, &se) {
+				t.Errorf("a RawRequest error must not be a *proxmox.StatusError: %v", err)
+			}
+		})
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,20 +92,35 @@ var (
 	// passphrase. A decrypt failure is not a verdict about the token (the
 	// passphrase may simply be wrong), so it is never removed.
 	ErrTokenUndecryptable = errors.New("the roster's token for this target will not decrypt with the given passphrase (a wrong passphrase, or corruption)")
+	// ErrRoleHasNoPrivileges: a requested role exists on PVE but grants
+	// nothing (NoAccess), so no token holding it could ever validate.
+	ErrRoleHasNoPrivileges = errors.New("the requested ACL role grants no privileges")
+	// ErrOwnerLacksPrivileges: the token's owner (a non-root user) does not
+	// itself hold what is requested. PVE intersects a privsep token's
+	// privileges with its owner's, so such a token could never validate;
+	// bootstrap aborts before removing anything, since a verdict against
+	// the held token would only be the owner's limit showing through. Not a
+	// verdict: it never leads to a remove.
+	ErrOwnerLacksPrivileges = errors.New("the token owner does not hold the requested privileges")
+	// ErrOwnerDisabled: the token's owner (a non-root user) is disabled or
+	// expired. PVE rejects every token of such an owner (401), which is not
+	// a verdict about the token (re-enabling the owner restores it), so
+	// bootstrap aborts before removing anything. Not a verdict.
+	ErrOwnerDisabled = errors.New("the token owner is disabled or expired")
 )
 
 // verdictSentinels are the definite verdicts about a token's grants. Only a
 // verdict may lead to removing a token this roster holds: removal revokes
 // the secret for every holder, so a transient or unverifiable error must
-// never trigger it. U-validator adds ErrScopeTooWide here.
-var verdictSentinels = []error{ErrWrongScope, ErrNoGrants, ErrNotAuthorized}
+// never trigger it.
+var verdictSentinels = []error{ErrWrongScope, ErrNoGrants, ErrNotAuthorized, ErrScopeTooWide}
 
 // postMintRetrySentinels are the post-mint verdicts that may be propagation
-// lag right after a mint (a fresh credential), so they are retried a
-// bounded number of times before they count. U-validator adds ErrNoGrants
-// and ErrWrongScope (a fresh ACL can lag the same way); ErrScopeTooWide
-// never — "too wide" cannot be lag.
-var postMintRetrySentinels = []error{ErrNotAuthorized}
+// lag right after a mint, so they are retried a bounded number of times
+// before they count: a fresh credential (ErrNotAuthorized) and a fresh ACL
+// (ErrNoGrants, ErrWrongScope) can both lag. ErrScopeTooWide is never here:
+// "too wide" cannot be lag.
+var postMintRetrySentinels = []error{ErrNotAuthorized, ErrNoGrants, ErrWrongScope}
 
 func isVerdict(err error) bool         { return matchesAny(err, verdictSentinels) }
 func postMintRetryable(err error) bool { return matchesAny(err, postMintRetrySentinels) }
@@ -253,17 +269,35 @@ func tokenPresent(ctx context.Context, s SSHSession, userID, tokenID string) (bo
 }
 
 // preflight runs every check that can run before anything is removed:
-// the role and node exist, whether the requested token exists on PVE, and a
-// dry run of every roster write this run may need. It returns present.
-func preflight(ctx context.Context, s SSHSession, opts Options) (bool, error) {
+// every requested role exists and grants something, the node exists, the
+// token's owner can hold what is requested (checkOwner), whether the
+// requested token exists on PVE, and a dry run of every roster write this
+// run may need. It returns present.
+func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, owner ownerReader) (bool, error) {
 	var roles []struct {
-		RoleID string `json:"roleid"`
+		RoleID string  `json:"roleid"`
+		Privs  *string `json:"privs"`
 	}
 	if err := runJSONArray(ctx, s, "pveum role list --output-format json", &roles); err != nil {
 		return false, fmt.Errorf("preflight: %w", err)
 	}
-	if !containsFunc(len(roles), func(i int) bool { return roles[i].RoleID == opts.ACLRole }) {
-		return false, fmt.Errorf("preflight: %w: %q", ErrUnknownRole, opts.ACLRole)
+	rolePrivs := map[string][]string{}
+	for _, g := range want {
+		if _, done := rolePrivs[g.Role]; done {
+			continue
+		}
+		i := indexFunc(len(roles), func(i int) bool { return roles[i].RoleID == g.Role })
+		if i < 0 {
+			return false, fmt.Errorf("preflight: %w: %q", ErrUnknownRole, g.Role)
+		}
+		privs, err := parseRolePrivs(roles[i].Privs)
+		if err != nil {
+			return false, fmt.Errorf("preflight: role %s: %w", g.Role, err)
+		}
+		if len(privs) == 0 {
+			return false, fmt.Errorf("preflight: %w: %s", ErrRoleHasNoPrivileges, g.Role)
+		}
+		rolePrivs[g.Role] = privs
 	}
 	var nodes []struct {
 		Node string `json:"node"`
@@ -271,8 +305,11 @@ func preflight(ctx context.Context, s SSHSession, opts Options) (bool, error) {
 	if err := runJSONArray(ctx, s, "pvesh get /nodes --output-format json", &nodes); err != nil {
 		return false, fmt.Errorf("preflight: %w", err)
 	}
-	if !containsFunc(len(nodes), func(i int) bool { return nodes[i].Node == opts.Node }) {
+	if indexFunc(len(nodes), func(i int) bool { return nodes[i].Node == opts.Node }) < 0 {
 		return false, fmt.Errorf("preflight: %w: %q", ErrUnknownNode, opts.Node)
+	}
+	if err := checkOwner(ctx, owner, opts.PVEUsername, want, rolePrivs); err != nil {
+		return false, fmt.Errorf("preflight: %w", err)
 	}
 	present, err := tokenPresent(ctx, s, opts.PVEUsername, opts.TokenID)
 	if err != nil {
@@ -284,13 +321,177 @@ func preflight(ctx context.Context, s SSHSession, opts Options) (bool, error) {
 	return present, nil
 }
 
-func containsFunc(n int, pred func(int) bool) bool {
-	for i := 0; i < n; i++ {
-		if pred(i) {
-			return true
+// privNameRE is PVE's privilege-name shape (as internal/pve checks it).
+var privNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]*$`)
+
+// parseRolePrivs strictly parses a role list entry's "privs" field: a
+// comma-joined list of privilege names, "" for a role with none. A missing
+// field or a malformed name is an error, never "no privileges".
+func parseRolePrivs(privs *string) ([]string, error) {
+	if privs == nil {
+		return nil, errors.New(`the role list entry has no "privs" field`)
+	}
+	if *privs == "" {
+		return nil, nil
+	}
+	out := strings.Split(*privs, ",")
+	for _, p := range out {
+		if !privNameRE.MatchString(p) {
+			return nil, errors.New(`the role list's "privs" holds a name that is not a privilege name`)
 		}
 	}
-	return false
+	return out, nil
+}
+
+// ---- the owner check ----
+
+// ownerReader reads what PVE says about a token owner. sshOwnerReader is
+// today's; an API-only mode can supply one that reads over the API instead
+// (GET /access/users/<owner>, GET /access/permissions?userid=<owner>&path=,
+// which needs Sys.Audit on /access), and checkOwner stays as it is.
+type ownerReader interface {
+	// ownerActive reports whether owner is enabled and not expired.
+	ownerActive(ctx context.Context, owner string) (bool, error)
+	// ownerPerms returns owner's effective privileges at exactly path:
+	// privilege → propagate.
+	ownerPerms(ctx context.Context, owner, path string) (map[string]bool, error)
+}
+
+// checkOwner aborts before anything is removed when a non-root owner can
+// never hold what is requested, because PVE intersects a privsep token's
+// privileges with its owner's: the owner is disabled or expired
+// (ErrOwnerDisabled), or at some grant's path lacks a privilege the grant
+// confers, or holds it without propagate for a propagating grant
+// (ErrOwnerLacksPrivileges). A grant's privileges are its pinned Privs, else
+// its role's (rolePrivs, from the preflight's role list).
+//
+// root@pam is exempt and nothing is read for it: PVE answers root with
+// Administrator's full privilege set at propagate 1 and applies no
+// intersection to its tokens. In today's SSH mode the SSH user IS the owner
+// and pveum refuses to run as anyone but root, so a non-root owner's run
+// already aborts at the preflight's role list; this check is what keeps a
+// run safe once the SSH user (root) and the owner differ.
+func checkOwner(ctx context.Context, rd ownerReader, owner string, want []Grant, rolePrivs map[string][]string) error {
+	if owner == "root@pam" {
+		return nil
+	}
+	active, err := rd.ownerActive(ctx, owner)
+	if err != nil {
+		return fmt.Errorf("check token owner %s: %w", owner, err)
+	}
+	if !active {
+		return fmt.Errorf("%w: %s; no token was touched", ErrOwnerDisabled, owner)
+	}
+	read := map[string]map[string]bool{}
+	for _, g := range want {
+		perms, ok := read[g.Path]
+		if !ok {
+			if perms, err = rd.ownerPerms(ctx, owner, g.Path); err != nil {
+				return fmt.Errorf("check token owner %s at %s: %w", owner, g.Path, err)
+			}
+			read[g.Path] = perms
+		}
+		privs := g.Privs
+		if privs == nil {
+			privs = rolePrivs[g.Role]
+		}
+		missing, flagOnly := ownerCovers(perms, g, privs)
+		if len(missing) > 0 || len(flagOnly) > 0 {
+			return fmt.Errorf("%w: %s at %s lacks [%s] and holds without propagate [%s]; no token was touched",
+				ErrOwnerLacksPrivileges, owner, g.Path, strings.Join(missing, ","), strings.Join(flagOnly, ","))
+		}
+	}
+	return nil
+}
+
+// ownerCovers compares an owner's privileges at g.Path (perms: privilege →
+// propagate) with privs, what g confers: missing are privileges the owner
+// lacks there; flagOnly are privileges it holds only without propagate,
+// when g propagates. Both sorted.
+func ownerCovers(perms map[string]bool, g Grant, privs []string) (missing, flagOnly []string) {
+	for _, p := range privs {
+		prop, ok := perms[p]
+		switch {
+		case !ok:
+			missing = append(missing, p)
+		case g.Propagate && !prop:
+			flagOnly = append(flagOnly, p)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(flagOnly)
+	return missing, flagOnly
+}
+
+// sshOwnerReader reads the owner through pveum over the preflight's session.
+type sshOwnerReader struct{ s SSHSession }
+
+func (r sshOwnerReader) ownerActive(ctx context.Context, owner string) (bool, error) {
+	var users []struct {
+		UserID string `json:"userid"`
+		Enable *int64 `json:"enable"`
+		Expire *int64 `json:"expire"`
+	}
+	if err := runJSONArray(ctx, r.s, "pveum user list --output-format json", &users); err != nil {
+		return false, err
+	}
+	i := indexFunc(len(users), func(i int) bool { return users[i].UserID == owner })
+	if i < 0 {
+		return false, errors.New("the owner is not in pveum's user list")
+	}
+	u := users[i]
+	if u.Enable == nil || u.Expire == nil {
+		return false, errors.New(`the owner's user list entry lacks "enable" or "expire"`)
+	}
+	expired := *u.Expire > 0 && *u.Expire <= time.Now().Unix()
+	return *u.Enable == 1 && !expired, nil
+}
+
+func (r sshOwnerReader) ownerPerms(ctx context.Context, owner, path string) (map[string]bool, error) {
+	cmd := fmt.Sprintf("pveum user permissions %s --path %s --output-format json", sshexec.ShellQuote(owner), sshexec.ShellQuote(path))
+	res, err := r.s.Run(ctx, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("run %s: %w", firstWords(cmd), err)
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("%s exited %d: %s", firstWords(cmd), res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	// Exactly {"<path>": {"<Priv>": 0|1, ...}}; an empty inner object is
+	// zero privileges. Errors give the byte length, never stdout.
+	trimmed := strings.TrimSpace(res.Stdout)
+	var tree map[string]map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &tree); err != nil || tree == nil {
+		return nil, fmt.Errorf("%s printed %d bytes that are not a permission object", firstWords(cmd), len(trimmed))
+	}
+	set, ok := tree[path]
+	if len(tree) != 1 || !ok || set == nil {
+		return nil, fmt.Errorf("%s: the answer is not keyed by exactly the requested path", firstWords(cmd))
+	}
+	perms := make(map[string]bool, len(set))
+	for name, v := range set {
+		if !privNameRE.MatchString(name) {
+			return nil, fmt.Errorf("%s: the answer holds a name that is not a privilege name", firstWords(cmd))
+		}
+		switch string(v) {
+		case "1", "true":
+			perms[name] = true
+		case "0", "false":
+			perms[name] = false
+		default:
+			return nil, fmt.Errorf("%s: privilege %s has a flag that is not 0/1/true/false", firstWords(cmd), name)
+		}
+	}
+	return perms, nil
+}
+
+// indexFunc returns the first i in [0, n) for which pred holds, or -1.
+func indexFunc(n int, pred func(int) bool) int {
+	for i := 0; i < n; i++ {
+		if pred(i) {
+			return i
+		}
+	}
+	return -1
 }
 
 // heldToken is what this roster holds for the target's token.
@@ -352,7 +553,10 @@ type runner struct {
 	session   SSHSession
 	ident     sshIdentity
 	fullID    string
-	res       *Result
+	// want is the requested grant list (requestedGrants): the grants
+	// issued, owner-checked, skip-checked and validated post-mint.
+	want []Grant
+	res  *Result
 	// removed: this run removed the roster-held token on PVE.
 	removed bool
 	// cleanupErr collects why a cleanup step left a token behind.
@@ -485,7 +689,7 @@ func (r *runner) validatePostMint(secret string) (verdict, nonVerdict error) {
 				return nil, r.ctx.Err()
 			}
 		}
-		err := r.api.ValidateTokenGrants(r.ctx, cfg, r.opts.Node)
+		err := r.api.ValidateTokenGrants(r.ctx, cfg, r.want)
 		switch {
 		case err == nil:
 			return nil, nil
@@ -529,7 +733,7 @@ func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) 
 		r.removeFresh()
 		return r.fail(fmt.Errorf("create token: %w", err))
 	}
-	if err := grantACL(r.ctx, r.session, r.fullID, r.opts.ACLPath, r.opts.ACLRole); err != nil {
+	if err := grantAll(r.ctx, r.session, r.fullID, r.want); err != nil {
 		r.removeFresh()
 		return r.fail(fmt.Errorf("grant acl: %w", err))
 	}
@@ -610,7 +814,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 		err := r.api.ValidateTokenGrants(r.ctx, APIConfig{
 			Host: r.opts.Host, APIPort: r.opts.APIPort, InsecureTLS: r.opts.InsecureTLS,
 			TokenID: held.ID, TokenSecret: held.Secret,
-		}, r.opts.Node)
+		}, r.want)
 		if err == nil {
 			r.res.TokenOutcome = OutcomeReused
 			r.res.Validation = ValidationVerified

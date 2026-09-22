@@ -74,7 +74,7 @@ func NewAPIValidator() APIValidator { return realAPIValidator{} }
 
 type realAPIValidator struct{}
 
-func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, expectNode string) error {
+func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, want []Grant) error {
 	c, err := pve.NewClient(pve.ClientConfig{
 		Host:        cfg.Host,
 		APIPort:     cfg.APIPort,
@@ -85,8 +85,51 @@ func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, 
 	if err != nil {
 		return fmt.Errorf("build pve client: %w", err)
 	}
-	return pve.ValidateTokenGrants(ctx, c, expectNode)
+	return pve.ValidateTokenGrants(ctx, c, toPVEGrants(want))
 }
+
+// Grant is one requested ACL grant for the bootstrapped token, mirroring
+// pve.Grant (deps.go owns the pve import): Role on Path, with Propagate;
+// Privs, when non-nil, pins the privileges the grant must confer instead of
+// the role's live definition.
+type Grant struct {
+	Path      string
+	Role      string
+	Propagate bool
+	Privs     []string
+}
+
+// Check reports whether g is well formed (pve.Grant.Check); a failure is
+// ErrInvalidGrant. Path must already be normalized (checkedACLPath).
+func (g Grant) Check() error { return toPVEGrant(g).Check() }
+
+// checkGrants reports whether want is a usable request (pve.CheckGrants).
+func checkGrants(want []Grant) error { return pve.CheckGrants(toPVEGrants(want)) }
+
+func toPVEGrant(g Grant) pve.Grant {
+	var privs []string
+	if g.Privs != nil {
+		privs = append([]string{}, g.Privs...)
+	}
+	return pve.Grant{Path: g.Path, Role: g.Role, Propagate: g.Propagate, Privs: privs}
+}
+
+// toPVEGrants translates want, keeping nil (unpinned) and non-nil (pinned)
+// Privs apart exactly.
+func toPVEGrants(want []Grant) []pve.Grant {
+	if want == nil {
+		return nil
+	}
+	out := make([]pve.Grant, len(want))
+	for i, g := range want {
+		out[i] = toPVEGrant(g)
+	}
+	return out
+}
+
+// ErrInvalidGrant: a requested grant is not well formed. It is refused
+// before any SSH and is never a verdict about a token.
+var ErrInvalidGrant = pve.ErrInvalidGrant
 
 // The verdict sentinels, aliased from internal/pve (never copied with
 // errors.New: a copy would make every verdict look like a non-verdict to
@@ -96,4 +139,5 @@ var (
 	ErrNoGrants      = pve.ErrNoGrants
 	ErrWrongScope    = pve.ErrWrongScope
 	ErrNotAuthorized = pve.ErrNotAuthorized
+	ErrScopeTooWide  = pve.ErrScopeTooWide
 )

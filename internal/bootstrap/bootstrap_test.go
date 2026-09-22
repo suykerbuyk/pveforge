@@ -260,22 +260,22 @@ type fakeValidator struct {
 	// test script "first call fails, second call succeeds" for the
 	// skip-recreate-then-fall-through path, without disturbing every
 	// existing single-call test that only sets err.
-	errs           []error
-	calls          int
-	lastCfg        APIConfig
-	lastExpectNode string
-	cfgsByCall     []APIConfig // every cfg passed, in call order
+	errs       []error
+	calls      int
+	lastCfg    APIConfig
+	cfgsByCall []APIConfig // every cfg passed, in call order
+	wants      [][]Grant   // every want passed, in call order
 	// onCall, if set, runs at the start of each call (0-indexed): tests use
 	// it to change the roster at an exact point in a run.
 	onCall func(call int)
 }
 
-func (v *fakeValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, expectNode string) error {
+func (v *fakeValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, want []Grant) error {
 	if v.onCall != nil {
 		v.onCall(v.calls)
 	}
 	v.lastCfg = cfg
-	v.lastExpectNode = expectNode
+	v.wants = append(v.wants, want)
 	v.cfgsByCall = append(v.cfgsByCall, cfg)
 	err := v.err
 	if len(v.errs) > 0 {
@@ -478,9 +478,9 @@ func TestRun_DefaultsHostNodeFromExistingRosterEntry(t *testing.T) {
 	if validator.lastCfg.Host != "qa-pve-01.example.com" {
 		t.Errorf("expected Host to be defaulted from the roster, validator saw Host=%q", validator.lastCfg.Host)
 	}
-	if validator.lastExpectNode != "qa-pve-01" {
-		t.Errorf("expected Node to be defaulted from the roster, validator saw expectNode=%q", validator.lastExpectNode)
-	}
+	// The node defaulted from the roster is checked by the preflight
+	// (TestRun_R6f_PreflightChecksTheRosterDefaultedNode); the validator no
+	// longer takes a node.
 }
 
 // TestRun_DefaultsAPIPortInsecureTLSFromExistingRosterEntry is the
@@ -645,6 +645,7 @@ func TestRun_ACLGrantFailure(t *testing.T) {
 }
 
 func TestRun_ValidationFailure_NoGrants(t *testing.T) {
+	fastRetries(t)
 	rosterPath := newTestRoster(t, "")
 	session := &fakeSession{byCmd: map[string]fakeRunResult{
 		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("s"), ExitCode: 0}},
@@ -652,11 +653,16 @@ func TestRun_ValidationFailure_NoGrants(t *testing.T) {
 	transport := &fakeTransport{installFingerprint: "SHA256:abc", session: session}
 	// A VERDICT (the ErrNoGrants alias): the fresh token must be removed
 	// and never persisted. A plain error is the non-verdict twin (R14).
+	// ErrNoGrants may be a fresh ACL's propagation lag, so it is retried
+	// the full bounded window first.
 	validator := &fakeValidator{err: fmt.Errorf("%w", ErrNoGrants)}
 
 	res, err := Run(context.Background(), baseOptions(rosterPath), transport, validator)
 	if err == nil {
 		t.Fatal("expected error when validation reports no grants")
+	}
+	if validator.calls != postMintAttempts {
+		t.Fatalf("want the post-mint window's %d attempts, got %d", postMintAttempts, validator.calls)
 	}
 	if res == nil || res.Validation != ValidationFailed || res.TokenOutcome != OutcomeDiscarded {
 		t.Fatalf("want validation=failed, outcome=discarded; got %+v", res)
