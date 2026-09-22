@@ -274,7 +274,7 @@ func TestBootstrap_C7_ErrorThroughRunRootIsOneLine(t *testing.T) {
 	tr := &fakeBootstrapTransport{installErr: errors.New("ssh: x\nwarning: forged")}
 	withBootstrapFakes(t, tr)
 	root := newRootCmd()
-	root.SetArgs([]string{"bootstrap", "qa-test", "--host", "h", "--node", "n"})
+	root.SetArgs([]string{"bootstrap", "qa-test", "--host", "h", "--node", "n", "--grant", "/:PVEVMAdmin::1"})
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	if code := runRoot(root, &stderr); code != 1 {

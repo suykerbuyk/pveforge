@@ -85,7 +85,7 @@ var (
 	// this roster does not hold it. It is never removed: it may be in use by
 	// another roster.
 	ErrTokenNotHeld = errors.New("an API token of this name already exists on PVE and this roster does not hold it")
-	// ErrInvalidACLPath: --acl-path is not a path PVE would accept.
+	// ErrInvalidACLPath: a grant's path is not a path PVE would accept.
 	ErrInvalidACLPath = errors.New("invalid ACL path")
 	// ErrTokenUndecryptable: the roster holds the requested token, it still
 	// exists on PVE, and its secret will not decrypt with the given
@@ -95,6 +95,13 @@ var (
 	// ErrRoleHasNoPrivileges: a requested role exists on PVE but grants
 	// nothing (NoAccess), so no token holding it could ever validate.
 	ErrRoleHasNoPrivileges = errors.New("the requested ACL role grants no privileges")
+	// ErrPinnedPrivsMismatch: a grant's pinned privileges are not exactly
+	// its role's privileges on PVE. An ACL confers the whole role, so a pin
+	// must equal it; for a single grant under a root owner any difference is
+	// certain to fail validation (a verdict, which on a re-run would revoke
+	// the held token and then fail to replace it). Refused before anything
+	// is removed, whatever the configuration. Not a verdict.
+	ErrPinnedPrivsMismatch = errors.New("a grant's pinned privileges differ from its role's privileges on PVE")
 	// ErrOwnerLacksPrivileges: the token's owner (a non-root user) does not
 	// itself hold what is requested. PVE intersects a privsep token's
 	// privileges with its owner's, so such a token could never validate;
@@ -145,7 +152,7 @@ var (
 // postMintAttempts bounds the post-mint validation loop.
 const postMintAttempts = 3
 
-// ---- --acl-path: exact mirrors of PVE's own checks ----
+// ---- grant paths: exact mirrors of PVE's own checks ----
 
 var (
 	aclPathCharsetRE = regexp.MustCompile(`^[[:alnum:]._/-]+$`)
@@ -299,6 +306,15 @@ func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, ow
 		}
 		rolePrivs[g.Role] = privs
 	}
+	for _, g := range want {
+		if g.Privs == nil {
+			continue
+		}
+		if missing, extra := setDiff(g.Privs, rolePrivs[g.Role]); len(missing) > 0 || len(extra) > 0 {
+			return false, fmt.Errorf("preflight: %w: %s at %s: pinned but not in the role [%s], in the role but not pinned [%s]; no token was touched",
+				ErrPinnedPrivsMismatch, g.Role, g.Path, strings.Join(missing, ","), strings.Join(extra, ","))
+		}
+	}
 	var nodes []struct {
 		Node string `json:"node"`
 	}
@@ -341,6 +357,29 @@ func parseRolePrivs(privs *string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// setDiff returns the members of a not in b and of b not in a, each sorted.
+func setDiff(a, b []string) (onlyA, onlyB []string) {
+	inA := make(map[string]bool, len(a))
+	for _, x := range a {
+		inA[x] = true
+	}
+	inB := make(map[string]bool, len(b))
+	for _, x := range b {
+		inB[x] = true
+		if !inA[x] {
+			onlyB = append(onlyB, x)
+		}
+	}
+	for _, x := range a {
+		if !inB[x] {
+			onlyA = append(onlyA, x)
+		}
+	}
+	sort.Strings(onlyA)
+	sort.Strings(onlyB)
+	return onlyA, onlyB
 }
 
 // ---- the owner check ----
@@ -758,6 +797,7 @@ func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) 
 		return r.fail(fmt.Errorf("persist token auth: %w", err))
 	}
 	r.res.TokenOutcome = successOutcome
+	r.res.Grants = copyGrants(r.want)
 	r.res.OrphanedToken = orphan
 	if err := persistTargetMetaFn(r.opts); err != nil {
 		return r.res, fmt.Errorf("bootstrap %s: %w", r.opts.TargetID, err)
@@ -817,6 +857,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 		}, r.want)
 		if err == nil {
 			r.res.TokenOutcome = OutcomeReused
+			r.res.Grants = copyGrants(r.want)
 			r.res.Validation = ValidationVerified
 			if err := persistTargetMetaFn(r.opts); err != nil {
 				return r.res, fmt.Errorf("bootstrap %s: %w", r.opts.TargetID, err)

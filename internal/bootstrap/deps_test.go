@@ -460,10 +460,12 @@ func TestRealAPIValidator_D1_SentinelsAreTheAliases(t *testing.T) {
 	}
 }
 
-// VR1: the default grant (PVEVMAdmin on /, propagating) against today's
-// live root@pam!pveforge tree validates nil through the production wiring
-// (translation, TLS client, RawRequest), so a default-flag reconnect keeps
-// reusing today's token.
+// VR1: today's effective grant (PVEVMAdmin on /, propagating), now stated
+// explicitly as --grant /:PVEVMAdmin::1, against today's live
+// root@pam!pveforge tree validates nil through the production wiring
+// (translation, TLS client, RawRequest), so that re-run keeps reusing
+// today's token. VR1b: the same grant without propagate (the --grant
+// default) is ErrScopeTooWide, which on a re-run would revoke it.
 func TestRealAPIValidator_VR1_DefaultGrantAgainstLiveTree(t *testing.T) {
 	read := func(name string) string {
 		b, err := os.ReadFile("../pve/testdata/permissions/" + name)
@@ -480,17 +482,22 @@ func TestRealAPIValidator_VR1_DefaultGrantAgainstLiveTree(t *testing.T) {
 	cfg := d1Server(t, http.StatusOK, `{"data":`+tree+`}`,
 		map[string]string{"/": `{"data":{"/":` + string(parsed["/"]) + `}}`},
 		map[string]string{"PVEVMAdmin": `{"data":` + read("role-pvevmadmin.json") + `}`})
-	o := applied(Options{})
-	want := requestedGrants(o)
-	if err := NewAPIValidator().ValidateTokenGrants(context.Background(), cfg, want); err != nil {
-		t.Fatalf("the default grant against the live tree: %v", err)
+	want, err := ParseGrants([]string{"/:PVEVMAdmin::1"})
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// applied returns o with applyDefaults run.
-func applied(o Options) Options {
-	applyDefaults(&o)
-	return o
+	if err := NewAPIValidator().ValidateTokenGrants(context.Background(), cfg, want); err != nil {
+		t.Fatalf("/:PVEVMAdmin::1 against the live tree: %v", err)
+	}
+	t.Run("VR1b propagate 0 is too wide for the live token", func(t *testing.T) {
+		want, err := ParseGrants([]string{"/:PVEVMAdmin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := NewAPIValidator().ValidateTokenGrants(context.Background(), cfg, want); !errors.Is(err, ErrScopeTooWide) {
+			t.Fatalf("/:PVEVMAdmin (propagate 0) against the live tree: want ErrScopeTooWide, got %v", err)
+		}
+	})
 }
 
 // The translation keeps all four fields, and nil (unpinned) apart from

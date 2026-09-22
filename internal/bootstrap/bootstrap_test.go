@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -307,8 +308,13 @@ func baseOptions(rosterPath string) Options {
 		PVEUsername: "root@pam",
 		PVEPassword: "hunter2",
 		TokenID:     "pveforge",
-		RosterPath:  rosterPath,
-		Passphrase:  "roster-pass",
+		// Today's effective grant, stated explicitly: there is no default
+		// any more, and every Run test built on baseOptions keeps meaning
+		// what it meant before bootstrap failed closed. A fail-closed test
+		// clears it explicitly.
+		Grants:     []Grant{{Path: "/", Role: "PVEVMAdmin", Propagate: true}},
+		RosterPath: rosterPath,
+		Passphrase: "roster-pass",
 	}
 }
 
@@ -1764,19 +1770,18 @@ func TestApplyDefaults(t *testing.T) {
 	if o.SSHPort != 22 {
 		t.Errorf("SSHPort = %d, want 22", o.SSHPort)
 	}
-	if o.ACLPath != "/" {
-		t.Errorf("ACLPath = %q, want /", o.ACLPath)
-	}
-	if o.ACLRole != "PVEVMAdmin" {
-		t.Errorf("ACLRole = %q, want PVEVMAdmin", o.ACLRole)
+	// MG1: no default grant, ever: bootstrap fails closed.
+	if o.Grants != nil {
+		t.Errorf("Grants = %#v, want nil (no default grant)", o.Grants)
 	}
 	if o.PVEUsername != "root@pam" {
 		t.Errorf("PVEUsername = %q, want root@pam", o.PVEUsername)
 	}
 
-	o2 := Options{SSHPort: 2222, ACLPath: "/vms", ACLRole: "Custom", PVEUsername: "alice@pam"}
+	grants := []Grant{{Path: "/vms", Role: "Custom", Privs: []string{"VM.Audit"}}}
+	o2 := Options{SSHPort: 2222, Grants: grants, PVEUsername: "alice@pam"}
 	applyDefaults(&o2)
-	if o2.SSHPort != 2222 || o2.ACLPath != "/vms" || o2.ACLRole != "Custom" || o2.PVEUsername != "alice@pam" {
+	if o2.SSHPort != 2222 || !reflect.DeepEqual(o2.Grants, []Grant{{Path: "/vms", Role: "Custom", Privs: []string{"VM.Audit"}}}) || o2.PVEUsername != "alice@pam" {
 		t.Errorf("applyDefaults overwrote explicitly set fields: %+v", o2)
 	}
 }
