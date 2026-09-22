@@ -15,20 +15,56 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
-// fakePVE is the token state a fake PVE host holds: which token names
-// exist. It is shared between a run's original session and any session a
+// fakePVE is the token state a fake PVE host holds, keyed by FULL token id
+// ("<userid>!<name>"), the way real PVE holds it: `pveum user token list`
+// answers per userid, and two principals may each own a token of the same
+// name. It is shared between a run's original session and any session a
 // reconnect returns, so a re-read sees what an add or remove did.
+//
+// Read it through has/hasName ONLY. Indexing tokens directly by a bare name
+// silently asks about an id this map never holds, so the clause is false
+// whether or not the token exists — an assertion that cannot fail.
 type fakePVE struct {
 	tokens map[string]bool
 }
 
+// fakeDefaultOwner is the owner newFakePVE's shorthand means, and the owner
+// baseOptions bootstraps as.
+const fakeDefaultOwner = "root@pam"
+
+// newFakePVE seeds tokens. An entry containing "!" is a full id; a bare
+// name is shorthand for fakeDefaultOwner's token of that name. Any test
+// that involves another owner must pass full ids, or use newFakePVEFor.
 func newFakePVE(present ...string) *fakePVE {
 	p := &fakePVE{tokens: map[string]bool{}}
 	for _, t := range present {
+		if !strings.Contains(t, "!") {
+			t = fakeDefaultOwner + "!" + t
+		}
 		p.tokens[t] = true
 	}
 	return p
 }
+
+// newFakePVEFor seeds names as tokens of owner, stating the owner where it
+// matters instead of relying on the shorthand.
+func newFakePVEFor(owner string, names ...string) *fakePVE {
+	p := &fakePVE{tokens: map[string]bool{}}
+	for _, n := range names {
+		p.tokens[owner+"!"+n] = true
+	}
+	return p
+}
+
+// has reports whether the full token id exists on this fake host.
+func (p *fakePVE) has(fullID string) bool { return p.tokens[fullID] }
+
+// hasName reports whether owner holds a token of this name.
+func (p *fakePVE) hasName(owner, name string) bool { return p.has(owner + "!" + name) }
+
+// put marks the full token id as existing, for a test that has to seed
+// state mid-run (an add whose effect landed on the host).
+func (p *fakePVE) put(fullID string) { p.tokens[fullID] = true }
 
 // fakeSession is a scriptable SSHSession. A command is answered by the
 // longest byCmd prefix that matches it (deterministic, unlike map order);
@@ -71,14 +107,25 @@ func (s *fakeSession) state() *fakePVE {
 	return s.pve
 }
 
-// tokenArg returns the token name argument of a pveum token command:
-// "pveum user token add|remove <user> <token> ..." (field 5).
-func tokenArg(cmd string) string {
+// tokenFullID returns the full token id a pveum token command addresses:
+// "pveum user token add|remove <userid> <name> ..." (fields 4 and 5),
+// joined as real PVE identifies a token.
+func tokenFullID(cmd string) string {
 	f := strings.Fields(cmd)
 	if len(f) < 6 {
 		return ""
 	}
-	return strings.Trim(f[5], "'")
+	return strings.Trim(f[4], "'") + "!" + strings.Trim(f[5], "'")
+}
+
+// tokenListUser returns the userid "pveum user token list <userid> ..."
+// asks about (field 4).
+func tokenListUser(cmd string) string {
+	f := strings.Fields(cmd)
+	if len(f) < 5 {
+		return ""
+	}
+	return strings.Trim(f[4], "'")
 }
 
 func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
@@ -120,9 +167,9 @@ func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
 	apply := func() {
 		switch {
 		case strings.HasPrefix(cmd, "pveum user token add"):
-			st.tokens[tokenArg(cmd)] = true
+			st.tokens[tokenFullID(cmd)] = true
 		case strings.HasPrefix(cmd, "pveum user token remove"):
-			delete(st.tokens, tokenArg(cmd))
+			delete(st.tokens, tokenFullID(cmd))
 		}
 	}
 	if match != nil {
@@ -137,9 +184,14 @@ func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
 	case strings.HasPrefix(cmd, "pvesh get /nodes"):
 		return RunResult{Stdout: `[{"node":"qa-pve-01","status":"online"}]`}, nil
 	case strings.HasPrefix(cmd, "pveum user token list"):
+		// Real pveum lists one userid's tokens, and prints each tokenid as
+		// the bare name.
+		prefix := tokenListUser(cmd) + "!"
 		names := make([]string, 0, len(st.tokens))
-		for n := range st.tokens {
-			names = append(names, n)
+		for id := range st.tokens {
+			if n, ok := strings.CutPrefix(id, prefix); ok {
+				names = append(names, n)
+			}
 		}
 		sort.Strings(names)
 		var b strings.Builder
@@ -707,6 +759,8 @@ func TestRun_RosterWriteFailure_MissingRosterFile(t *testing.T) {
 	}
 }
 
+// A non-@pam realm is refused for the LOGIN only. The same realm is
+// exactly what a token OWNER is for (TestRun_BT1_OwnerAndLoginAreSplit).
 func TestRun_RejectsNonPamRealm(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	opts := baseOptions(rosterPath)
@@ -733,8 +787,14 @@ func TestRun_BareUsernameAssumesPam(t *testing.T) {
 	transport := &fakeTransport{installFingerprint: "SHA256:abc", session: session}
 	validator := &fakeValidator{}
 
-	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
+	res, err := Run(context.Background(), opts, transport, validator)
+	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	// The OWNER defaults from the canonical login, so the token is added
+	// for root@pam and its id says so.
+	if res.TokenID != "root@pam!pveforge" || !session.ran("pveum user token add 'root@pam' 'pveforge'") {
+		t.Fatalf("token id = %q, commands = %v", res.TokenID, session.commands)
 	}
 }
 
@@ -1016,7 +1076,9 @@ func TestRun_SkipsTokenRecreateWhenExistingTokenValid(t *testing.T) {
 // against the defect a second, independent review found in
 // trySkipTokenRecreate: it validated whatever token id was already
 // persisted in the roster without ever comparing it to what THIS
-// invocation actually requested (opts.PVEUsername+"!"+opts.TokenID). A
+// invocation actually requested (opts.TokenOwner+"!"+opts.TokenID). This
+// test varies the token NAME with one owner; TestRun_BT5_OwnerChangeOrphans
+// varies the OWNER with one name. A
 // target bootstrapped once with --token-id pveforge, then retried with
 // --token-id pveforge-2 (rotation, or a differently-named admin token),
 // must actually create pveforge-2 — the still-healthy OLD token must
@@ -1777,11 +1839,24 @@ func TestApplyDefaults(t *testing.T) {
 	if o.PVEUsername != "root@pam" {
 		t.Errorf("PVEUsername = %q, want root@pam", o.PVEUsername)
 	}
+	// MB15: the owner defaults to the login, so a caller that names none
+	// still addresses a principal.
+	if o.TokenOwner != "root@pam" {
+		t.Errorf("TokenOwner = %q, want root@pam", o.TokenOwner)
+	}
+
+	// MB10: the owner is defaulted from the CANONICAL login, so a bare
+	// --pve-user root owns as root@pam, never as the invalid "root".
+	bare := Options{PVEUsername: "root"}
+	applyDefaults(&bare)
+	if bare.TokenOwner != "root@pam" {
+		t.Errorf("TokenOwner = %q for a bare login, want root@pam", bare.TokenOwner)
+	}
 
 	grants := []Grant{{Path: "/vms", Role: "Custom", Privs: []string{"VM.Audit"}}}
-	o2 := Options{SSHPort: 2222, Grants: grants, PVEUsername: "alice@pam"}
+	o2 := Options{SSHPort: 2222, Grants: grants, PVEUsername: "alice@pam", TokenOwner: "harness@pve"}
 	applyDefaults(&o2)
-	if o2.SSHPort != 2222 || !reflect.DeepEqual(o2.Grants, []Grant{{Path: "/vms", Role: "Custom", Privs: []string{"VM.Audit"}}}) || o2.PVEUsername != "alice@pam" {
+	if o2.SSHPort != 2222 || !reflect.DeepEqual(o2.Grants, []Grant{{Path: "/vms", Role: "Custom", Privs: []string{"VM.Audit"}}}) || o2.PVEUsername != "alice@pam" || o2.TokenOwner != "harness@pve" {
 		t.Errorf("applyDefaults overwrote explicitly set fields: %+v", o2)
 	}
 }

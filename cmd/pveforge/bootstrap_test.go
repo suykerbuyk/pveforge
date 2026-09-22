@@ -69,6 +69,27 @@ func TestNewBootstrapCmd_GrantFlagWarnsOfRevocation(t *testing.T) {
 	}
 }
 
+// U-B: --token-owner states that it is not the SSH login, that a non-root
+// owner must hold the whole role, and what a change does to the held token.
+func TestNewBootstrapCmd_TokenOwnerFlagIsExplained(t *testing.T) {
+	u := newBootstrapCmd().Flags().Lookup("token-owner").Usage
+	for _, want := range []string{
+		"name@realm",
+		"default: --pve-user",
+		"not the SSH login",
+		"whole role at each granted path",
+		"held by nobody (orphaned_token), never revoked",
+		"omitting it when the roster holds another owner's token is refused",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("--token-owner help does not say %q: %q", want, u)
+		}
+	}
+	if pu := newBootstrapCmd().Flags().Lookup("pve-user").Usage; !strings.Contains(pu, "SSH LOGIN") || !strings.Contains(pu, "--token-owner") {
+		t.Errorf("--pve-user help does not point at --token-owner: %q", pu)
+	}
+}
+
 func TestNewBootstrapCmd_FlagDefaults(t *testing.T) {
 	cmd := newBootstrapCmd()
 	cases := map[string]string{
@@ -77,6 +98,7 @@ func TestNewBootstrapCmd_FlagDefaults(t *testing.T) {
 		"pve-user":     "root@pam",
 		"token-id":     "pveforge",
 		"grant":        "[]",
+		"token-owner":  "",
 		"insecure-tls": "false",
 		"roster":       "",
 	}

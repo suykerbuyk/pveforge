@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -110,12 +111,24 @@ type Options struct {
 	InsecureTLS bool
 	SSHPort     int // 0 => 22
 
-	// PVEUsername is a PAM/realm username, e.g. "root@pam". Only @pam (or
-	// bare, defaulting to pam: "root" becomes "root@pam") realm users are
-	// supported — anything else has no corresponding SSH-reachable Linux
-	// system account.
+	// PVEUsername is the SSH LOGIN: a PAM/realm username, e.g. "root@pam".
+	// Only @pam (or bare, defaulting to pam: "root" becomes "root@pam")
+	// realm users are supported — anything else has no corresponding
+	// SSH-reachable Linux system account. The token's OWNER is TokenOwner.
 	PVEUsername string
 	PVEPassword string
+
+	// TokenOwner is the PVE principal that owns the token, e.g.
+	// "pveforge-harness@pve". It is NOT a Linux login and needs no SSH
+	// account: the run logs in as PVEUsername and addresses this principal
+	// with pveum. Empty means the login itself (applyDefaults), which is
+	// what every roster written before token owners existed holds.
+	//
+	// Changing it deliberately leaves the previous token live on PVE, held
+	// by no roster, reported as Result.OrphanedToken and never revoked. An
+	// ACCIDENTAL change — the roster holds another principal's token and no
+	// owner was given — is refused before any SSH (ErrTokenOwnerMismatch).
+	TokenOwner string
 
 	// TokenID is the token's own name (not including the userid prefix),
 	// e.g. "pveforge" -> full token id "root@pam!pveforge".
@@ -227,7 +240,14 @@ type Result struct {
 // target on one roster cannot interleave remove and add (tokens are removed
 // by name, so an interleaving could revoke the other run's fresh token).
 func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValidator) (*Result, error) {
+	// Whether the caller named an owner, captured before applyDefaults
+	// fills it in: an owner that merely defaulted may not silently re-point
+	// a roster that holds another principal's token (checkHeldTokenOwner).
+	ownerGiven := opts.TokenOwner != ""
 	applyDefaults(&opts)
+	if err := CheckTokenOwner(opts.TokenOwner); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
 	// The one requested grant list: issued, owner-checked, skip-checked and
 	// validated post-mint as this same value. Checked first, before the
 	// roster is read, the lock taken or any SSH: bootstrap fails closed
@@ -255,8 +275,14 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 
+	// The roster's token must belong to the principal this run addresses,
+	// unless the caller deliberately said otherwise. Before any SSH.
+	if err := checkHeldTokenOwner(opts, ownerGiven); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+
 	addr := fmt.Sprintf("%s:%d", opts.Host, opts.SSHPort)
-	fullTokenID := opts.PVEUsername + "!" + opts.TokenID
+	fullTokenID := opts.TokenOwner + "!" + opts.TokenID
 
 	existing, err := loadExistingSSHAuth(opts)
 	if err != nil {
@@ -428,6 +454,11 @@ func applyDefaults(opts *Options) {
 	// bare "root" would build the invalid token id "root!pveforge".
 	if !strings.Contains(opts.PVEUsername, "@") {
 		opts.PVEUsername += "@pam"
+	}
+	// The owner defaults to the login, AFTER that canonicalization: a bare
+	// --pve-user root owns its token as root@pam, never as "root".
+	if opts.TokenOwner == "" {
+		opts.TokenOwner = opts.PVEUsername
 	}
 }
 
@@ -627,6 +658,105 @@ func copyGrants(gs []Grant) []Grant {
 		}
 	}
 	return out
+}
+
+// The token owner's shape, as PVE's own PVE::Auth::Plugin::verify_username
+// takes it: <name>@<realm>, split on "@".
+//
+// The NAME rule is a denial list, not an allowlist: PVE accepts [^\s:/]+
+// there, so real userids carry "$" (an AD machine account) or "+", and
+// refusing those would be pveforge's bug rather than PVE's. What must be
+// refused is "!", the separator fullTokenID concatenates with: an owner
+// holding one would build a token id the operator never asked for, and
+// would make every held.ID comparison meaningless. Whitespace, ":" and "/"
+// PVE itself refuses.
+//
+// Two deliberate, fail-closed deviations from PVE: PVE splits on the LAST
+// "@", so it accepts "a@b@pve", and its name charset admits "!". Both are
+// refused here.
+var (
+	tokenOwnerNameRE  = regexp.MustCompile(`^[^\s:/!@]+$`)
+	tokenOwnerRealmRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.\-_]+$`)
+)
+
+// CheckTokenOwner reports whether owner is a PVE principal pveforge can own
+// a token with. There is no @pam canonicalization: --pve-user is a Linux
+// login whose realm is pam by construction, while an owner is any PVE
+// principal, and guessing a realm would address a different user.
+func CheckTokenOwner(owner string) error {
+	name, realm, found := strings.Cut(owner, "@")
+	if !found {
+		return fmt.Errorf("%w: %q: an owner needs its realm, as name@realm", ErrInvalidTokenOwner, owner)
+	}
+	if !tokenOwnerNameRE.MatchString(name) {
+		return fmt.Errorf("%w: %q: the user name is empty or holds a character PVE (or a token id) would not accept", ErrInvalidTokenOwner, owner)
+	}
+	if !tokenOwnerRealmRE.MatchString(realm) {
+		return fmt.Errorf("%w: %q: the realm must start with a letter and be at least two characters", ErrInvalidTokenOwner, owner)
+	}
+	return nil
+}
+
+// heldTokenID returns the token id this target's roster entry holds, or ""
+// when it holds none (including a target with no entry yet: a first
+// bootstrap). It decrypts NOTHING — only the id is read, so an
+// undecryptable secret still reaches its own path (ErrTokenUndecryptable),
+// mirroring loadExistingSSHAuth's "decrypt only what you need".
+func heldTokenID(opts Options) (string, error) {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return "", fmt.Errorf("load roster %s: %w", opts.RosterPath, err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil || tg.Token == nil {
+		return "", nil
+	}
+	return tg.Token.ID, nil
+}
+
+// checkHeldTokenOwner refuses an ACCIDENTAL change of principal: the roster
+// holds a token owned by someone other than the owner this run defaulted
+// to, and the caller named no owner. Nothing persists the owner (unlike
+// host/node/port/TLS, which defaultHostNodeFromRoster restores), so without
+// this a forgotten --token-owner would silently mint under a different
+// principal, orphan the roster's token and re-point the roster at the new
+// one.
+//
+// A caller that DID name an owner keeps the deliberate behaviour: the old
+// token is orphaned, never revoked (tokenPhase's changed-id branch).
+//
+// It is not a verdict: it is in neither classification table, so it can
+// never lead to a remove.
+func checkHeldTokenOwner(opts Options, ownerGiven bool) error {
+	if ownerGiven {
+		return nil
+	}
+	heldID, err := heldTokenID(opts)
+	if err != nil || heldID == "" {
+		return err
+	}
+	heldOwner, heldName, found := strings.Cut(heldID, "!")
+	if found && heldOwner == opts.TokenOwner {
+		return nil
+	}
+	// A held id that names no owner — no "!" at all ("pveforge"), or an
+	// empty owner part ("!pveforge") — cannot be proven to match, so it is
+	// refused too. It has no principal to offer back: suggesting
+	// "--token-owner <the whole id>", or an empty one, would only earn a
+	// CheckTokenOwner refusal. Ask for one explicitly instead. (No roster
+	// this code ever wrote looks so; a hand edit can.)
+	if !found || heldOwner == "" {
+		return fmt.Errorf("%w: the roster holds %q, which names no owner, so pveforge cannot tell whose token it is; this run would address %s: pass --token-owner explicitly, as name@realm, to say which principal holds this target's token",
+			ErrTokenOwnerMismatch, heldID, opts.TokenOwner+"!"+opts.TokenID)
+	}
+	also := ""
+	if heldName != opts.TokenID {
+		also = fmt.Sprintf(" (the token name differs too: the roster holds %q, this run asks for %q)", heldName, opts.TokenID)
+	}
+	// The pairing is the whole remedy: the HELD owner keeps the token,
+	// the DEFAULTED owner changes principal (and orphans it).
+	return fmt.Errorf("%w: the roster holds %s, but this run would address %s%s; pass --token-owner %s to keep addressing that principal, or --token-owner %s to change it deliberately (which leaves %s live on PVE, held by nobody)",
+		ErrTokenOwnerMismatch, heldID, opts.TokenOwner+"!"+opts.TokenID, also, heldOwner, opts.TokenOwner, heldID)
 }
 
 // grantHint is the syntax a refused or missing --grant points at.

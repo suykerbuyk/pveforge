@@ -69,6 +69,24 @@ func TestBootstrap_AT1c_NoGrantFailsBeforeAnyPromptOrSeam(t *testing.T) {
 	}
 }
 
+// B-T8 (MB11): a --token-owner pveforge cannot own a token with fails
+// before the roster path, both secret prompts and the seams — like a bad
+// --grant. MUST STAY SERIAL (it swaps os.Stdin, via withCountingSeams).
+func TestBootstrap_BT8_BadOwnerFailsBeforeAnyPromptOrSeam(t *testing.T) {
+	c := withCountingSeams(t)
+	code, stderr := runBootstrapArgs(t, "--grant", "/:PVEVMAdmin::1", "--token-owner", "a!b@pve")
+	if code == 0 {
+		t.Fatal("exit 0 with a bad --token-owner")
+	}
+	if !strings.Contains(stderr, "invalid token owner") ||
+		strings.Contains(stderr, "passphrase") || strings.Contains(stderr, "PVE password") {
+		t.Fatalf("stderr = %q, want the owner error and no secret prompt", stderr)
+	}
+	if c.transport != 0 || c.validator != 0 {
+		t.Fatalf("seams constructed: %+v", *c)
+	}
+}
+
 // A-T9: --acl-path and --acl-role are gone: cobra's unknown-flag error,
 // no prompt, no seam (one row per flag). MUST STAY SERIAL (os.Stdin).
 func TestBootstrap_AT9_RemovedFlagsAreUnknown(t *testing.T) {

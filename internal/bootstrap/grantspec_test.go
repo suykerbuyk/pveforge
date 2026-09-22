@@ -518,7 +518,7 @@ func TestRun_AACC_D5Grants(t *testing.T) {
 		s.opts.TokenID = "build"
 		s.opts.Grants = grants
 		before := rosterBytes(t, s.path)
-		session := &fakeSession{pve: newFakePVE("build"), byCmd: map[string]fakeRunResult{"pveum role list": {res: RunResult{Stdout: widened}}}}
+		session := &fakeSession{pve: newFakePVEFor(fakeDefaultOwner, "build"), byCmd: map[string]fakeRunResult{"pveum role list": {res: RunResult{Stdout: widened}}}}
 		v := &fakeValidator{errs: []error{fmt.Errorf("%w", ErrScopeTooWide), nil}}
 		_, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, v)
 		assertPinRefused(t, err, session, v, !reflect.DeepEqual(before, rosterBytes(t, s.path)), "/pool/pveforge-harness")
