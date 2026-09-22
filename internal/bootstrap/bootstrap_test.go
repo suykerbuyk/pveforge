@@ -246,9 +246,17 @@ func (s *fakeSession) mutating() []string {
 // fakeTransport is a scriptable SSHTransport.
 type fakeTransport struct {
 	installFingerprint string
-	installErr         error
-	dialErr            error
-	reconnectErr       error
+	// the keyless path (U-C)
+	dialPWFingerprint string
+	dialPWErr         error
+	dialPWCalls       int
+	dialPWPins        []string
+	dialPWPasswords   []string
+	dialPWUsers       []string
+	dialPWAddrs       []string
+	installErr        error
+	dialErr           error
+	reconnectErr      error
 	// reconnectErrs, if set, overrides reconnectErr per call (0-indexed; a
 	// call beyond its length reuses reconnectErr).
 	reconnectErrs []error
@@ -273,6 +281,29 @@ func (t *fakeTransport) InstallPubkeyViaPassword(_ context.Context, addr, user, 
 		return "", t.installErr
 	}
 	return t.installFingerprint, nil
+}
+
+// DialWithPassword is the keyless path's fake (U-C). It records the pin it
+// was asked for, the password and the user, so a test can assert that the
+// first call trusts on first use and a redial is pinned to what that call
+// captured.
+func (t *fakeTransport) DialWithPassword(_ context.Context, addr, user, password, pin string) (SSHSession, string, error) {
+	t.dialPWCalls++
+	t.dialPWPins = append(t.dialPWPins, pin)
+	t.dialPWPasswords = append(t.dialPWPasswords, password)
+	t.dialPWUsers = append(t.dialPWUsers, user)
+	t.dialPWAddrs = append(t.dialPWAddrs, addr)
+	if err := t.dialPWErr; err != nil && t.dialPWCalls == 1 {
+		return nil, "", err
+	}
+	fp := t.dialPWFingerprint
+	if pin != "" {
+		fp = pin
+	}
+	if t.dialPWCalls > 1 && t.reconnectSession != nil {
+		return t.reconnectSession, fp, nil
+	}
+	return t.session, fp, nil
 }
 
 func (t *fakeTransport) DialWithKey(_ context.Context, addr, user string, privateKeyPEM []byte, hostKeyFingerprint string) (SSHSession, error) {

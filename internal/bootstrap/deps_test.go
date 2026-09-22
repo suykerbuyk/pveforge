@@ -549,3 +549,53 @@ func TestGrantCheckDelegates(t *testing.T) {
 		t.Errorf("two grants on one path: %v", err)
 	}
 }
+
+// C-T7 (U-C): the real keyless adapter against the same fake server.
+// pin "" trusts on first use and returns the fingerprint
+// InstallPubkeyViaPassword captures for the same host; that fingerprint,
+// passed back as pin, is accepted; a different one is refused at the
+// handshake (MK15, MK16). There is deliberately no pre-dial shape check,
+// so no row for a malformed pin: "" MEANS trust-on-first-use here.
+func TestRealSSHTransport_DialWithPassword(t *testing.T) {
+	fs := newDepsFakeSSHServer(t)
+	fs.setPassword("hunter2")
+	fs.setHandleExec(func(cmd string) (string, string, int) { return "ran: " + cmd, "", 0 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	transport := NewSSHTransport()
+
+	installFP, err := transport.InstallPubkeyViaPassword(ctx, fs.addr, "root", "hunter2", "ssh-ed25519 AAAAtest comment")
+	if err != nil {
+		t.Fatalf("InstallPubkeyViaPassword: %v", err)
+	}
+
+	session, fp, err := transport.DialWithPassword(ctx, fs.addr, "root", "hunter2", "")
+	if err != nil {
+		t.Fatalf("DialWithPassword (tofu): %v", err)
+	}
+	if fp != installFP {
+		t.Fatalf("the captured fingerprint %q differs from the install path's %q", fp, installFP)
+	}
+	res, err := session.Run(ctx, "echo hi")
+	if err != nil || res.Stdout != "ran: echo hi" {
+		t.Fatalf("Run: %+v, %v", res, err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	pinned, fp2, err := transport.DialWithPassword(ctx, fs.addr, "root", "hunter2", fp)
+	if err != nil {
+		t.Fatalf("DialWithPassword (pinned to the captured key): %v", err)
+	}
+	if fp2 != fp {
+		t.Fatalf("the pinned dial returned %q, want the pin %q", fp2, fp)
+	}
+	_ = pinned.Close()
+
+	other := "SHA256:" + strings.Repeat("A", 43)
+	if _, _, err := transport.DialWithPassword(ctx, fs.addr, "root", "hunter2", other); err == nil {
+		t.Fatal("a dial pinned to a different host key was accepted")
+	}
+}

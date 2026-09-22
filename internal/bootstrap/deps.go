@@ -44,6 +44,34 @@ func (realSSHTransport) ReconnectWithPinnedKey(ctx context.Context, addr, user s
 	return dialPinned(ctx, addr, user, privateKeyPEM, hostKeyFingerprint)
 }
 
+// DialWithPassword is the keyless path's one-shot password session. It is
+// dialPinned's password twin: pin == "" captures the presented host key
+// (trust-on-first-use, as InstallPubkeyViaPassword does) and returns its
+// fingerprint; a non-empty pin is enforced with PinnedHostKeyCallback and
+// returned unchanged, so a redial inside one run cannot reach another host.
+//
+// There is deliberately no pre-dial shape check on pin: "" MEANS
+// trust-on-first-use here, and PinnedHostKeyCallback compares strings, so a
+// malformed fingerprint fails at the handshake exactly as a mismatch does.
+func (realSSHTransport) DialWithPassword(ctx context.Context, addr, user, password, pin string) (SSHSession, string, error) {
+	var captured sshexec.CapturedHostKey
+	cb := sshexec.CaptureHostKeyCallback(&captured)
+	if pin != "" {
+		var err error
+		if cb, err = sshexec.PinnedHostKeyCallback(pin); err != nil {
+			return nil, "", fmt.Errorf("dial with password: %w", err)
+		}
+	}
+	c, err := sshexec.DialWithPassword(ctx, addr, user, password, cb)
+	if err != nil {
+		return nil, "", err
+	}
+	if pin != "" {
+		return &realSSHSession{c: c}, pin, nil
+	}
+	return &realSSHSession{c: c}, captured.Fingerprint(), nil
+}
+
 func dialPinned(ctx context.Context, addr, user string, privateKeyPEM []byte, hostKeyFingerprint string) (SSHSession, error) {
 	cb, err := sshexec.PinnedHostKeyCallback(hostKeyFingerprint)
 	if err != nil {
