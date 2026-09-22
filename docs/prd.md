@@ -207,6 +207,25 @@ token-authenticated" using only credentials an operator already has:
 3. Generate a scoped API token via the PVE API (or `pveum` locally over the
    freshly-installed SSH key) and persist it into the target's roster entry
    (§4), encrypted.
+   - **The scope is explicit; there is no default.** `bootstrap` refuses to
+     run without at least one `--grant PATH:ROLE[:PRIVS[:PROPAGATE]]`
+     (repeatable), and checks that before it prompts for any secret or
+     touches the target. Each grant is ROLE on PATH with its own propagate
+     flag, **defaulting to 0**. The optional PRIVS pins exactly the role's
+     privileges; a pin that differs from the role's definition on PVE is
+     refused before any existing token is touched.
+   - The token is then validated by its effective permissions: it must hold
+     every requested grant and reach no further, within the validator's
+     stated known limits (`internal/pve/validate.go`: e.g. pool membership
+     is not read, and delegations on pool members are not seen). On success the granted
+     scope is printed with the result (`grants`), only when a token
+     survives the run.
+   - Re-running with grants whose paths or privileges differ from the held
+     token's effective grants revokes that token (for every holder) and
+     then tries to mint a replacement (if that fails, the run ends
+     `revoked_not_replaced`). Note that propagate now defaults to 0: a token
+     granted `PVEVMAdmin` on `/` with propagate 1 must be re-requested as
+     `--grant /:PVEVMAdmin::1` to be kept.
 4. From that point forward, default to token auth for everything token auth
    can do.
 

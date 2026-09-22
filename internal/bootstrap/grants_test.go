@@ -13,10 +13,10 @@ import (
 // ---- the single want: issued, skip-checked and validated as one value ----
 
 // R18 / R6h-b: the grant bootstrap issues is exactly want[0], built from the
-// NORMALIZED --acl-path, and the post-mint validator gets that same want.
+// NORMALIZED grant path, and the post-mint validator gets that same want.
 func TestRun_R18_IssuedGrantIsTheValidatedWant(t *testing.T) {
 	opts := baseOptions(newTestRoster(t, ""))
-	opts.ACLPath = "pool/p/"
+	opts.Grants = []Grant{{Path: "pool/p/", Role: "PVEVMAdmin", Propagate: true}}
 	session := &fakeSession{}
 	v := &fakeValidator{}
 	if _, err := Run(context.Background(), opts, &fakeTransport{installFingerprint: "SHA256:abc", session: session}, v); err != nil {
@@ -40,7 +40,7 @@ func TestRun_R18_IssuedGrantIsTheValidatedWant(t *testing.T) {
 // R19: the skip-check and the post-mint validation get the same want.
 func TestRun_R19_SkipCheckAndPostMintShareWant(t *testing.T) {
 	s := seedRoster(t, heldID, "")
-	s.opts.ACLPath = "/pool/p"
+	s.opts.Grants = []Grant{{Path: "/pool/p", Role: "PVEVMAdmin", Propagate: true}}
 	session := &fakeSession{pve: newFakePVE("pveforge")}
 	v := &fakeValidator{errs: []error{fmt.Errorf("%w", ErrScopeTooWide), nil}}
 	res, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, v)
@@ -57,7 +57,7 @@ func TestRun_R19_SkipCheckAndPostMintShareWant(t *testing.T) {
 // accept is refused with nothing touched.
 func TestRun_R6i_WantCheckedBeforeSSH(t *testing.T) {
 	opts := baseOptions(newTestRoster(t, ""))
-	opts.ACLRole = "bad role"
+	opts.Grants = []Grant{{Path: "/", Role: "bad role", Propagate: true}}
 	tr := &fakeTransport{installFingerprint: "SHA256:abc", session: &fakeSession{}}
 	if _, err := Run(context.Background(), opts, tr, &fakeValidator{}); !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("want ErrInvalidGrant, got %v", err)
@@ -109,7 +109,7 @@ func TestRun_R6e_RolePrivileges(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := seedRoster(t, heldID, "")
-			s.opts.ACLRole = tc.role
+			s.opts.Grants = []Grant{{Path: "/", Role: tc.role, Propagate: true}}
 			session := &fakeSession{pve: newFakePVE("pveforge"), byCmd: map[string]fakeRunResult{"pveum role list": {res: RunResult{Stdout: tc.list}}}}
 			v := &fakeValidator{err: fmt.Errorf("%w", ErrWrongScope)}
 			_, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, v)
@@ -381,12 +381,16 @@ func contains(list []string, s string) bool {
 // fakeOwner is a scriptable ownerReader: perms per path, every read
 // recorded in order.
 type fakeOwner struct {
-	active bool
-	perms  map[string]map[string]bool
-	reads  []string
+	active      bool
+	perms       map[string]map[string]bool
+	reads       []string
+	activeCalls int
 }
 
-func (f *fakeOwner) ownerActive(context.Context, string) (bool, error) { return f.active, nil }
+func (f *fakeOwner) ownerActive(context.Context, string) (bool, error) {
+	f.activeCalls++
+	return f.active, nil
+}
 
 func (f *fakeOwner) ownerPerms(_ context.Context, _ string, path string) (map[string]bool, error) {
 	f.reads = append(f.reads, path)
@@ -398,9 +402,10 @@ func (f *fakeOwner) ownerPerms(_ context.Context, _ string, path string) (map[st
 }
 
 // twoGrants: distinct paths, distinct roles with disjoint privileges, the
-// first pinned to a strict subset of its role, the second unpinned.
+// first pinned (to exactly its role, as preflight's pin check requires), the
+// second unpinned.
 var twoGrants = []Grant{
-	{Path: "/pool/p", Role: "RoleA", Privs: []string{"A1"}},
+	{Path: "/pool/p", Role: "RoleA", Privs: []string{"A2", "A1"}},
 	{Path: "/storage/s", Role: "RoleB"},
 }
 
@@ -408,20 +413,25 @@ const twoRoleList = `[{"privs":"A1,A2","roleid":"RoleA","special":0},{"privs":"B
 
 func runPreflight(t *testing.T, roleList string, owner *fakeOwner) error {
 	t.Helper()
+	return runPreflightWith(t, twoGrants, roleList, owner)
+}
+
+func runPreflightWith(t *testing.T, want []Grant, roleList string, owner *fakeOwner) error {
+	t.Helper()
 	orig := dryRunTokenWrite
 	dryRunTokenWrite = func(string, string) error { return nil }
 	t.Cleanup(func() { dryRunTokenWrite = orig })
 	opts := baseOptions("unused")
 	opts.PVEUsername = "alice@pam"
 	session := &fakeSession{byCmd: map[string]fakeRunResult{"pveum role list": {res: RunResult{Stdout: roleList}}}}
-	_, err := preflight(context.Background(), session, opts, twoGrants, owner)
+	_, err := preflight(context.Background(), session, opts, want, owner)
 	return err
 }
 
 func TestPreflight_R3_TwoGrants(t *testing.T) {
 	covers := func() *fakeOwner {
 		return &fakeOwner{active: true, perms: map[string]map[string]bool{
-			"/pool/p":    {"A1": false}, // the pinned set only: not A2
+			"/pool/p":    {"A1": false, "A2": false},
 			"/storage/s": {"B1": false, "B2": false},
 		}}
 	}
@@ -450,6 +460,14 @@ func TestPreflight_R3_TwoGrants(t *testing.T) {
 			t.Fatalf("want ErrOwnerLacksPrivileges at /pool/p naming A1, got %v", err)
 		}
 	})
+	t.Run("a pin that is a strict subset of its role is refused before the owner is read", func(t *testing.T) {
+		o := covers()
+		want := []Grant{{Path: "/pool/p", Role: "RoleA", Privs: []string{"A1"}}, twoGrants[1]}
+		err := runPreflightWith(t, want, twoRoleList, o)
+		if !errors.Is(err, ErrPinnedPrivsMismatch) || isVerdict(err) || len(o.reads) != 0 || o.activeCalls != 0 {
+			t.Fatalf("want ErrPinnedPrivsMismatch before any owner read, got %v (reads %v)", err, o.reads)
+		}
+	})
 	t.Run("the second role is absent from the role list", func(t *testing.T) {
 		err := runPreflight(t, `[{"privs":"A1,A2","roleid":"RoleA","special":0}]`, covers())
 		if !errors.Is(err, ErrUnknownRole) || !strings.Contains(err.Error(), `"RoleB"`) {
@@ -462,6 +480,19 @@ func TestPreflight_R3_TwoGrants(t *testing.T) {
 			t.Fatalf("want ErrRoleHasNoPrivileges naming RoleB, got %v", err)
 		}
 	})
+}
+
+// checkOwner judges a pinned grant by its pinned set, not its role's (J6).
+// Through preflight a pin always equals its role (ErrPinnedPrivsMismatch),
+// so Run cannot produce this state today: this is U-B's contract (a
+// non-root owner and a caller that reaches checkOwner directly), pinned on
+// checkOwner itself. Do not delete it as dead.
+func TestCheckOwner_PinnedSetWinsOverRole(t *testing.T) {
+	o := &fakeOwner{active: true, perms: map[string]map[string]bool{"/pool/p": {"A1": false}}}
+	want := []Grant{{Path: "/pool/p", Role: "RoleA", Privs: []string{"A1"}}}
+	if err := checkOwner(context.Background(), o, "alice@pam", want, map[string][]string{"RoleA": {"A1", "A2"}}); err != nil {
+		t.Fatalf("the owner holds the pinned set: %v", err)
+	}
 }
 
 // checkOwner reads each distinct path once, even when two grants share it.

@@ -589,12 +589,12 @@ func TestRun_R6gdup_RealDryRunRefusesAnUnwritableLayout(t *testing.T) {
 	}
 }
 
-// R6h-a: --acl-path is normalized like PVE does, and the grant uses the
+// R6h-a: a grant's path is normalized like PVE does, and the grant uses the
 // normalized path; a path PVE would refuse aborts before any SSH.
-func TestRun_R6h_ACLPathNormalizedOrRefused(t *testing.T) {
+func TestRun_R6h_GrantPathNormalizedOrRefused(t *testing.T) {
 	path := newTestRoster(t, "")
 	opts := baseOptions(path)
-	opts.ACLPath = "pool/p/"
+	opts.Grants = []Grant{{Path: "pool/p/", Role: "PVEVMAdmin", Propagate: true}}
 	session := &fakeSession{}
 	if _, err := Run(context.Background(), opts, &fakeTransport{installFingerprint: "SHA256:abc", session: session}, &fakeValidator{}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -604,7 +604,7 @@ func TestRun_R6h_ACLPathNormalizedOrRefused(t *testing.T) {
 	}
 	for _, bad := range []string{"/foo", "0", "/vms/99"} {
 		opts := baseOptions(newTestRoster(t, ""))
-		opts.ACLPath = bad
+		opts.Grants = []Grant{{Path: bad, Role: "PVEVMAdmin", Propagate: true}}
 		tr := &fakeTransport{installFingerprint: "SHA256:abc", session: &fakeSession{}}
 		if _, err := Run(context.Background(), opts, tr, &fakeValidator{}); !errors.Is(err, ErrInvalidACLPath) {
 			t.Fatalf("%q: want ErrInvalidACLPath, got %v", bad, err)

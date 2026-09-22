@@ -28,10 +28,11 @@ var (
 
 func newBootstrapCmd() *cobra.Command {
 	var (
-		host, node, pveUser, tokenID, aclPath, aclRole string
-		apiPort, sshPort                               int
-		insecureTLS                                    bool
-		resolveFormat                                  func() (kvjson.Format, error)
+		host, node, pveUser, tokenID string
+		grantSpecs                   []string
+		apiPort, sshPort             int
+		insecureTLS                  bool
+		resolveFormat                func() (kvjson.Format, error)
 	)
 
 	cmd := &cobra.Command{
@@ -42,6 +43,14 @@ func newBootstrapCmd() *cobra.Command {
 			// First, before anything can change a token: a bad -o must never
 			// let a rotation run and then fail to report it.
 			format, err := resolveFormat()
+			if err != nil {
+				return err
+			}
+			// Then the grants, before any prompt, roster read or transport:
+			// bootstrap fails closed without an explicit grant, and an
+			// operator who forgot one is told so before being asked for a
+			// secret.
+			grants, err := bootstrap.ParseGrants(grantSpecs)
 			if err != nil {
 				return err
 			}
@@ -68,8 +77,7 @@ func newBootstrapCmd() *cobra.Command {
 				PVEUsername: pveUser,
 				PVEPassword: pvePassword,
 				TokenID:     tokenID,
-				ACLPath:     aclPath,
-				ACLRole:     aclRole,
+				Grants:      grants,
 				RosterPath:  rosterPath,
 				Passphrase:  passphrase,
 			}
@@ -88,8 +96,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port on the target host")
 	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with (must be an @pam user)")
 	cmd.Flags().StringVar(&tokenID, "token-id", "pveforge", "name of the scoped API token to create")
-	cmd.Flags().StringVar(&aclPath, "acl-path", "/", "ACL path to grant the new token; if the path, or the role's privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
-	cmd.Flags().StringVar(&aclRole, "acl-role", "PVEVMAdmin", "ACL role to grant the new token; if the path, or the role's privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
+	cmd.Flags().StringArrayVar(&grantSpecs, "grant", nil, "an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
 
 	// destructive, not mutating: a verdict about the held token makes
 	// bootstrap remove it on PVE, which revokes its secret for EVERY roster
@@ -150,6 +157,17 @@ type bootstrapView struct {
 	LeftoverState      string `json:"leftover_state,omitempty"`
 	RosterToken        string `json:"roster_token,omitempty"`
 	PriorToken         string `json:"prior_token,omitempty"`
+	// Grants is the scope the surviving token holds (bootstrap.Result.Grants);
+	// absent when no token survives the run.
+	Grants []grantView `json:"grants,omitempty"`
+}
+
+// grantView is one granted scope as printed.
+type grantView struct {
+	Path      string   `json:"path"`
+	Role      string   `json:"role"`
+	Propagate bool     `json:"propagate"`
+	Privs     []string `json:"privs,omitempty"`
 }
 
 // renderBootstrapResult writes the view to out and one lowercase warning
@@ -169,6 +187,9 @@ func renderBootstrapResult(out, errOut io.Writer, f kvjson.Format, target string
 		LeftoverState:      res.LeftoverState,
 		RosterToken:        res.RosterToken,
 		PriorToken:         res.PriorToken,
+	}
+	for _, g := range res.Grants {
+		view.Grants = append(view.Grants, grantView{Path: g.Path, Role: g.Role, Propagate: g.Propagate, Privs: g.Privs})
 	}
 	if err := kvjson.Render(out, f, view); err != nil {
 		return err

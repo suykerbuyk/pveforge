@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/suykerbuyk/pveforge/internal/bootstrap"
 )
 
 func TestResolvePVEPassword_FromEnv(t *testing.T) {
@@ -44,15 +47,18 @@ func TestNewBootstrapCmd_RequiresExactlyOneArg(t *testing.T) {
 	}
 }
 
-// F2: --acl-path and --acl-role say that a re-run with a different request
-// revokes the held token, since the validator's upper bound makes a
-// narrower or different request a verdict about it.
-func TestNewBootstrapCmd_ACLFlagsWarnOfRevocation(t *testing.T) {
+// F2: --grant says that a re-run with a different request revokes the held
+// token, since the validator's upper bound makes a narrower or different
+// request a verdict about it; and that there is no default.
+func TestNewBootstrapCmd_GrantFlagWarnsOfRevocation(t *testing.T) {
 	cmd := newBootstrapCmd()
-	for _, name := range []string{"acl-path", "acl-role"} {
+	for _, name := range []string{"grant"} {
 		u := cmd.Flags().Lookup(name).Usage
 		for _, want := range []string{
-			"the role's privileges, differ from the held token's effective grants",
+			"PATH:ROLE[:PRIVS[:PROPAGATE]]",
+			"at least one is required, there is no default",
+			"PROPAGATE 0 or 1 (default 0)",
+			"its privileges, differ from the held token's effective grants",
 			"revokes that token on PVE (for every holder)",
 			"tries to mint a replacement",
 		} {
@@ -70,8 +76,7 @@ func TestNewBootstrapCmd_FlagDefaults(t *testing.T) {
 		"ssh-port":     "22",
 		"pve-user":     "root@pam",
 		"token-id":     "pveforge",
-		"acl-path":     "/",
-		"acl-role":     "PVEVMAdmin",
+		"grant":        "[]",
 		"insecure-tls": "false",
 		"roster":       "",
 	}
@@ -82,6 +87,12 @@ func TestNewBootstrapCmd_FlagDefaults(t *testing.T) {
 		}
 		if f.DefValue != want {
 			t.Errorf("flag %q default = %q, want %q", name, f.DefValue, want)
+		}
+	}
+	// MG20: the removed flags are gone, not hidden.
+	for _, gone := range []string{"acl-path", "acl-role"} {
+		if cmd.Flags().Lookup(gone) != nil {
+			t.Errorf("flag %q is still registered", gone)
 		}
 	}
 }
@@ -119,12 +130,18 @@ func TestNewBootstrapCmd_RunE_FailsFastWithoutLiveHost(t *testing.T) {
 	t.Setenv(pvePasswordEnvVar, "test-pve-pass")
 
 	cmd := newBootstrapCmd()
-	cmd.SetArgs([]string{"qa-test", "--host", "127.0.0.1", "--node", "qa-test", "--ssh-port", portStr})
+	cmd.SetArgs([]string{"qa-test", "--host", "127.0.0.1", "--node", "qa-test", "--ssh-port", portStr, "--grant", "/:PVEVMAdmin::1"})
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 
-	if err := cmd.Execute(); err == nil {
+	err = cmd.Execute()
+	if err == nil {
 		t.Fatal("expected an error: nothing is listening on the target port")
+	}
+	// It must stop at the first network hop, not at the grant check, or it
+	// exercises none of the wiring it exists for.
+	if errors.Is(err, bootstrap.ErrInvalidGrant) || !strings.Contains(err.Error(), "install pubkey") {
+		t.Fatalf("want the first-bootstrap dial failure, got %v", err)
 	}
 }
 

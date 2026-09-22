@@ -1,7 +1,9 @@
 // Package bootstrap implements pveforge's "nothing exists yet" -> "fully
 // token-authenticated roster entry" flow (PRD §3.2), plus the token
 // creation/ACL-grant validation this task's own research findings flagged
-// as a silent-failure risk if skipped.
+// as a silent-failure risk if skipped. The token's scope is always explicit
+// (Options.Grants, parsed from --grant by ParseGrants): there is no default
+// grant, and bootstrap fails closed without one.
 //
 // Orchestration logic here (Run and its helpers) depends only on the
 // SSHTransport and APIValidator interfaces below, not on internal/sshexec
@@ -118,12 +120,13 @@ type Options struct {
 	// TokenID is the token's own name (not including the userid prefix),
 	// e.g. "pveforge" -> full token id "root@pam!pveforge".
 	TokenID string
-	// ACLPath and ACLRole scope the freshly created token's grant, one
-	// propagating Grant (requestedGrants). Defaults: "/" and "PVEVMAdmin"
-	// (see applyDefaults). Run normalizes ACLPath as PVE does
-	// (checkedACLPath) before anything else uses it.
-	ACLPath string
-	ACLRole string
+	// Grants are the ACL grants the token must hold, each a role on a path
+	// with its own propagate flag and, optionally, a pinned privilege set.
+	// There is no default: Run refuses an empty list (fail closed) before
+	// it touches the roster, the lock or the network. Run normalizes every
+	// path as PVE does (requestedGrants) before anything else uses it.
+	// ParseGrants builds them from the CLI's --grant specs.
+	Grants []Grant
 
 	RosterPath string
 	Passphrase string
@@ -142,6 +145,13 @@ type Result struct {
 	TokenOutcome string
 	// Validation is one of the Validation* constants.
 	Validation string
+	// Grants is the scope the token this run leaves in the roster holds:
+	// the normalized, validated request. It is set only when a token
+	// survives (TokenOutcome minted, replaced or reused), together with
+	// TokenOutcome; a run that leaves no token behind reports none. A
+	// LeftoverToken is deliberately excluded: it is not held by the roster
+	// and its warning already tells the operator to remove it.
+	Grants []Grant
 	// ReplacedReason says why the roster's previous token was replaced (a
 	// verdict about it, or "persisted token undecryptable" for a token that
 	// will not decrypt and no longer exists on PVE; one that still exists
@@ -171,8 +181,10 @@ type Result struct {
 
 // Run executes the full bootstrap flow: establish an SSH connection to the
 // target (see the connection-strategy branch below), create a scoped API
-// token (and grant its ACL) over that connection via pveum, validate the
-// token's grants actually work, then persist the token to the roster.
+// token (and grant it every requested ACL, opts.Grants) over that connection
+// via pveum, validate that the token holds exactly those grants, then
+// persist the token to the roster. There is no default grant: an empty
+// opts.Grants is refused first, before the roster, the lock or the network.
 //
 // Connection strategy, and why it's a hard branch rather than "try
 // password, fall back if that fails": once a target has SSH auth
@@ -216,24 +228,21 @@ type Result struct {
 // by name, so an interleaving could revoke the other run's fresh token).
 func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValidator) (*Result, error) {
 	applyDefaults(&opts)
+	// The one requested grant list: issued, owner-checked, skip-checked and
+	// validated post-mint as this same value. Checked first, before the
+	// roster is read, the lock taken or any SSH: bootstrap fails closed
+	// without an explicit grant.
+	want, err := requestedGrants(opts)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
 	defaultHostNodeFromRoster(&opts)
 	if err := validateOptions(&opts); err != nil {
 		return nil, err
 	}
-	aclPath, err := checkedACLPath(opts.ACLPath)
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
-	}
-	opts.ACLPath = aclPath
 	sshUser, err := pamLocalUser(opts.PVEUsername)
 	if err != nil {
 		return nil, err
-	}
-	// The one requested grant list: issued, owner-checked, skip-checked and
-	// validated post-mint as this same value. Checked before any SSH.
-	want := requestedGrants(opts)
-	if err := checkGrants(want); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 
 	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
@@ -411,12 +420,6 @@ func applyDefaults(opts *Options) {
 	if opts.SSHPort == 0 {
 		opts.SSHPort = 22
 	}
-	if opts.ACLPath == "" {
-		opts.ACLPath = "/"
-	}
-	if opts.ACLRole == "" {
-		opts.ACLRole = "PVEVMAdmin"
-	}
 	if opts.PVEUsername == "" {
 		opts.PVEUsername = "root@pam"
 	}
@@ -584,11 +587,101 @@ func parseTokenSecret(stdout string) (string, error) {
 	return "", fmt.Errorf("parse pveum token add output: unexpected output shape (%d bytes, not a JSON object)", len(stdout))
 }
 
-// requestedGrants is the grant list today's flags request: --acl-role on
-// --acl-path (already normalized), propagating, as pveum's own default has
-// always applied it. It is the single construction site of Run's want.
-func requestedGrants(opts Options) []Grant {
-	return []Grant{{Path: opts.ACLPath, Role: opts.ACLRole, Propagate: true}}
+// requestedGrants is the single construction site of Run's want: opts.Grants
+// normalized and checked (normalizeGrants). An empty list is ErrInvalidGrant.
+func requestedGrants(opts Options) ([]Grant, error) {
+	return normalizeGrants(opts.Grants)
+}
+
+// normalizeGrants returns a copy of gs with every path normalized as PVE
+// does (checkedACLPath: normalize_path, then check_path's whitelist) and
+// the result checked (checkGrants): non-empty, each grant well formed, and
+// no two grants on one normalized path. Privs are copied, never shared.
+func normalizeGrants(gs []Grant) ([]Grant, error) {
+	out := make([]Grant, 0, len(gs))
+	for _, g := range gs {
+		p, err := checkedACLPath(g.Path)
+		if err != nil {
+			return nil, err
+		}
+		n := Grant{Path: p, Role: g.Role, Propagate: g.Propagate}
+		if g.Privs != nil {
+			n.Privs = append([]string{}, g.Privs...)
+		}
+		out = append(out, n)
+	}
+	if err := checkGrants(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// copyGrants returns a deep copy of gs (Privs included), so a Result never
+// shares a slice with the run's own want.
+func copyGrants(gs []Grant) []Grant {
+	out := make([]Grant, len(gs))
+	for i, g := range gs {
+		out[i] = g
+		if g.Privs != nil {
+			out[i].Privs = append([]string{}, g.Privs...)
+		}
+	}
+	return out
+}
+
+// grantHint is the syntax a refused or missing --grant points at.
+const grantHint = "PATH:ROLE[:PRIVS[:PROPAGATE]]"
+
+// ParseGrants parses the CLI's --grant specs, each PATH:ROLE[:PRIVS[:PROPAGATE]]:
+// PRIVS a comma-separated privilege list (empty: unpinned, the role's live
+// privileges), PROPAGATE exactly 0 or 1 (absent: 0). The result is
+// normalized and checked like Run's own (normalizeGrants). No spec at all is
+// refused with the syntax hint: bootstrap requires an explicit grant.
+func ParseGrants(specs []string) ([]Grant, error) {
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("%w: bootstrap requires at least one --grant %s", ErrInvalidGrant, grantHint)
+	}
+	gs := make([]Grant, 0, len(specs))
+	for _, s := range specs {
+		g, err := parseGrant(s)
+		if err != nil {
+			return nil, err
+		}
+		gs = append(gs, g)
+	}
+	return normalizeGrants(gs)
+}
+
+// parseGrant splits one spec into a Grant, without normalizing or
+// checking its path.
+func parseGrant(spec string) (Grant, error) {
+	f := strings.Split(spec, ":")
+	if len(f) < 2 || len(f) > 4 {
+		return Grant{}, fmt.Errorf("%w: --grant %q: want %s", ErrInvalidGrant, spec, grantHint)
+	}
+	if f[0] == "" || f[1] == "" {
+		return Grant{}, fmt.Errorf("%w: --grant %q: PATH and ROLE are required (%s)", ErrInvalidGrant, spec, grantHint)
+	}
+	g := Grant{Path: f[0], Role: f[1]}
+	if len(f) >= 3 && f[2] != "" {
+		if f[2] == "0" || f[2] == "1" {
+			return Grant{}, fmt.Errorf("%w: --grant %q: %s is not a privilege name; to set propagate, use PATH:ROLE::%s", ErrInvalidGrant, spec, f[2], f[2])
+		}
+		g.Privs = strings.Split(f[2], ",")
+	}
+	if len(f) == 4 {
+		switch f[3] {
+		case "0":
+		case "1":
+			g.Propagate = true
+		default:
+			return Grant{}, fmt.Errorf("%w: --grant %q: PROPAGATE must be 0 or 1", ErrInvalidGrant, spec)
+		}
+	}
+	// The rest (the path's normalization and PVE's whitelist, the role id,
+	// the privilege names) is checked after normalization, by
+	// normalizeGrants, exactly as Run checks it.
+	return g, nil
 }
 
 // grantACL grants g to the token identified by fullTokenID
