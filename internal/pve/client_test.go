@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -176,5 +177,50 @@ func TestNewClient_InsecureTLS_PreservesProxyFromEnvironment(t *testing.T) {
 	}
 	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
 		t.Fatal("expected InsecureSkipVerify to still be set on the cloned transport")
+	}
+}
+
+// The three permission readers: the request each issues and its strict
+// decode. The validator's own table covers their use; these pin the
+// readers' contracts directly.
+func TestPermissionReaders(t *testing.T) {
+	pr := &permRouter{t: t,
+		tree:  data(`{"/":{"A":1,"B":true},"/pool/p":{"C":0,"D":false}}`),
+		paths: map[string]answer{"/pool/p": pathAns("/pool/p", `{}`)},
+		roles: map[string]answer{"R": data(`{"B":1,"A":1}`)},
+	}
+	c := testClient(t, newFakeAPIServer(t, pr.serve))
+	ctx := context.Background()
+
+	tree, err := c.EffectivePermissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 2 || !tree["/"]["A"] || !tree["/"]["B"] || tree["/pool/p"]["C"] || tree["/pool/p"]["D"] || len(tree["/pool/p"]) != 2 {
+		t.Fatalf("tree = %v", tree)
+	}
+	// L1's shape: a path with no privileges answers an EMPTY object, which
+	// is zero privileges, not an error.
+	perms, err := c.PathPermissions(ctx, "/pool/p")
+	if err != nil || perms == nil || len(perms) != 0 {
+		t.Fatalf("path perms = %v, %v", perms, err)
+	}
+	privs, err := c.RolePrivileges(ctx, "R")
+	if err != nil || strings.Join(privs, ",") != "A,B" {
+		t.Fatalf("role privs = %v, %v", privs, err)
+	}
+	if got := strings.Join(pr.reqs, " "); got != "tree path:/pool/p role:R" {
+		t.Fatalf("requests = %s", got)
+	}
+
+	// Refused before any request.
+	if _, err := c.RolePrivileges(ctx, "a/b"); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("role id with '/': %v", err)
+	}
+	if _, err := c.PathPermissions(ctx, "no-slash"); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("path without '/': %v", err)
+	}
+	if len(pr.reqs) != 3 {
+		t.Fatalf("a refused read made a request: %v", pr.reqs)
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,7 +372,7 @@ func TestRealAPIValidator_ValidateTokenGrants_BuildClientError(t *testing.T) {
 	validator := NewAPIValidator()
 	err := validator.ValidateTokenGrants(context.Background(), APIConfig{
 		Host: "", // triggers pve.NewClient's "host is required" error
-	}, "qa-pve-01")
+	}, []Grant{{Path: "/", Role: "PVEVMAdmin", Propagate: true}})
 	if err == nil {
 		t.Fatal("expected error when APIConfig is incomplete")
 	}
@@ -379,49 +381,164 @@ func TestRealAPIValidator_ValidateTokenGrants_BuildClientError(t *testing.T) {
 	}
 }
 
-// D1-base (S4g): the REAL validator, against an httptest TLS server, yields
-// errors that match bootstrap's own sentinels, so isVerdict sees them. A
-// sentinel "aliased" by an errors.New copy instead of = pve.X would make
-// every verdict look like a non-verdict; this turns that red.
+// d1Server is an httptest TLS PVE answering only the two endpoints the
+// real validator reads: GET /access/permissions (tree, or ?path=) and GET
+// /access/roles/<id>. Anything else is a test failure.
+func d1Server(t *testing.T, status int, tree string, paths, roles map[string]string) APIConfig {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		var body string
+		var ok bool
+		switch {
+		case r.URL.Path == "/api2/json/access/permissions" && len(q) == 0:
+			body, ok = tree, true
+		case r.URL.Path == "/api2/json/access/permissions" && len(q) == 1:
+			body, ok = paths[q.Get("path")]
+		case strings.HasPrefix(r.URL.Path, "/api2/json/access/roles/"):
+			body, ok = roles[strings.TrimPrefix(r.URL.Path, "/api2/json/access/roles/")]
+		}
+		if !ok {
+			t.Errorf("unexpected request %s", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return APIConfig{Host: host, APIPort: port, InsecureTLS: true, TokenID: "root@pam!t", TokenSecret: "s"}
+}
+
+// D1-ext (S4g): the REAL validator, against an httptest TLS server, yields
+// errors that match bootstrap's own sentinels, so isVerdict and
+// postMintRetryable see them. A sentinel "aliased" by an errors.New copy
+// instead of = pve.X would make every verdict look like a non-verdict; this
+// turns that red.
 func TestRealAPIValidator_D1_SentinelsAreTheAliases(t *testing.T) {
+	want := []Grant{{Path: "/pool/p", Role: "R"}}
+	roles := map[string]string{"R": `{"data":{"A":1}}`}
 	for name, tc := range map[string]struct {
-		status int
-		body   string
-		want   error
-		not    error
+		status    int
+		tree      string
+		paths     map[string]string
+		want      error
+		retryable bool
 	}{
-		"403":          {http.StatusForbidden, `{"data":null}`, ErrNotAuthorized, ErrNoGrants},
-		"empty list":   {http.StatusOK, `{"data":[]}`, ErrNoGrants, ErrNotAuthorized},
-		"node missing": {http.StatusOK, `{"data":[{"node":"qa-pve-02"}]}`, ErrWrongScope, ErrNoGrants},
+		"403":           {http.StatusForbidden, `{"data":null}`, nil, ErrNotAuthorized, true},
+		"empty tree":    {http.StatusOK, `{"data":{}}`, nil, ErrNoGrants, true},
+		"missing grant": {http.StatusOK, `{"data":{"/storage/s":{"A":0}}}`, map[string]string{"/pool/p": `{"data":{"/pool/p":{}}}`}, ErrWrongScope, true},
+		"too wide":      {http.StatusOK, `{"data":{"/":{"A":1}}}`, map[string]string{"/pool/p": `{"data":{"/pool/p":{"A":1}}}`}, ErrScopeTooWide, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api2/json/nodes" {
-					http.NotFound(w, r)
-					return
+			cfg := d1Server(t, tc.status, tc.tree, tc.paths, roles)
+			err := NewAPIValidator().ValidateTokenGrants(context.Background(), cfg, want)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v; want errors.Is(%v)", err, tc.want)
+			}
+			for _, other := range []error{ErrNotAuthorized, ErrNoGrants, ErrWrongScope, ErrScopeTooWide} {
+				if other != tc.want && errors.Is(err, other) {
+					t.Fatalf("err = %v also matches %v", err, other)
 				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-			host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			port, err := strconv.Atoi(portStr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = NewAPIValidator().ValidateTokenGrants(context.Background(), APIConfig{
-				Host: host, APIPort: port, InsecureTLS: true, TokenID: "root@pam!t", TokenSecret: "s",
-			}, "qa-pve-01")
-			if !errors.Is(err, tc.want) || errors.Is(err, tc.not) {
-				t.Fatalf("err = %v; want errors.Is(%v) and not %v", err, tc.want, tc.not)
 			}
 			if !isVerdict(err) {
 				t.Fatalf("isVerdict(%v) = false", err)
 			}
+			if postMintRetryable(err) != tc.retryable {
+				t.Fatalf("postMintRetryable(%v) = %v, want %v", err, !tc.retryable, tc.retryable)
+			}
 		})
+	}
+}
+
+// VR1: the default grant (PVEVMAdmin on /, propagating) against today's
+// live root@pam!pveforge tree validates nil through the production wiring
+// (translation, TLS client, RawRequest), so a default-flag reconnect keeps
+// reusing today's token.
+func TestRealAPIValidator_VR1_DefaultGrantAgainstLiveTree(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile("../pve/testdata/permissions/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	tree := read("root-pam-pveforge.json")
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(tree), &parsed); err != nil || len(parsed) != 8 {
+		t.Fatalf("live tree fixture: %d paths, %v", len(parsed), err)
+	}
+	cfg := d1Server(t, http.StatusOK, `{"data":`+tree+`}`,
+		map[string]string{"/": `{"data":{"/":` + string(parsed["/"]) + `}}`},
+		map[string]string{"PVEVMAdmin": `{"data":` + read("role-pvevmadmin.json") + `}`})
+	o := applied(Options{})
+	want := requestedGrants(o)
+	if err := NewAPIValidator().ValidateTokenGrants(context.Background(), cfg, want); err != nil {
+		t.Fatalf("the default grant against the live tree: %v", err)
+	}
+}
+
+// applied returns o with applyDefaults run.
+func applied(o Options) Options {
+	applyDefaults(&o)
+	return o
+}
+
+// The translation keeps all four fields, and nil (unpinned) apart from
+// empty and non-empty pinned Privs (M17, M19).
+func TestToPVEGrants(t *testing.T) {
+	in := []Grant{
+		{Path: "/a", Role: "R", Propagate: true},
+		{Path: "/b", Role: "S", Privs: []string{}},
+		{Path: "/c", Role: "T", Propagate: true, Privs: []string{"A", "B"}},
+	}
+	out := toPVEGrants(in)
+	if len(out) != 3 {
+		t.Fatalf("out = %+v", out)
+	}
+	for i, g := range in {
+		o := out[i]
+		if o.Path != g.Path || o.Role != g.Role || o.Propagate != g.Propagate {
+			t.Errorf("%d: %+v -> %+v", i, g, o)
+		}
+		if (o.Privs == nil) != (g.Privs == nil) || strings.Join(o.Privs, ",") != strings.Join(g.Privs, ",") {
+			t.Errorf("%d: Privs %#v -> %#v", i, g.Privs, o.Privs)
+		}
+	}
+	// A copy: the caller's slice is not shared.
+	out[2].Privs[0] = "X"
+	if in[2].Privs[0] != "A" {
+		t.Error("the translation shares the Privs slice")
+	}
+	if toPVEGrants(nil) != nil {
+		t.Error("nil want must stay nil")
+	}
+}
+
+// bootstrap.Grant.Check delegates to pve's checks.
+func TestGrantCheckDelegates(t *testing.T) {
+	if err := (Grant{Path: "/pool/p", Role: "R"}).Check(); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []Grant{
+		{Path: "/pool/p/", Role: "R"},
+		{Path: "/pool/p", Privs: []string{"A"}},
+		{Path: "/pool/p", Role: "R", Privs: []string{}},
+	} {
+		if err := g.Check(); !errors.Is(err, ErrInvalidGrant) {
+			t.Errorf("%+v: want ErrInvalidGrant, got %v", g, err)
+		}
+	}
+	if err := checkGrants([]Grant{{Path: "/a", Role: "R"}, {Path: "/a", Role: "S"}}); !errors.Is(err, ErrInvalidGrant) {
+		t.Errorf("two grants on one path: %v", err)
 	}
 }

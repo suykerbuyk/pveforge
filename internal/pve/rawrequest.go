@@ -82,7 +82,10 @@ func (c *Client) RawRequest(ctx context.Context, method, path string, params url
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("raw request: pve returned %s: %s", res.Status, strings.TrimSpace(string(respBody)))
+		return nil, &statusError{
+			code: res.StatusCode,
+			msg:  fmt.Sprintf("raw request: pve returned %s: %s", res.Status, strings.TrimSpace(string(respBody))),
+		}
 	}
 
 	raw, err := unwrapDataEnvelope(respBody)
@@ -123,4 +126,24 @@ func unwrapDataEnvelope(body []byte) (json.RawMessage, error) {
 		return json.RawMessage("null"), nil
 	}
 	return envelope.Data, nil
+}
+
+// statusError is RawRequest's non-2xx error. Its text is exactly the
+// "raw request: pve returned <status>: <body>" string callers have always
+// seen (idempotent/networkbridge.go parses it), and a 401 or 403 also
+// satisfies errors.Is(err, ErrNotAuthorized), so the grant validator can
+// tell a rejected credential from any other failure.
+//
+// It deliberately has no Unwrap and no As: it is not a
+// *proxmox.StatusError, so no existing errors.Is/errors.As classification
+// of a RawRequest error changes.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+func (e *statusError) Is(target error) bool {
+	return target == ErrNotAuthorized && (e.code == http.StatusUnauthorized || e.code == http.StatusForbidden)
 }

@@ -206,7 +206,7 @@ func (f *fakeBootstrapTransport) ReconnectWithPinnedKey(context.Context, string,
 
 type nopValidator struct{}
 
-func (nopValidator) ValidateTokenGrants(context.Context, bootstrap.APIConfig, string) error {
+func (nopValidator) ValidateTokenGrants(context.Context, bootstrap.APIConfig, []bootstrap.Grant) error {
 	return nil
 }
 

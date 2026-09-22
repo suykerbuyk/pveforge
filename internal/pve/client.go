@@ -1,17 +1,21 @@
 // Package pve is pveforge's thin wrapper over github.com/suykerbuyk/
-// go-proxmox, scoped for now to exactly what the bootstrap flow needs: a
-// token-authenticated client and the ACL-grant validation step that proves
-// a freshly minted token actually has working grants. Later tasks (the
+// go-proxmox, plus a raw-HTTP path (RawRequest) for what that library does
+// not cover well. It began with what the bootstrap flow needs: a
+// token-authenticated client and the grant validation that asks PVE for a
+// token's effective permissions (validate.go). Later tasks (the
 // object-model get/set layer, hookscript deployment via the storage
-// snippets content type) are expected to extend this same client rather
-// than introduce a second one.
+// snippets content type) extend this same client rather than introduce a
+// second one.
 package pve
 
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"sort"
 	"time"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
@@ -114,14 +118,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 }
 
 // ErrNotAuthorized is returned (wrapped) when PVE rejects a request as
-// unauthorized/forbidden — distinct from a network/transport failure, and
-// from a successful-but-empty resource list (ErrNoGrants in validate.go).
+// unauthorized/forbidden (HTTP 401/403, through go-proxmox or RawRequest) —
+// distinct from a network/transport failure, and from a token that
+// authenticates but holds no grants (ErrNoGrants in validate.go).
 var ErrNotAuthorized = proxmox.ErrNotAuthorized
 
 // ListNodes returns the cluster's node names, as seen through this
-// client's token. This is a real, ACL-gated resource (unlike /version),
-// which is exactly why bootstrap validation uses it rather than a
-// version-class endpoint — see validate.go.
+// client's token. Any authenticated caller may list nodes (PVE's
+// Nodes.pm index declares permissions user => 'all'), so this proves a
+// node name exists and says nothing about a token's grants.
 func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
 	ns, err := c.pc.Nodes(ctx)
 	if err != nil {
@@ -138,4 +143,125 @@ func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
 		names = append(names, n.Node)
 	}
 	return names, nil
+}
+
+// EffectivePermissions reads the caller's own effective permission tree,
+// GET /access/permissions with no userid and no path: path → privilege →
+// propagate. It covers PVE's default top paths, every ACL path and every
+// pool member; PVE drops paths where the caller holds nothing, so a token
+// with no grants reads as an empty (non-nil) map. Any payload a healthy
+// PVE does not produce (no data, null, a non-object, a flag other than
+// 0/1/true/false, a path or privilege name outside PVE's charset) is
+// ErrUnverifiableRead, never an empty tree.
+func (c *Client) EffectivePermissions(ctx context.Context) (map[string]map[string]bool, error) {
+	raw, err := c.RawRequest(ctx, http.MethodGet, "/access/permissions", nil)
+	if err != nil {
+		return nil, fmt.Errorf("read effective permissions: %w", err)
+	}
+	tree, err := decodePermTree(raw)
+	if err != nil {
+		return nil, fmt.Errorf("read effective permissions: %w", err)
+	}
+	return tree, nil
+}
+
+// PathPermissions reads the caller's effective privileges at exactly path,
+// GET /access/permissions?path=<path>: privilege → propagate. PVE's own
+// answer carries pool-derived and privsep-intersection effects. The answer
+// must be keyed by exactly path; an empty object is zero privileges.
+func (c *Client) PathPermissions(ctx context.Context, path string) (map[string]bool, error) {
+	if !aclPathRE.MatchString(path) {
+		return nil, fmt.Errorf("read permissions at %q: %w: not an ACL path", path, ErrInvalidGrant)
+	}
+	raw, err := c.RawRequest(ctx, http.MethodGet, "/access/permissions", url.Values{"path": {path}})
+	if err != nil {
+		return nil, fmt.Errorf("read permissions at %s: %w", path, err)
+	}
+	tree, err := decodePermTree(raw)
+	if err != nil {
+		return nil, fmt.Errorf("read permissions at %s: %w", path, err)
+	}
+	perms, ok := tree[path]
+	if len(tree) != 1 || !ok {
+		return nil, fmt.Errorf("read permissions at %s: %w: the answer is not keyed by exactly the requested path (%d keys)", path, ErrUnverifiableRead, len(tree))
+	}
+	return perms, nil
+}
+
+// RolePrivileges reads role's privileges, GET /access/roles/<role>, sorted.
+// A role id outside PVE's format is refused before any request. A role
+// with no privileges is ErrUnverifiableRead: nothing can be validated
+// against it.
+func (c *Client) RolePrivileges(ctx context.Context, role string) ([]string, error) {
+	if !roleIDRE.MatchString(role) {
+		return nil, fmt.Errorf("read role %q: %w: not a role id", role, ErrInvalidGrant)
+	}
+	raw, err := c.RawRequest(ctx, http.MethodGet, "/access/roles/"+role, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read role %s: %w", role, err)
+	}
+	set, err := decodePrivSet(raw)
+	if err != nil {
+		return nil, fmt.Errorf("read role %s: %w", role, err)
+	}
+	privs := make([]string, 0, len(set))
+	for p, v := range set {
+		if !v {
+			return nil, fmt.Errorf("read role %s: %w: privilege %s is present but not set", role, ErrUnverifiableRead, p)
+		}
+		privs = append(privs, p)
+	}
+	if len(privs) == 0 {
+		return nil, fmt.Errorf("read role %s: %w: the role has no privileges", role, ErrUnverifiableRead)
+	}
+	sort.Strings(privs)
+	return privs, nil
+}
+
+// decodePermTree strictly decodes a {"<path>":{"<Priv>":flag}} payload.
+// Error text never echoes a server-supplied name that failed its check.
+func decodePermTree(raw json.RawMessage) (map[string]map[string]bool, error) {
+	var tree map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		return nil, fmt.Errorf("%w: the permission tree is not a JSON object", ErrUnverifiableRead)
+	}
+	if tree == nil {
+		return nil, fmt.Errorf("%w: the permission tree is null", ErrUnverifiableRead)
+	}
+	out := make(map[string]map[string]bool, len(tree))
+	for path, v := range tree {
+		if !aclPathRE.MatchString(path) {
+			return nil, fmt.Errorf("%w: the permission tree holds a key that is not an ACL path", ErrUnverifiableRead)
+		}
+		set, err := decodePrivSet(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w (at %s)", err, path)
+		}
+		out[path] = set
+	}
+	return out, nil
+}
+
+// decodePrivSet strictly decodes a {"<Priv>":flag} object, flag one of
+// 0, 1, true, false.
+func decodePrivSet(raw json.RawMessage) (map[string]bool, error) {
+	var set map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &set); err != nil || set == nil {
+		return nil, fmt.Errorf("%w: a privilege set is not a JSON object", ErrUnverifiableRead)
+	}
+	out := make(map[string]bool, len(set))
+	for name, v := range set {
+		if !privNameRE.MatchString(name) {
+			return nil, fmt.Errorf("%w: a privilege set holds a name that is not a privilege name", ErrUnverifiableRead)
+		}
+		switch string(v) {
+		case "1", "true":
+			out[name] = true
+		case "0", "false":
+			out[name] = false
+		default:
+			return nil, fmt.Errorf("%w: privilege %s has a flag that is not 0/1/true/false", ErrUnverifiableRead, name)
+		}
+	}
+	return out, nil
 }
