@@ -91,7 +91,11 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&aclPath, "acl-path", "/", "ACL path to grant the new token")
 	cmd.Flags().StringVar(&aclRole, "acl-role", "PVEVMAdmin", "ACL role to grant the new token")
 
-	markMutating(cmd)
+	// destructive, not mutating: a verdict about the held token makes
+	// bootstrap remove it on PVE, which revokes its secret for EVERY roster
+	// and session that holds it, and cannot be undone (PVE never re-displays
+	// a secret). The worst case sets the tier, as for `roster init --force`.
+	markDestructive(cmd)
 	return cmd
 }
 

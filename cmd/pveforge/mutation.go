@@ -20,8 +20,7 @@ const mutationAnnotationKey = "pveforge/mutation"
 // actual command list, not copied):
 //   - mutationSafe: read-only, never changes state (PVE-side or local).
 //   - mutationMutating: changes state, but reversibly and routinely — a
-//     normal, expected part of operating pveforge (setting a VM field,
-//     bootstrapping a target).
+//     normal, expected part of operating pveforge (setting a VM field).
 //   - mutationDestructive: a point of no return (irreversible) or an
 //     unbounded blast radius (pvectl's own example: a command that hands
 //     off to arbitrary execution) — not "changes more state than

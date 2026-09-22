@@ -77,8 +77,8 @@ func TestNewSchemaCmd_KnownCommandMutationLevels(t *testing.T) {
 	if !ok {
 		t.Fatal("bootstrap not found in schema")
 	}
-	if bootstrapCmd.Mutation != mutationMutating {
-		t.Errorf("bootstrap mutation = %q, want %q", bootstrapCmd.Mutation, mutationMutating)
+	if bootstrapCmd.Mutation != mutationDestructive {
+		t.Errorf("bootstrap mutation = %q, want %q", bootstrapCmd.Mutation, mutationDestructive)
 	}
 
 	rosterInit, ok := findRootPath(t, schema, "roster", "init")
