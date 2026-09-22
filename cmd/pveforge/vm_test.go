@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -1302,5 +1303,27 @@ func TestNewVMCreateCmd_PreCheckFailsClosedOnNonTakenError(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&f.createCalls); got != 0 {
 		t.Errorf("a create must never run when the vmid check itself failed, got %d create calls", got)
+	}
+}
+
+// TestPrintAppliedFields_QuotesLikeKV pins that the "applied" confirmation
+// lines follow the kv line contract: a value (or field) that could be
+// misread is written as one JSON string, so a --json-file value holding a
+// newline cannot forge a second applied line; plain values print as-is.
+func TestPrintAppliedFields_QuotesLikeKV(t *testing.T) {
+	pairs := []kvjson.Pair{
+		{Field: "description", Value: "a\nqa: cores=99"},
+		{Field: "cores", Value: "4"},
+		{Field: "odd=key", Value: "null"},
+	}
+	var out bytes.Buffer
+	if err := printAppliedFields(&out, "qa", []string{"description", "cores", "odd=key"}, pairs); err != nil {
+		t.Fatalf("printAppliedFields: %v", err)
+	}
+	want := `qa: description="a\nqa: cores=99"` + "\n" +
+		"qa: cores=4\n" +
+		`qa: "odd=key"="null"` + "\n"
+	if out.String() != want {
+		t.Fatalf("got %q, want %q", out.String(), want)
 	}
 }

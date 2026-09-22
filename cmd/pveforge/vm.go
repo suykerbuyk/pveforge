@@ -384,7 +384,10 @@ func printAppliedFields(out io.Writer, targetID string, applied []string, pairs 
 		wanted[p.Field] = p.Value
 	}
 	for _, field := range applied {
-		if _, err := fmt.Fprintf(out, "%s: %s=%s\n", targetID, field, wanted[field]); err != nil {
+		// Same quoting as kv output (kvjson.QuoteKey/QuoteValue): a value
+		// from --json/--json-file can carry a newline, and must not forge
+		// a second "applied" line.
+		if _, err := fmt.Fprintf(out, "%s: %s=%s\n", targetID, kvjson.QuoteKey(field), kvjson.QuoteValue(wanted[field])); err != nil {
 			return err
 		}
 	}

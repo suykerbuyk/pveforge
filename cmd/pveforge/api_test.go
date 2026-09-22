@@ -1028,6 +1028,10 @@ func TestNewAPIPostCmd_RendersEveryPayloadShape(t *testing.T) {
 		{"object", `{"a":1}`, "a=1\n", "{\n  \"a\": 1\n}\n", 0},
 		{"array", `[1,2]`, "data=[1,2]\n", "[\n  1,\n  2\n]\n", 0},
 		{"lowercase upid", `"upid:lower:x"`, "data=upid:lower:x\n", "\"upid:lower:x\"\n", 0},
+		// kv line contract: a string that could forge a line, or read as
+		// JSON null, is written as one JSON string (kvjson.QuoteValue).
+		{"string with newline", `"a\nb=c"`, `data="a\nb=c"` + "\n", `"a\nb=c"` + "\n", 0},
+		{"string null", `"null"`, `data="null"` + "\n", "\"null\"\n", 0},
 	}
 	for _, format := range apiFormats {
 		for _, r := range rows {

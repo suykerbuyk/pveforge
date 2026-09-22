@@ -211,7 +211,11 @@ const apiLong = `Raw PVE REST passthrough for a path with no dedicated pveforge 
 Output: -o json prints PVE's "data" payload as-is. -o kv prints a JSON
 object's top-level fields as key=value lines, and any other payload (a
 string, a number, null, a list) as ONE line, data=<value>, keyed by PVE's
-own envelope name.`
+own envelope name. A key or string value that could be misread (a control
+character or line break, leading/trailing space, a leading '"', a key with
+'=', or a value that is the string "null") is written as one JSON string
+starting with '"'; everything else is written as-is. kv does not preserve
+JSON types: use -o json for exact data.`
 
 var apiMutationLong = apiLong + fmt.Sprintf(`
 

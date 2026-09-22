@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -373,5 +374,282 @@ func TestParseJSONFields_Empty(t *testing.T) {
 	}
 	if len(pairs) != 0 {
 		t.Fatalf("expected 0 pairs, got %d", len(pairs))
+	}
+}
+
+// ---- kv line contract: quoting (pveforge-kv-output-newline-forgery) ----
+
+// lineSeps is every code point Python's str.splitlines() breaks on —
+// measured, not recalled: 0a 0b 0c 0d 1c 1d 1e 85 2028 2029. A kv line
+// must never contain one raw, or a line-oriented consumer reads a forged
+// extra line.
+var lineSeps = []rune{'\n', '\v', '\f', '\r', '\x1c', '\x1d', '\x1e', '\u0085', '\u2028', '\u2029'}
+
+func isLineSep(r rune) bool {
+	for _, s := range lineSeps {
+		if r == s {
+			return true
+		}
+	}
+	return false
+}
+
+// pyLines counts the non-empty lines out splits into under every
+// separator in lineSeps — the Go stand-in for len(out.splitlines()).
+func pyLines(out string) int { return len(strings.FieldsFunc(out, isLineSep)) }
+
+// parseKVLine is a reference consumer implementing the package doc's two
+// rules exactly, so the contract is tested as executable documentation
+// rather than re-read. valueQuoted reports whether the value was a JSON
+// string token.
+func parseKVLine(t *testing.T, line string) (key, value string, valueQuoted bool) {
+	t.Helper()
+	var rest string
+	if strings.HasPrefix(line, `"`) {
+		dec := json.NewDecoder(strings.NewReader(line))
+		if err := dec.Decode(&key); err != nil {
+			t.Fatalf("rule 1: line %q starts with a quote but no JSON string key: %v", line, err)
+		}
+		rest = line[dec.InputOffset():]
+	} else {
+		i := strings.IndexByte(line, '=')
+		if i < 0 {
+			t.Fatalf("rule 1: line %q has no '='", line)
+		}
+		key, rest = line[:i], line[i:]
+	}
+	if !strings.HasPrefix(rest, "=") {
+		t.Fatalf("rule 1: key of line %q is not followed by '=' (rest %q)", line, rest)
+	}
+	rest = rest[1:]
+	if strings.HasPrefix(rest, `"`) {
+		if err := json.Unmarshal([]byte(rest), &value); err != nil {
+			t.Fatalf("rule 2: value %q of line %q starts with a quote but is not exactly one JSON string: %v", rest, line, err)
+		}
+		return key, value, true
+	}
+	return key, rest, false
+}
+
+func renderKVString(t *testing.T, v interface{}) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := Render(&buf, KV, v); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	return buf.String()
+}
+
+// K1-K5, K7: string values that could be misread are written as one JSON
+// string; the expected text is spelled out byte for byte.
+func TestRender_KV_QuotesMisreadableStringValues(t *testing.T) {
+	cases := []struct {
+		name, value, want string
+	}{
+		{"K1 newline forging a key", "a\nb=c", `f="a\nb=c"` + "\n"},
+		{"K2 carriage return", "a\rb", `f="a\rb"` + "\n"},
+		{"K3 tab", "a\tb", `f="a\tb"` + "\n"},
+		{"K4 leading space", " x", `f=" x"` + "\n"},
+		{"K4 trailing space", "x ", `f="x "` + "\n"},
+		{"K5 leading quote", `"q`, `f="\"q"` + "\n"},
+		{"K7 U+2028", "x\u2028y", `f="x\u2028y"` + "\n"},
+		{"interior quote stays plain", `a"b`, `f=a"b` + "\n"},
+		// Non-ASCII whitespace at an edge (unicode.IsSpace, not an ASCII set).
+		{"U+00A0 leading", "\u00a0x", "f=\"\u00a0x\"\n"},
+		{"U+3000 trailing", "x\u3000", "f=\"x\u3000\"\n"},
+		{"interior space stays plain", "a b", "f=a b\n"},
+		{"equals in a value stays plain", "a=b", "f=a=b\n"},
+		{"empty stays plain", "", "f=\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := renderKVString(t, map[string]string{"f": c.value})
+			if got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+			if n := pyLines(got); n != 1 {
+				t.Fatalf("%q splits into %d lines, want 1", got, n)
+			}
+			if _, v, _ := parseKVLine(t, strings.TrimSuffix(got, "\n")); v != c.value {
+				t.Fatalf("reference parser read value %q, want %q", v, c.value)
+			}
+		})
+	}
+}
+
+// K6: the string "null" and JSON null must stay distinguishable in kv.
+func TestRender_KV_StringNullIsQuotedJSONNullIsBare(t *testing.T) {
+	got := renderKVString(t, map[string]interface{}{"n": nil, "s": "null"})
+	want := "n=null\n" + `s="null"` + "\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// K8, K8b: a key containing '=' is quoted, and the reference parser
+// recovers both the key and a value that itself contains '='.
+func TestRender_KV_QuotesKeysContainingEquals(t *testing.T) {
+	got := renderKVString(t, map[string]string{"a=b": "c=d"})
+	if want := `"a=b"=c=d` + "\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	k, v, quoted := parseKVLine(t, strings.TrimSuffix(got, "\n"))
+	if k != "a=b" || v != "c=d" || quoted {
+		t.Fatalf("round trip = (%q, %q, quoted=%v), want (a=b, c=d, false)", k, v, quoted)
+	}
+}
+
+// A key with non-ASCII whitespace at an edge is quoted like any other
+// edge whitespace, and round-trips through the reference parser.
+func TestRender_KV_QuotesKeyWithNonASCIIEdgeWhitespace(t *testing.T) {
+	k := "\u3000k"
+	got := renderKVString(t, map[string]string{k: "v"})
+	if want := "\"\u3000k\"=v\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if gk, gv, _ := parseKVLine(t, strings.TrimSuffix(got, "\n")); gk != k || gv != "v" {
+		t.Fatalf("round trip (%q, %q), want (%q, v)", gk, gv, k)
+	}
+}
+
+// A key equal to "null" is deliberately NOT quoted: no consumer can read a
+// key as JSON null, so the value-side special case does not apply.
+func TestQuoteKey_NullIsNotQuoted(t *testing.T) {
+	if got := QuoteKey("null"); got != "null" {
+		t.Fatalf("QuoteKey(null) = %q, want null", got)
+	}
+}
+
+// K9: plain values, numbers, bools and nested structures render exactly as
+// before the contract existed.
+func TestRender_KV_PlainAndNonStringValuesUnchanged(t *testing.T) {
+	got := renderKVString(t, map[string]interface{}{
+		"b": true, "n": 4, "o": map[string]interface{}{"a": "x y", "b": []int{1}}, "s": "web-01",
+	})
+	want := "b=true\nn=4\n" + `o={"a":"x y","b":[1]}` + "\ns=web-01\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// K10: U+0085 (NEL) is a Cc code point, so it triggers quoting, and it is
+// escaped as \u0085 — encoding/json alone would leave it raw even inside
+// quotes.
+func TestRender_KV_NELIsQuotedAndEscaped(t *testing.T) {
+	got := renderKVString(t, map[string]string{"f": "x\u0085y"})
+	if want := `f="x\u0085y"` + "\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if n := pyLines(got); n != 1 {
+		t.Fatalf("%q splits into %d lines, want 1", got, n)
+	}
+}
+
+// K11: a nested (non-string) value carrying C1 runes stays on one line and
+// is still valid JSON that decodes back to the original.
+func TestRender_KV_NestedValueEscapesC1AndStaysValidJSON(t *testing.T) {
+	in := map[string]interface{}{"s": "x\u0085y\u007fz\u009f"}
+	got := renderKVString(t, map[string]interface{}{"o": in})
+	if n := pyLines(got); n != 1 {
+		t.Fatalf("%q splits into %d lines, want 1", got, n)
+	}
+	for _, r := range strings.TrimSuffix(got, "\n") {
+		if r >= 0x7f && r <= 0x9f {
+			t.Fatalf("raw C1 rune %U left in %q", r, got)
+		}
+	}
+	_, v, quoted := parseKVLine(t, strings.TrimSuffix(got, "\n"))
+	if quoted {
+		t.Fatalf("a nested value must stay literal JSON text, got a quoted string")
+	}
+	var back map[string]interface{}
+	if err := json.Unmarshal([]byte(v), &back); err != nil {
+		t.Fatalf("nested value %q is no longer valid JSON: %v", v, err)
+	}
+	if back["s"] != in["s"] {
+		t.Fatalf("decoded %q, want %q", back["s"], in["s"])
+	}
+}
+
+// K12: every line separator, in a string value and in a key, yields
+// exactly one line that round-trips through the reference parser.
+func TestRender_KV_EveryLineSeparatorStaysOneLine(t *testing.T) {
+	for _, sep := range lineSeps {
+		s := "a" + string(sep) + "b"
+		t.Run(fmt.Sprintf("value %U", sep), func(t *testing.T) {
+			got := renderKVString(t, map[string]string{"f": s})
+			if n := pyLines(got); n != 1 {
+				t.Fatalf("%q splits into %d lines, want 1", got, n)
+			}
+			if _, v, _ := parseKVLine(t, strings.TrimSuffix(got, "\n")); v != s {
+				t.Fatalf("round trip value %q, want %q", v, s)
+			}
+		})
+		t.Run(fmt.Sprintf("key %U", sep), func(t *testing.T) {
+			got := renderKVString(t, map[string]string{s: "v"})
+			if n := pyLines(got); n != 1 {
+				t.Fatalf("%q splits into %d lines, want 1", got, n)
+			}
+			if k, v, _ := parseKVLine(t, strings.TrimSuffix(got, "\n")); k != s || v != "v" {
+				t.Fatalf("round trip (%q, %q), want (%q, v)", k, v, s)
+			}
+		})
+	}
+}
+
+// KRT: a mixed table of hostile keys and values round-trips through the
+// reference parser, line by line, in one Render call.
+func TestRender_KV_RoundTripsThroughReferenceParser(t *testing.T) {
+	in := map[string]string{
+		"plain": "web-01", "a=b": "c=d", "lit": `a\nb`, "empty": "", "nul": "null",
+		"q": `"`, "lead": " x", "c1": "x\u0085y", "del": "x\u007fy", "ls": "x\u2028y",
+		"k\nforged": "v", " sp": "v", `"k`: "v", "html": "<b>&", "nl": "line1\nline2\n",
+	}
+	got := renderKVString(t, in)
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	if len(lines) != len(in) {
+		t.Fatalf("%d raw lines for %d fields:\n%s", len(lines), len(in), got)
+	}
+	if n := pyLines(got); n != len(in) {
+		t.Fatalf("splitlines-equivalent sees %d lines for %d fields", n, len(in))
+	}
+	seen := map[string]string{}
+	for _, l := range lines {
+		k, v, _ := parseKVLine(t, l)
+		seen[k] = v
+	}
+	for k, want := range in {
+		if got, ok := seen[k]; !ok || got != want {
+			t.Errorf("key %q: parsed %q (present=%v), want %q", k, got, ok, want)
+		}
+	}
+}
+
+// KHTML: the quoted form does not HTML-escape, so the same characters
+// have one spelling whether or not something else triggered quoting.
+func TestRender_KV_QuotedFormDoesNotHTMLEscape(t *testing.T) {
+	got := renderKVString(t, map[string]string{"a": "<b>&", "b": "<b>&\n"})
+	want := "a=<b>&\n" + `b="<b>&\n"` + "\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// KS: Scalar returns the RAW string, never kv's quoted form. It is the
+// comparison primitive internal/idempotent converges on; quoting here
+// would make an already-correct value look different on every run.
+func TestScalar_ReturnsRawStringUnescaped(t *testing.T) {
+	for _, want := range []string{"a\nb=c", " x ", "null", `"q`, "x\u0085y"} {
+		raw, err := json.Marshal(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Scalar(raw)
+		if err != nil {
+			t.Fatalf("Scalar(%s): %v", raw, err)
+		}
+		if got != want {
+			t.Errorf("Scalar(%s) = %q, want the raw %q", raw, got, want)
+		}
 	}
 }
