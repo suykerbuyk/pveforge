@@ -149,13 +149,15 @@ type ownerRun struct {
 	changed bool // the roster changed
 }
 
-// runOwner runs a reconnect for owner, whose held token is present on PVE
-// and whose skip-check would say ErrWrongScope (then nil), with the given
-// owner answers layered over the role list and a healthy user list.
+// runOwner runs a reconnect whose token OWNER is owner (the SSH login stays
+// root@pam, as it must: pveum refuses to run as anyone else), whose held
+// token is present on PVE, and whose skip-check would say ErrWrongScope
+// (then nil), with the given owner answers layered over the role list and a
+// healthy user list.
 func runOwner(t *testing.T, owner string, byCmd map[string]fakeRunResult) ownerRun {
 	t.Helper()
 	s := seedRoster(t, owner+"!pveforge", "")
-	s.opts.PVEUsername = owner
+	s.opts.TokenOwner = owner
 	before := rosterBytes(t, s.path)
 	cmds := map[string]fakeRunResult{
 		"pveum role list": {res: RunResult{Stdout: aliceRoles}},
@@ -164,7 +166,7 @@ func runOwner(t *testing.T, owner string, byCmd map[string]fakeRunResult) ownerR
 	for k, r := range byCmd {
 		cmds[k] = r
 	}
-	session := &fakeSession{pve: newFakePVE("pveforge"), byCmd: cmds}
+	session := &fakeSession{pve: newFakePVEFor(owner, "pveforge"), byCmd: cmds}
 	v := &fakeValidator{errs: []error{fmt.Errorf("%w", ErrWrongScope), nil}}
 	res, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, v)
 	return ownerRun{res: res, err: err, session: session, v: v, changed: !bytes.Equal(before, rosterBytes(t, s.path))}
@@ -186,13 +188,26 @@ func (o ownerRun) untouched(t *testing.T) {
 
 func TestRun_R20_OwnerCheck(t *testing.T) {
 	t.Run("R20 the owner lacks a privilege: abort before the skip-check, nothing removed", func(t *testing.T) {
-		o := runOwner(t, "alice@pam", map[string]fakeRunResult{"pveum user permissions": perms(`{"/":{"VM.Allocate":1}}`)})
-		if !errors.Is(o.err, ErrOwnerLacksPrivileges) || !strings.Contains(o.err.Error(), "lacks [VM.Audit]") || !strings.Contains(o.err.Error(), "alice@pam") {
+		o := runOwner(t, "alice@pve", map[string]fakeRunResult{"pveum user permissions": perms(`{"/":{"VM.Allocate":1}}`)})
+		if !errors.Is(o.err, ErrOwnerLacksPrivileges) || !strings.Contains(o.err.Error(), "lacks [VM.Audit]") || !strings.Contains(o.err.Error(), "alice@pve") {
 			t.Fatalf("want ErrOwnerLacksPrivileges naming VM.Audit, got %v", o.err)
 		}
 		o.untouched(t)
-		if got := o.session.commands; !contains(got, "pveum user permissions 'alice@pam' --path '/' --output-format json") {
+		if got := o.session.commands; !contains(got, "pveum user permissions 'alice@pve' --path '/' --output-format json") {
 			t.Fatalf("the owner command was not issued, shell-quoted: %v", got)
+		}
+	})
+	// MO4b: the exemption is an EXACT match on root@pam. root@pam-lab is a
+	// legal owner (CheckTokenOwner accepts the realm) and a different
+	// principal, so it must be checked like any other.
+	t.Run("R20 row MO4b: root@pam-lab is not exempt", func(t *testing.T) {
+		o := runOwner(t, "root@pam-lab", map[string]fakeRunResult{"pveum user permissions": perms(`{"/":{"VM.Allocate":1}}`)})
+		if !errors.Is(o.err, ErrOwnerLacksPrivileges) {
+			t.Fatalf("want ErrOwnerLacksPrivileges, got %v", o.err)
+		}
+		o.untouched(t)
+		if !o.session.ran("pveum user permissions 'root@pam-lab'") {
+			t.Fatalf("the owner was never read: %v", o.session.commands)
 		}
 	})
 	t.Run("R20 row MO4: a root-prefixed owner is not exempt", func(t *testing.T) {
@@ -203,7 +218,7 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 		o.untouched(t)
 	})
 	t.Run("R20b held only without propagate, for a propagating grant", func(t *testing.T) {
-		o := runOwner(t, "alice@pam", map[string]fakeRunResult{"pveum user permissions": perms(`{"/":{"VM.Allocate":0,"VM.Audit":false}}`)})
+		o := runOwner(t, "alice@pve", map[string]fakeRunResult{"pveum user permissions": perms(`{"/":{"VM.Allocate":0,"VM.Audit":false}}`)})
 		if !errors.Is(o.err, ErrOwnerLacksPrivileges) || !strings.Contains(o.err.Error(), "without propagate [VM.Allocate,VM.Audit]") {
 			t.Fatalf("want ErrOwnerLacksPrivileges naming both as flag-only, got %v", o.err)
 		}
@@ -221,7 +236,7 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 		"transport error":       {err: errors.New("connection lost")},
 	} {
 		t.Run("R20d "+name, func(t *testing.T) {
-			o := runOwner(t, "alice@pam", map[string]fakeRunResult{"pveum user permissions": answer})
+			o := runOwner(t, "alice@pve", map[string]fakeRunResult{"pveum user permissions": answer})
 			if o.err == nil || errors.Is(o.err, ErrOwnerLacksPrivileges) {
 				t.Fatalf("want a non-verdict read error, got %v", o.err)
 			}
@@ -230,12 +245,12 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 	}
 	for name, list := range map[string]string{
 		"not in the list":      `[{"enable":1,"expire":0,"userid":"root@pam"}]`,
-		"no enable field":      `[{"expire":0,"userid":"alice@pam"}]`,
-		"no expire field":      `[{"enable":1,"userid":"alice@pam"}]`,
+		"no enable field":      `[{"expire":0,"userid":"alice@pve"}]`,
+		"no expire field":      `[{"enable":1,"userid":"alice@pve"}]`,
 		"the list is not JSON": `nope`,
 	} {
 		t.Run("R20d user list "+name, func(t *testing.T) {
-			o := runOwner(t, "alice@pam", map[string]fakeRunResult{"pveum user list": perms(list)})
+			o := runOwner(t, "alice@pve", map[string]fakeRunResult{"pveum user list": perms(list)})
 			if o.err == nil || errors.Is(o.err, ErrOwnerDisabled) {
 				t.Fatalf("want a non-verdict read error, got %v", o.err)
 			}
@@ -243,11 +258,11 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 		})
 	}
 	for name, list := range map[string]string{
-		"disabled": userList("alice@pam", 0, 0),
-		"expired":  userList("alice@pam", 1, 1),
+		"disabled": userList("alice@pve", 0, 0),
+		"expired":  userList("alice@pve", 1, 1),
 	} {
 		t.Run("R20h (S4) "+name, func(t *testing.T) {
-			o := runOwner(t, "alice@pam", map[string]fakeRunResult{
+			o := runOwner(t, "alice@pve", map[string]fakeRunResult{
 				"pveum user list":        perms(list),
 				"pveum user permissions": perms(`{"/":{"VM.Allocate":1,"VM.Audit":1}}`),
 			})
@@ -261,8 +276,8 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 		})
 	}
 	t.Run("R20e the owner covers everything: the run proceeds", func(t *testing.T) {
-		o := runOwner(t, "alice@pam", map[string]fakeRunResult{
-			"pveum user list":        perms(userList("alice@pam", 1, 4102444800)), // expires in 2100
+		o := runOwner(t, "alice@pve", map[string]fakeRunResult{
+			"pveum user list":        perms(userList("alice@pve", 1, 4102444800)), // expires in 2100
 			"pveum user permissions": perms(`{"/":{"VM.Allocate":1,"VM.Audit":1,"Sys.Audit":1}}`),
 		})
 		if o.err != nil || o.res.TokenOutcome != OutcomeReplaced {
@@ -284,10 +299,10 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 	})
 	t.Run("R20f a first bootstrap: abort before any add", func(t *testing.T) {
 		opts := baseOptions(newTestRoster(t, ""))
-		opts.PVEUsername = "alice@pam"
+		opts.TokenOwner = "alice@pve"
 		session := &fakeSession{byCmd: map[string]fakeRunResult{
 			"pveum role list":        {res: RunResult{Stdout: aliceRoles}},
-			"pveum user list":        perms(userList("alice@pam", 1, 0)),
+			"pveum user list":        perms(userList("alice@pve", 1, 0)),
 			"pveum user permissions": perms(`{"/":{}}`), // L1: an owner with nothing at the path
 		}}
 		v := &fakeValidator{}
@@ -300,7 +315,7 @@ func TestRun_R20_OwnerCheck(t *testing.T) {
 		}
 	})
 	t.Run("R20g today's SSH mode: pveum refuses a non-root user at the role list", func(t *testing.T) {
-		o := runOwner(t, "alice@pam", map[string]fakeRunResult{
+		o := runOwner(t, "alice@pve", map[string]fakeRunResult{
 			"pveum role list": {res: RunResult{ExitCode: 255, Stderr: "please run as root"}},
 		})
 		if o.err == nil || !strings.Contains(o.err.Error(), "please run as root") {
@@ -338,6 +353,11 @@ func TestRun_R21_BareRootIsRootAtPam(t *testing.T) {
 	}
 	if res.TokenID != "root@pam!pveforge" || v.lastCfg.TokenID != "root@pam!pveforge" {
 		t.Fatalf("token id = %q / %q", res.TokenID, v.lastCfg.TokenID)
+	}
+	// MB10: the owner defaults from the CANONICAL login, never the bare
+	// name, so no command and no persisted id can say "root!".
+	if !session.ran("pveum user token add 'root@pam' 'pveforge'") {
+		t.Fatalf("the token was not added for root@pam: %v", session.commands)
 	}
 	for _, c := range session.commands {
 		if strings.Contains(c, "'root'") || strings.Contains(c, "root!") {
@@ -422,7 +442,7 @@ func runPreflightWith(t *testing.T, want []Grant, roleList string, owner *fakeOw
 	dryRunTokenWrite = func(string, string) error { return nil }
 	t.Cleanup(func() { dryRunTokenWrite = orig })
 	opts := baseOptions("unused")
-	opts.PVEUsername = "alice@pam"
+	opts.TokenOwner = "alice@pve"
 	session := &fakeSession{byCmd: map[string]fakeRunResult{"pveum role list": {res: RunResult{Stdout: roleList}}}}
 	_, err := preflight(context.Background(), session, opts, want, owner)
 	return err
@@ -484,13 +504,13 @@ func TestPreflight_R3_TwoGrants(t *testing.T) {
 
 // checkOwner judges a pinned grant by its pinned set, not its role's (J6).
 // Through preflight a pin always equals its role (ErrPinnedPrivsMismatch),
-// so Run cannot produce this state today: this is U-B's contract (a
-// non-root owner and a caller that reaches checkOwner directly), pinned on
-// checkOwner itself. Do not delete it as dead.
+// so Run still cannot produce this state — not even now that U-B makes
+// non-root owners real: it is checkOwner's own contract, for any caller
+// that reaches it directly. Do not delete it as dead.
 func TestCheckOwner_PinnedSetWinsOverRole(t *testing.T) {
 	o := &fakeOwner{active: true, perms: map[string]map[string]bool{"/pool/p": {"A1": false}}}
 	want := []Grant{{Path: "/pool/p", Role: "RoleA", Privs: []string{"A1"}}}
-	if err := checkOwner(context.Background(), o, "alice@pam", want, map[string][]string{"RoleA": {"A1", "A2"}}); err != nil {
+	if err := checkOwner(context.Background(), o, "alice@pve", want, map[string][]string{"RoleA": {"A1", "A2"}}); err != nil {
 		t.Fatalf("the owner holds the pinned set: %v", err)
 	}
 }
@@ -499,7 +519,7 @@ func TestCheckOwner_PinnedSetWinsOverRole(t *testing.T) {
 func TestCheckOwner_OneReadPerDistinctPath(t *testing.T) {
 	o := &fakeOwner{active: true, perms: map[string]map[string]bool{"/pool/p": {"A": true}}}
 	want := []Grant{{Path: "/pool/p", Role: "R", Privs: []string{"A"}}, {Path: "/pool/p", Role: "S", Privs: []string{"A"}}}
-	if err := checkOwner(context.Background(), o, "alice@pam", want, nil); err != nil {
+	if err := checkOwner(context.Background(), o, "alice@pve", want, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(o.reads) != 1 {

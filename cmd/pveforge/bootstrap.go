@@ -28,11 +28,11 @@ var (
 
 func newBootstrapCmd() *cobra.Command {
 	var (
-		host, node, pveUser, tokenID string
-		grantSpecs                   []string
-		apiPort, sshPort             int
-		insecureTLS                  bool
-		resolveFormat                func() (kvjson.Format, error)
+		host, node, pveUser, tokenOwner, tokenID string
+		grantSpecs                               []string
+		apiPort, sshPort                         int
+		insecureTLS                              bool
+		resolveFormat                            func() (kvjson.Format, error)
 	)
 
 	cmd := &cobra.Command{
@@ -53,6 +53,13 @@ func newBootstrapCmd() *cobra.Command {
 			grants, err := bootstrap.ParseGrants(grantSpecs)
 			if err != nil {
 				return err
+			}
+			// And the owner, for the same reason: a userid pveforge cannot
+			// own a token with must not cost the operator two prompts.
+			if tokenOwner != "" {
+				if err := bootstrap.CheckTokenOwner(tokenOwner); err != nil {
+					return err
+				}
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
@@ -76,6 +83,7 @@ func newBootstrapCmd() *cobra.Command {
 				SSHPort:     sshPort,
 				PVEUsername: pveUser,
 				PVEPassword: pvePassword,
+				TokenOwner:  tokenOwner,
 				TokenID:     tokenID,
 				Grants:      grants,
 				RosterPath:  rosterPath,
@@ -94,7 +102,8 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().IntVar(&apiPort, "api-port", 0, "PVE API port (default 8006)")
 	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip TLS certificate verification for the API")
 	cmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port on the target host")
-	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with (must be an @pam user)")
+	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with: the SSH LOGIN (must be an @pam user); the token's owner is --token-owner")
+	cmd.Flags().StringVar(&tokenOwner, "token-owner", "", "PVE principal that will own the token, as name@realm (default: --pve-user). It is not the SSH login and needs no SSH account. A non-root owner must itself hold the whole role at each granted path, or bootstrap refuses before touching anything. Changing it deliberately leaves the previous token live on PVE, held by nobody (orphaned_token), never revoked; omitting it when the roster holds another owner's token is refused")
 	cmd.Flags().StringVar(&tokenID, "token-id", "pveforge", "name of the scoped API token to create")
 	cmd.Flags().StringArrayVar(&grantSpecs, "grant", nil, "an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
 

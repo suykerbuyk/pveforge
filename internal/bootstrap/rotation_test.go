@@ -385,7 +385,7 @@ func TestRun_R5c_UndecryptablePresentAborts(t *testing.T) {
 	if m := session.mutating(); len(m) != 0 {
 		t.Fatalf("token commands issued: %v", m)
 	}
-	if !session.pve.tokens["pveforge"] {
+	if !session.pve.has(heldID) {
 		t.Fatal("the token is gone from PVE")
 	}
 	if v.calls != 0 {
@@ -426,7 +426,7 @@ func TestRun_R5d_ChangedTokenIDOrphansNeverRemoves(t *testing.T) {
 	if res.TokenOutcome != OutcomeMinted || res.OrphanedToken != heldID {
 		t.Fatalf("result = %+v", res)
 	}
-	if session.ran("pveum user token remove") || !session.pve.tokens["pveforge"] {
+	if session.ran("pveum user token remove") || !session.pve.has(heldID) {
 		t.Fatalf("A was removed: %v", session.commands)
 	}
 }
@@ -865,7 +865,7 @@ func TestRun_R10b_AddTransportError(t *testing.T) {
 		s, _, tr, v := prior(t, map[string]fakeRunResult{"pveum user token add": {err: errors.New("connection lost"), applies: true}})
 		res, err := Run(context.Background(), s.opts, tr, v)
 		wantRevoked(t, res, err)
-		if res.LeftoverToken != "" || !tr.reconnectSession.ran("pveum user token remove") || tr.reconnectSession.pve.tokens["pveforge"] {
+		if res.LeftoverToken != "" || !tr.reconnectSession.ran("pveum user token remove") || tr.reconnectSession.pve.has(heldID) {
 			t.Fatalf("the fresh token was not removed: %+v, %v", res, tr.reconnectSession.commands)
 		}
 	})
@@ -913,7 +913,7 @@ func TestRun_R11_R12_ParseOrGrantFails(t *testing.T) {
 			s, session, tr, v := prior(t, byCmd)
 			res, err := Run(context.Background(), s.opts, tr, v)
 			wantRevoked(t, res, err)
-			if session.count("pveum user token remove") != 2 || session.pve.tokens["pveforge"] {
+			if session.count("pveum user token remove") != 2 || session.pve.has(heldID) {
 				t.Fatalf("want the prior remove and the fresh remove, got %v", session.commands)
 			}
 		})
@@ -1036,7 +1036,7 @@ func TestRun_R13h_CancelInRetryDelayKeepsTheVerdict(t *testing.T) {
 				t.Fatalf("validator calls = %d, want %d", v.calls, postMint+1)
 			}
 			noToken(t, path)
-			if session.pve.tokens["pveforge"] {
+			if session.pve.has(heldID) {
 				t.Fatalf("the fresh token was not removed: %v", session.commands)
 			}
 			if prior {
@@ -1144,7 +1144,7 @@ func TestRun_R17d_CleanupRemoveRefusedButGone(t *testing.T) {
 	session.seq = map[string][]fakeRunResult{"pveum user token remove": {{}, {res: RunResult{ExitCode: 2, Stderr: "no such token"}, applies: true}}}
 	res, err := Run(context.Background(), s.opts, tr, v)
 	wantRevoked(t, res, err)
-	if res.LeftoverToken != "" || res.LeftoverState != "" || session.pve.tokens["pveforge"] {
+	if res.LeftoverToken != "" || res.LeftoverState != "" || session.pve.has(heldID) {
 		t.Fatalf("leftover = %q (%q), tokens = %v", res.LeftoverToken, res.LeftoverState, session.pve.tokens)
 	}
 	if strings.Contains(err.Error(), "left the token behind") {
@@ -1163,15 +1163,15 @@ func TestRun_R18_CleanupSurvivesCancelledContext(t *testing.T) {
 	path := newTestRoster(t, "")
 	pve := newFakePVE()
 	session := &fakeSession{pve: pve, byCmd: map[string]fakeRunResult{"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("x")}, onRun: func(context.Context, string) {
-		pve.tokens["pveforge"] = true // it ran on the host...
-		cancel()                      // ...and then the command context died
+		pve.put(heldID) // it ran on the host...
+		cancel()        // ...and then the command context died
 	}}}}
 	fresh := &fakeSession{pve: pve}
 	res, err := Run(ctx, baseOptions(path), &fakeTransport{installFingerprint: "SHA256:abc", session: session, reconnectSession: fresh}, &fakeValidator{})
 	if err == nil || res == nil || res.LeftoverToken != "" {
 		t.Fatalf("result = %+v, err = %v", res, err)
 	}
-	if !fresh.ran("pveum user token remove") || pve.tokens["pveforge"] {
+	if !fresh.ran("pveum user token remove") || pve.has(heldID) {
 		t.Fatalf("the cleanup remove did not succeed: %v / attempted %v", fresh.commands, fresh.attempted)
 	}
 }

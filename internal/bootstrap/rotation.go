@@ -92,6 +92,17 @@ var (
 	// passphrase. A decrypt failure is not a verdict about the token (the
 	// passphrase may simply be wrong), so it is never removed.
 	ErrTokenUndecryptable = errors.New("the roster's token for this target will not decrypt with the given passphrase (a wrong passphrase, or corruption)")
+	// ErrInvalidTokenOwner: --token-owner is not a PVE principal pveforge
+	// can own a token with (CheckTokenOwner). Refused before any SSH, and
+	// never a verdict.
+	ErrInvalidTokenOwner = errors.New("invalid token owner")
+	// ErrTokenOwnerMismatch: the roster holds a token owned by another
+	// principal and this run named no owner, so the owner it would use is
+	// only a default. Minting would orphan the held token and silently
+	// re-point the roster at a different principal, so the run is refused
+	// before any SSH. Naming the owner explicitly is what makes such a
+	// change deliberate. Never a verdict: nothing is removed.
+	ErrTokenOwnerMismatch = errors.New("the roster's token belongs to another owner and no --token-owner was given")
 	// ErrRoleHasNoPrivileges: a requested role exists on PVE but grants
 	// nothing (NoAccess), so no token holding it could ever validate.
 	ErrRoleHasNoPrivileges = errors.New("the requested ACL role grants no privileges")
@@ -324,10 +335,10 @@ func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, ow
 	if indexFunc(len(nodes), func(i int) bool { return nodes[i].Node == opts.Node }) < 0 {
 		return false, fmt.Errorf("preflight: %w: %q", ErrUnknownNode, opts.Node)
 	}
-	if err := checkOwner(ctx, owner, opts.PVEUsername, want, rolePrivs); err != nil {
+	if err := checkOwner(ctx, owner, opts.TokenOwner, want, rolePrivs); err != nil {
 		return false, fmt.Errorf("preflight: %w", err)
 	}
-	present, err := tokenPresent(ctx, s, opts.PVEUsername, opts.TokenID)
+	present, err := tokenPresent(ctx, s, opts.TokenOwner, opts.TokenID)
 	if err != nil {
 		return false, fmt.Errorf("preflight: %w", err)
 	}
@@ -642,7 +653,7 @@ func (r *runner) readToken(reconnect bool) tokenState {
 			return tokenUnreadable
 		}
 	}
-	present, err := tokenPresent(sctx, r.session, r.opts.PVEUsername, r.opts.TokenID)
+	present, err := tokenPresent(sctx, r.session, r.opts.TokenOwner, r.opts.TokenID)
 	if err != nil {
 		return tokenUnreadable
 	}
@@ -653,7 +664,7 @@ func (r *runner) readToken(reconnect bool) tokenState {
 }
 
 func (r *runner) removeCmd() string {
-	return fmt.Sprintf("pveum user token remove %s %s", sshexec.ShellQuote(r.opts.PVEUsername), sshexec.ShellQuote(r.opts.TokenID))
+	return fmt.Sprintf("pveum user token remove %s %s", sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
 }
 
 // fail returns the partial result for a failure after the token phase began.
@@ -751,7 +762,7 @@ func (r *runner) validatePostMint(secret string) (verdict, nonVerdict error) {
 // through r.fail with the partial result.
 func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) {
 	addCmd := fmt.Sprintf("pveum user token add %s %s --privsep 1 --output-format json",
-		sshexec.ShellQuote(r.opts.PVEUsername), sshexec.ShellQuote(r.opts.TokenID))
+		sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
 	res, err := r.session.Run(r.ctx, addCmd)
 	if err != nil {
 		// Ambiguous: the add may have run. Re-read, never infer.
@@ -817,7 +828,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 	}
 	notHeld := func() error {
 		return fmt.Errorf("bootstrap %s: %w: %s; to replace it deliberately, remove it first: pveum user token remove %s %s (this revokes it for every holder)",
-			r.opts.TargetID, ErrTokenNotHeld, r.fullID, sshexec.ShellQuote(r.opts.PVEUsername), sshexec.ShellQuote(r.opts.TokenID))
+			r.opts.TargetID, ErrTokenNotHeld, r.fullID, sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
 	}
 
 	switch {
@@ -846,7 +857,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 		// is replaced below with nothing revoked.
 		if present {
 			return nil, fmt.Errorf("bootstrap %s: %w: %s; the token was left untouched on PVE and in the roster. If it really is lost, remove it deliberately: pveum user token remove %s %s (this revokes it for every holder)",
-				r.opts.TargetID, ErrTokenUndecryptable, r.fullID, sshexec.ShellQuote(r.opts.PVEUsername), sshexec.ShellQuote(r.opts.TokenID))
+				r.opts.TargetID, ErrTokenUndecryptable, r.fullID, sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
 		}
 		reason = "persisted token undecryptable"
 		reasonErr = held.DecryptErr
