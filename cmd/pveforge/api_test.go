@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1463,5 +1464,86 @@ func TestNewAPIPostCmd_CancelledContextEndsTheWait(t *testing.T) {
 				t.Errorf("polls went from %d to %d after the command returned — the wait did not stop", settled, got)
 			}
 		})
+	}
+}
+
+// craftedUPID passes responseUPID (the "UPID:" prefix) and
+// validateUPIDShape (>= 7 colons, a non-empty node field), and carries a
+// line break that would forge a stderr line if printed raw.
+const craftedUPID = "UPID:qa-pve-01:0000A:0000B:0000C:qmstart:100:root@pam!t\nwarning: forged:"
+
+// quotedUPIDIn reports whether line holds the UPID as one JSON-quoted
+// token that decodes back to exactly want.
+func quotedUPIDIn(t *testing.T, line, want string) bool {
+	t.Helper()
+	i := strings.Index(line, `"UPID:`)
+	if i < 0 {
+		return false
+	}
+	dec := json.NewDecoder(strings.NewReader(line[i:]))
+	var got string
+	return dec.Decode(&got) == nil && got == want
+}
+
+func lineWith(s, prefix string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.HasPrefix(l, prefix) {
+			return l
+		}
+	}
+	return ""
+}
+
+// CU1: a crafted UPID on the locked --no-wait path (api.go:152 and :155)
+// prints as one JSON-quoted token; no forged line appears.
+func TestNewAPIPostCmd_CU1_CraftedUPIDCannotForgeAStderrLine(t *testing.T) {
+	f := &apiTaskFake{mutPath: "/nodes/qa-pve-01/qemu/100/status/start", body: fmt.Sprintf("%q", craftedUPID)}
+	rosterPath := newAPITaskServer(t, f)
+	errOut := &syncBuffer{}
+	if _, err := runAPICmd(context.Background(), http.MethodPost, errOut, "--roster", rosterPath, "--no-wait", f.mutPath, "qa-pve-01"); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	e := errOut.String()
+	if lineWith(e, "warning:") != "" {
+		t.Fatalf("a forged warning line:\n%s", e)
+	}
+	if l := lineWith(e, "dispatched PVE task "); !quotedUPIDIn(t, l, craftedUPID) {
+		t.Fatalf("dispatched line %q does not carry the quoted UPID", l)
+	}
+	if l := lineWith(e, "notice: --no-wait"); !quotedUPIDIn(t, l, craftedUPID) {
+		t.Fatalf("notice line %q does not carry the quoted UPID", l)
+	}
+}
+
+// CU1b: the same through the unlocked --no-wait notice (api.go:157). That
+// path also prints its own, legitimate --unsafe-no-lock warning.
+func TestNewAPIPostCmd_CU1b_CraftedUPIDUnlockedPath(t *testing.T) {
+	f := &apiTaskFake{mutPath: "/cluster/backup", body: fmt.Sprintf("%q", craftedUPID)}
+	rosterPath := newAPITaskServer(t, f)
+	errOut := &syncBuffer{}
+	if _, err := runAPICmd(context.Background(), http.MethodPost, errOut, "--roster", rosterPath, "--unsafe-no-lock", "--no-wait", f.mutPath, "qa-pve-01"); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	e := errOut.String()
+	if lineWith(e, "warning: forged") != "" {
+		t.Fatalf("a forged warning line:\n%s", e)
+	}
+	if l := lineWith(e, "notice: --no-wait"); !quotedUPIDIn(t, l, craftedUPID) {
+		t.Fatalf("notice line %q does not carry the quoted UPID", l)
+	}
+}
+
+// CU2: a normal UPID needs no quoting: the dispatched line is byte-identical
+// to before.
+func TestNewAPIPostCmd_CU2_NormalUPIDLineUnchanged(t *testing.T) {
+	upid := "UPID:qa-pve-01:00001234:00005678:65F0A1B2:qmstart:100:root@pam:"
+	f := &apiTaskFake{mutPath: "/nodes/qa-pve-01/qemu/100/status/start", body: fmt.Sprintf("%q", upid)}
+	rosterPath := newAPITaskServer(t, f)
+	errOut := &syncBuffer{}
+	if _, err := runAPICmd(context.Background(), http.MethodPost, errOut, "--roster", rosterPath, "--no-wait", f.mutPath, "qa-pve-01"); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "dispatched PVE task "+upid+"\n") {
+		t.Fatalf("the dispatched line changed:\n%s", errOut.String())
 	}
 }

@@ -4,7 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -372,5 +376,52 @@ func TestRealAPIValidator_ValidateTokenGrants_BuildClientError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "build pve client") {
 		t.Fatalf("expected the error to be wrapped with context, got: %v", err)
+	}
+}
+
+// D1-base (S4g): the REAL validator, against an httptest TLS server, yields
+// errors that match bootstrap's own sentinels, so isVerdict sees them. A
+// sentinel "aliased" by an errors.New copy instead of = pve.X would make
+// every verdict look like a non-verdict; this turns that red.
+func TestRealAPIValidator_D1_SentinelsAreTheAliases(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		want   error
+		not    error
+	}{
+		"403":          {http.StatusForbidden, `{"data":null}`, ErrNotAuthorized, ErrNoGrants},
+		"empty list":   {http.StatusOK, `{"data":[]}`, ErrNoGrants, ErrNotAuthorized},
+		"node missing": {http.StatusOK, `{"data":[{"node":"qa-pve-02"}]}`, ErrWrongScope, ErrNoGrants},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api2/json/nodes" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = NewAPIValidator().ValidateTokenGrants(context.Background(), APIConfig{
+				Host: host, APIPort: port, InsecureTLS: true, TokenID: "root@pam!t", TokenSecret: "s",
+			}, "qa-pve-01")
+			if !errors.Is(err, tc.want) || errors.Is(err, tc.not) {
+				t.Fatalf("err = %v; want errors.Is(%v) and not %v", err, tc.want, tc.not)
+			}
+			if !isVerdict(err) {
+				t.Fatalf("isVerdict(%v) = false", err)
+			}
+		})
 	}
 }

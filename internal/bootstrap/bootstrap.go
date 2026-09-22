@@ -10,7 +10,9 @@
 // tests fast, deterministic, and free of any live-host dependency. The
 // concrete adapters wiring the real packages to these interfaces live in
 // deps.go; cmd/pveforge/bootstrap.go is the only other caller of those
-// constructors.
+// constructors. (internal/lock and internal/roster are local files, not
+// network I/O, and are used directly: Run holds a per-target lock.Mutation
+// for its whole duration.)
 package bootstrap
 
 import (
@@ -20,6 +22,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -121,12 +124,44 @@ type Options struct {
 	Passphrase string
 }
 
-// Result reports what Run did.
+// Result reports what Run did. Run returns a non-nil *Result together with
+// an error whenever the token phase had begun (a remove, a clear or an add
+// was attempted), so a failure is reported, never silent: TokenOutcome and
+// Validation always say what happened to the credential.
 type Result struct {
 	HostKeyFingerprint string
-	// TokenID is the full "userid!tokenname" of the token that was
-	// created and persisted.
+	// TokenID is the full "userid!tokenname" of the requested token.
 	TokenID string
+
+	// TokenOutcome is one of the Outcome* constants.
+	TokenOutcome string
+	// Validation is one of the Validation* constants.
+	Validation string
+	// ReplacedReason says why the roster's previous token was replaced (a
+	// verdict about it, or "persisted token undecryptable" for a token that
+	// will not decrypt and no longer exists on PVE; one that still exists
+	// is never replaced, see ErrTokenUndecryptable); ReplacedErr is the same
+	// as an error, for errors.Is.
+	ReplacedReason string
+	ReplacedErr    error
+	// PriorRevoked reports that this run removed the roster's previous
+	// token on PVE: every copy of its secret, in every roster, is dead.
+	PriorRevoked bool
+	// OrphanedToken names a token a changed --token-id left live on PVE,
+	// held by no roster any more. Never removed. Set only once the new
+	// token is persisted.
+	OrphanedToken string
+	// LeftoverToken is the id of a token this run created but could not
+	// prove removed; its secret is lost. It holds the id alone.
+	LeftoverToken string
+	// LeftoverState is LeftoverExists or LeftoverMayExist when
+	// LeftoverToken is set, else "".
+	LeftoverState string
+	// RosterToken is one of the RosterToken* constants, or "".
+	RosterToken string
+	// PriorToken is PriorTokenUnknown when a remove's outcome could not be
+	// established.
+	PriorToken string
 }
 
 // Run executes the full bootstrap flow: establish an SSH connection to the
@@ -161,25 +196,41 @@ type Result struct {
 // generating a brand-new keypair — and therefore orphaning the
 // previously-installed one in authorized_keys — on every retry.
 //
-// The token itself is deleted-and-recreated rather than reused UNLESS the
-// reconnect branch finds an already-persisted token that still validates
-// (see trySkipTokenRecreate) — Proxmox never re-displays a token secret
-// after creation, so an existing token whose secret pveforge doesn't
-// already have on disk is unrecoverable, and this is what makes a
-// bootstrap run that died before persisting a fresh token safe to retry.
-// But a token that DOES validate, on a reconnect against an
-// already-healthy target, is left alone rather than destroyed and
-// replaced — see pveforge-bootstrap-skip-token-recreate-when-valid.
+// The token phase (tokenPhase, rotation.go) never removes a token without
+// a definite verdict about a token THIS roster holds, and never removes a
+// same-named token this roster does not hold, or one whose held secret
+// will not decrypt (a wrong passphrase is not a verdict about the token).
+// Removal revokes the secret for every holder, so a transient or
+// unverifiable error aborts instead.
+// Every check that can run before a remove does (preflight, rotation.go),
+// the roster's copy of a dead token is cleared right after the remove, and
+// every later failure is reported with a partial Result.
+//
+// The whole run holds a per-target lock.Mutation, so two bootstraps of one
+// target on one roster cannot interleave remove and add (tokens are removed
+// by name, so an interleaving could revoke the other run's fresh token).
 func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValidator) (*Result, error) {
 	applyDefaults(&opts)
 	defaultHostNodeFromRoster(&opts)
 	if err := validateOptions(&opts); err != nil {
 		return nil, err
 	}
+	aclPath, err := checkedACLPath(opts.ACLPath)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+	opts.ACLPath = aclPath
 	sshUser, err := pamLocalUser(opts.PVEUsername)
 	if err != nil {
 		return nil, err
 	}
+
+	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err)
+	}
+	defer func() { _ = unlock() }()
+
 	if err := ensureTargetExists(opts); err != nil {
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
@@ -192,43 +243,38 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 
-	var session SSHSession
-	var hostKeyFP string
+	r := &runner{ctx: ctx, opts: opts, transport: transport, api: api, fullID: fullTokenID}
 
 	if existing != nil {
-		session, err = transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
+		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — this needs deliberate operator reconciliation; pveforge will not silently re-trust and re-pin a different host key", opts.TargetID, err)
 		}
-		defer func() { _ = session.Close() }()
-		hostKeyFP = existing.HostKeyFingerprint
-
-		if res := trySkipTokenRecreate(ctx, opts, api, hostKeyFP, fullTokenID); res != nil {
-			if err := persistTargetMeta(opts); err != nil {
-				return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
-			}
-			return res, nil
-		}
+		r.session = session
+		defer func() { _ = r.session.Close() }()
+		r.ident = sshIdentity{addr: addr, user: sshUser, privateKeyPEM: existing.PrivateKeyPEM, hostKeyFP: existing.HostKeyFingerprint}
 	} else {
 		keypair, genErr := sshexec.GenerateEd25519Keypair(fmt.Sprintf("pveforge@%s", opts.TargetID))
 		if genErr != nil {
 			return nil, fmt.Errorf("bootstrap %s: generate keypair: %w", opts.TargetID, genErr)
 		}
 
-		hostKeyFP, err = transport.InstallPubkeyViaPassword(ctx, addr, sshUser, opts.PVEPassword, keypair.AuthorizedKeyLine)
+		hostKeyFP, err := transport.InstallPubkeyViaPassword(ctx, addr, sshUser, opts.PVEPassword, keypair.AuthorizedKeyLine)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: install pubkey: %w", opts.TargetID, err)
 		}
 
-		session, err = transport.DialWithKey(ctx, addr, sshUser, keypair.PrivateKeyPEM, hostKeyFP)
+		session, err := transport.DialWithKey(ctx, addr, sshUser, keypair.PrivateKeyPEM, hostKeyFP)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: connect with fresh key: %w", opts.TargetID, err)
 		}
-		defer func() { _ = session.Close() }()
+		r.session = session
+		defer func() { _ = r.session.Close() }()
+		r.ident = sshIdentity{addr: addr, user: sshUser, privateKeyPEM: keypair.PrivateKeyPEM, hostKeyFP: hostKeyFP}
 
 		// Persist immediately — proven to work, and this is what makes a
-		// later failure in this same Run (token creation, ACL grant,
-		// validation) safe to retry without generating a second keypair.
+		// later failure in this same Run safe to retry without generating a
+		// second keypair.
 		if err := roster.WriteSSHAuth(opts.RosterPath, opts.TargetID, roster.SSHWrite{
 			User:                sshUser,
 			PublicKey:           keypair.AuthorizedKeyLine,
@@ -238,37 +284,13 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 			return nil, fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err)
 		}
 	}
+	r.res = &Result{HostKeyFingerprint: r.ident.hostKeyFP, TokenID: fullTokenID}
 
-	tokenSecret, err := createToken(ctx, session, opts.PVEUsername, opts.TokenID)
+	present, err := preflight(ctx, r.session, opts)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap %s: create token: %w", opts.TargetID, err)
-	}
-	if err := grantACL(ctx, session, fullTokenID, opts.ACLPath, opts.ACLRole); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: grant acl: %w", opts.TargetID, err)
-	}
-
-	if err := api.ValidateTokenGrants(ctx, APIConfig{
-		Host:        opts.Host,
-		APIPort:     opts.APIPort,
-		InsecureTLS: opts.InsecureTLS,
-		TokenID:     fullTokenID,
-		TokenSecret: tokenSecret,
-	}, opts.Node); err != nil {
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
-
-	if err := roster.WriteTokenAuth(opts.RosterPath, opts.TargetID, roster.TokenWrite{
-		TokenID:         fullTokenID,
-		SecretPlaintext: []byte(tokenSecret),
-	}, opts.Passphrase); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: persist token auth: %w", opts.TargetID, err)
-	}
-
-	if err := persistTargetMeta(opts); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
-	}
-
-	return &Result{HostKeyFingerprint: hostKeyFP, TokenID: fullTokenID}, nil
+	return r.tokenPhase(present)
 }
 
 // persistTargetMeta writes opts' resolved Host/Node/APIPort/InsecureTLS
@@ -281,7 +303,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 // this fix) never got them written at all — so e.g. `bootstrap
 // --insecure-tls` against such a target silently lost that setting the
 // moment bootstrap finished, even though bootstrap's OWN HTTPS calls
-// (ValidateTokenGrants, above and in trySkipTokenRecreate) correctly used
+// (ValidateTokenGrants, in the skip-check and post-mint) correctly used
 // it for themselves.
 //
 // Called from BOTH of Run's success paths (the token-recreate-skipped
@@ -495,139 +517,14 @@ func loadExistingSSHAuth(opts Options) (*existingSSHAuth, error) {
 	}, nil
 }
 
-// existingTokenAuth is what a prior successful bootstrap already proved
-// and persisted for a target's API token: its full id and decrypted
-// secret.
-type existingTokenAuth struct {
-	FullTokenID string
-	Secret      string
-}
-
-// loadExistingTokenAuth returns opts.TargetID's persisted token auth,
-// decrypted with opts.Passphrase, or nil if this target has no token auth
-// persisted yet — i.e. there is nothing for trySkipTokenRecreate to check.
-//
-// Deliberately decrypts ONLY tg.Token.SecretEnc via roster.DecryptString —
-// never tg.Resolve, which unconditionally also decrypts SSH.PrivateKeyEnc
-// (see roster.Target.Resolve, and loadExistingSSHAuth's identical
-// reasoning in the other direction). This call has no use for the SSH
-// key, and an unrelated SSH-decrypt failure (corruption, format drift,
-// anything) must not block checking whether the existing token secret
-// still validates.
-//
-// Called after ensureTargetExists, so opts.TargetID is guaranteed to
-// exist in the roster by the time this runs.
-func loadExistingTokenAuth(opts Options) (*existingTokenAuth, error) {
-	r, err := roster.Load(opts.RosterPath)
-	if err != nil {
-		return nil, fmt.Errorf("load roster %s: %w", opts.RosterPath, err)
-	}
-	tg := r.Find(opts.TargetID)
-	if tg == nil {
-		return nil, fmt.Errorf("target %q not found in roster", opts.TargetID)
-	}
-	if tg.Token == nil {
-		return nil, nil
-	}
-	secret, err := roster.DecryptString(tg.Token.SecretEnc, opts.Passphrase)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt existing token secret for %q: %w", opts.TargetID, err)
-	}
-	return &existingTokenAuth{FullTokenID: tg.Token.ID, Secret: string(secret)}, nil
-}
-
-// trySkipTokenRecreate is the fix for
-// pveforge-bootstrap-skip-token-recreate-when-valid: a reconnect against
-// an already-bootstrapped target used to always delete and recreate a
-// perfectly good, already-working token (see createToken's own doc
-// comment for why that was the original tradeoff). This checks whether
-// the existing persisted token still validates BEFORE createToken/
-// grantACL run at all, so a healthy re-invocation never destroys a
-// working token.
-//
-// Returns a non-nil *Result only on a genuine, provable no-op: the
-// persisted token's id matches wantFullTokenID (what THIS invocation
-// actually requested, opts.PVEUsername+"!"+opts.TokenID — a target can
-// have a persisted token under one name while this run asks for a
-// different one, e.g. --token-id changed between runs, or rotating to a
-// new token name; that is a real "create a different token" request, not
-// a no-op, no matter how healthy the old one still is), AND it decrypted,
-// AND it validated. Every other outcome (no token persisted yet, id
-// mismatch, decrypt failure, validation failure) returns nil, and the
-// caller falls through to the existing mint-fresh-token flow exactly as
-// if this check had never run — a broken, stale, or simply
-// differently-named persisted token must never become a hard failure
-// here, since minting a fresh one is Run's own established, safe recovery
-// path. This function itself never writes the roster: nothing about the
-// TOKEN changed on the skip path, so there is nothing for IT to persist —
-// Run's own caller-side handling of a non-nil result here still calls
-// persistTargetMeta afterward, since the target's plain connection
-// metadata (host/node/api_port/insecure_tls) is a separate concern from
-// token auth and can still need writing even when the token doesn't
-// (pveforge-bootstrap-insecure-tls-not-persisted).
-func trySkipTokenRecreate(ctx context.Context, opts Options, api APIValidator, hostKeyFP, wantFullTokenID string) *Result {
-	tok, err := loadExistingTokenAuth(opts)
-	if err != nil || tok == nil {
-		return nil
-	}
-	if tok.FullTokenID != wantFullTokenID {
-		return nil
-	}
-	if err := api.ValidateTokenGrants(ctx, APIConfig{
-		Host:        opts.Host,
-		APIPort:     opts.APIPort,
-		InsecureTLS: opts.InsecureTLS,
-		TokenID:     tok.FullTokenID,
-		TokenSecret: tok.Secret,
-	}, opts.Node); err != nil {
-		return nil
-	}
-	return &Result{HostKeyFingerprint: hostKeyFP, TokenID: tok.FullTokenID}
-}
-
-// createToken ensures a fresh scoped API token exists for userID/tokenID,
-// deleting any existing token by that name first. Proxmox never
-// re-displays a token's secret after creation, so an existing token whose
-// secret pveforge doesn't already have on disk is unrecoverable and must
-// be replaced rather than reused — this is what makes a bootstrap run that
-// died between token creation and roster persistence safe to retry.
-//
-// NOTE: the exact `pveum user token add/remove` command syntax and its
-// --output-format json response shape are reproduced here from PVE
-// documentation/convention, not independently verified against a live
-// host in this implementation session (no live PVE access was available)
-// — the same empirical-verification gap flagged for the root-only-fields
-// registry. parseTokenSecret is deliberately lenient about the response
-// shape (see its comment) to reduce the blast radius if the assumption is
-// wrong, but this still needs a manual live-host check before being
-// trusted in production.
-func createToken(ctx context.Context, session SSHSession, userID, tokenID string) (secret string, err error) {
-	// Best-effort cleanup of a token left over from a prior partial run.
-	// Errors ignored deliberately: "no such token" is the expected/common
-	// case, and pveum's exit status for that isn't being pattern-matched
-	// here to avoid coupling to CLI text that may vary across PVE
-	// versions.
-	_, _ = session.Run(ctx, fmt.Sprintf("pveum user token remove %s %s", sshexec.ShellQuote(userID), sshexec.ShellQuote(tokenID)))
-
-	res, err := session.Run(ctx, fmt.Sprintf("pveum user token add %s %s --privsep 1 --output-format json",
-		sshexec.ShellQuote(userID), sshexec.ShellQuote(tokenID)))
-	if err != nil {
-		return "", fmt.Errorf("run pveum user token add: %w", err)
-	}
-	if res.ExitCode != 0 {
-		return "", fmt.Errorf("pveum user token add exited %d: %s", res.ExitCode, res.Stderr)
-	}
-	return parseTokenSecret(res.Stdout)
-}
-
 // parseTokenSecret extracts the token secret from `pveum user token add
 // --output-format json`'s stdout. It tries the CLI's typical bare-value
 // shape ({"value": "..."}) first, then falls back to the REST-API-style
 // {"data": {"value": "..."}} envelope in case the installed pveum wraps it
 // the same way the HTTP API does — deliberately lenient rather than
-// asserting one shape, given this hasn't been checked against a live host
-// (see createToken's doc comment). Either way, it fails loudly rather than
-// silently returning the wrong string if neither shape matches.
+// asserting one shape, given this hasn't been checked against a live host.
+// Either way, it fails loudly rather than silently returning the wrong
+// string if neither shape matches.
 //
 // The failure branch deliberately never echoes stdout: a response that
 // fails to parse as either expected shape is exactly the case most likely
@@ -665,8 +562,8 @@ func parseTokenSecret(stdout string) (string, error) {
 }
 
 // grantACL grants role at path to the token identified by fullTokenID
-// (userid!tokenname). Same live-host-verification caveat as createToken
-// applies to the exact `pveum acl modify` flag names.
+// (userid!tokenname). The exact `pveum acl modify` flag names are reproduced
+// from PVE documentation, like the token add/remove commands in rotation.go.
 func grantACL(ctx context.Context, session SSHSession, fullTokenID, path, role string) error {
 	cmd := fmt.Sprintf("pveum acl modify %s --tokens %s --roles %s",
 		sshexec.ShellQuote(path), sshexec.ShellQuote(fullTokenID), sshexec.ShellQuote(role))

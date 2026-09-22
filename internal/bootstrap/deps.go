@@ -87,3 +87,13 @@ func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, 
 	}
 	return pve.ValidateTokenGrants(ctx, c, expectNode)
 }
+
+// The verdict sentinels, aliased from internal/pve (never copied with
+// errors.New: a copy would make every verdict look like a non-verdict to
+// isVerdict). deps.go owns the pve import; bootstrap.go matches them only
+// through isVerdict and postMintRetryable.
+var (
+	ErrNoGrants      = pve.ErrNoGrants
+	ErrWrongScope    = pve.ErrWrongScope
+	ErrNotAuthorized = pve.ErrNotAuthorized
+)

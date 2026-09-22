@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -13,27 +14,149 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
-// fakeSession is a scriptable SSHSession: each Run call is answered by
-// popping the next entry off responses (in order), or by consulting byCmd
-// if set for that exact command string. Close is a no-op that just records
-// whether it was called.
+// fakePVE is the token state a fake PVE host holds: which token names
+// exist. It is shared between a run's original session and any session a
+// reconnect returns, so a re-read sees what an add or remove did.
+type fakePVE struct {
+	tokens map[string]bool
+}
+
+func newFakePVE(present ...string) *fakePVE {
+	p := &fakePVE{tokens: map[string]bool{}}
+	for _, t := range present {
+		p.tokens[t] = true
+	}
+	return p
+}
+
+// fakeSession is a scriptable SSHSession. A command is answered by the
+// longest byCmd prefix that matches it (deterministic, unlike map order);
+// otherwise by the defaults below, which behave like a small PVE host:
+// role list and /nodes answer for baseOptions, and token list/add/remove
+// read and change pve's token state.
+//
+// Like sshexec.Client.Run it honours ctx: a command whose ctx is done on
+// entry, or becomes done while an onRun hook runs, returns ctx.Err(). Such
+// a command is recorded in attempted but not in commands.
 type fakeSession struct {
-	byCmd    map[string]fakeRunResult
-	closed   bool
-	commands []string
+	byCmd map[string]fakeRunResult
+	// seq, per prefix, answers successive matching commands in order (the
+	// first entry for the first call, ...); once a prefix's sequence is used
+	// up, byCmd and the defaults answer. The longest matching prefix wins.
+	seq       map[string][]fakeRunResult
+	pve       *fakePVE
+	onRun     func(ctx context.Context, cmd string) // runs inside every Run, before the answer
+	closed    bool
+	commands  []string
+	attempted []string
 }
 
 type fakeRunResult struct {
 	res RunResult
 	err error
+	// applies: the command's effect on pve (an add or a remove) happens
+	// even though this result reports a failure (a transport error after
+	// the command ran on the host).
+	applies bool
+	onRun   func(ctx context.Context, cmd string)
 }
 
-func (s *fakeSession) Run(_ context.Context, cmd string) (RunResult, error) {
-	s.commands = append(s.commands, cmd)
-	for prefix, r := range s.byCmd {
-		if strings.HasPrefix(cmd, prefix) {
-			return r.res, r.err
+const fakeDefaultSecret = "fake-default-secret"
+
+func (s *fakeSession) state() *fakePVE {
+	if s.pve == nil {
+		s.pve = newFakePVE()
+	}
+	return s.pve
+}
+
+// tokenArg returns the token name argument of a pveum token command:
+// "pveum user token add|remove <user> <token> ..." (field 5).
+func tokenArg(cmd string) string {
+	f := strings.Fields(cmd)
+	if len(f) < 6 {
+		return ""
+	}
+	return strings.Trim(f[5], "'")
+}
+
+func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
+	s.attempted = append(s.attempted, cmd)
+	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
+	}
+	var match *fakeRunResult
+	best := -1
+	seqKey := ""
+	for prefix, rs := range s.seq {
+		if len(rs) > 0 && strings.HasPrefix(cmd, prefix) && len(prefix) > best {
+			r := rs[0]
+			match, best, seqKey = &r, len(prefix), prefix
 		}
+	}
+	if seqKey != "" {
+		s.seq[seqKey] = s.seq[seqKey][1:]
+	} else {
+		for prefix, r := range s.byCmd {
+			if strings.HasPrefix(cmd, prefix) && len(prefix) > best {
+				r := r
+				match, best = &r, len(prefix)
+			}
+		}
+	}
+	if s.onRun != nil {
+		s.onRun(ctx, cmd)
+	}
+	if match != nil && match.onRun != nil {
+		match.onRun(ctx, cmd)
+	}
+	if err := ctx.Err(); err != nil {
+		return RunResult{}, err
+	}
+	s.commands = append(s.commands, cmd)
+
+	st := s.state()
+	apply := func() {
+		switch {
+		case strings.HasPrefix(cmd, "pveum user token add"):
+			st.tokens[tokenArg(cmd)] = true
+		case strings.HasPrefix(cmd, "pveum user token remove"):
+			delete(st.tokens, tokenArg(cmd))
+		}
+	}
+	if match != nil {
+		if (match.err == nil && match.res.ExitCode == 0) || match.applies {
+			apply()
+		}
+		return match.res, match.err
+	}
+	switch {
+	case strings.HasPrefix(cmd, "pveum role list"):
+		return RunResult{Stdout: `[{"privs":"VM.Allocate","roleid":"PVEVMAdmin","special":1}]`}, nil
+	case strings.HasPrefix(cmd, "pvesh get /nodes"):
+		return RunResult{Stdout: `[{"node":"qa-pve-01","status":"online"}]`}, nil
+	case strings.HasPrefix(cmd, "pveum user token list"):
+		names := make([]string, 0, len(st.tokens))
+		for n := range st.tokens {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		var b strings.Builder
+		b.WriteString("[")
+		for i, n := range names {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"expire":0,"privsep":1,"tokenid":%q}`, n)
+		}
+		b.WriteString("]")
+		return RunResult{Stdout: b.String()}, nil
+	case strings.HasPrefix(cmd, "pveum user token add"):
+		apply()
+		return RunResult{Stdout: tokenAddJSON(fakeDefaultSecret)}, nil
+	case strings.HasPrefix(cmd, "pveum user token remove"):
+		apply()
+		return RunResult{}, nil
 	}
 	return RunResult{ExitCode: 0}, nil
 }
@@ -43,19 +166,51 @@ func (s *fakeSession) Close() error {
 	return nil
 }
 
+// ran reports whether a command with this prefix completed (is in commands).
+func (s *fakeSession) ran(prefix string) bool { return s.count(prefix) > 0 }
+
+func (s *fakeSession) count(prefix string) int {
+	n := 0
+	for _, c := range s.commands {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// mutating returns the token-changing commands the session ran.
+func (s *fakeSession) mutating() []string {
+	var out []string
+	for _, c := range s.commands {
+		if strings.HasPrefix(c, "pveum user token add") || strings.HasPrefix(c, "pveum user token remove") || strings.HasPrefix(c, "pveum acl modify") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // fakeTransport is a scriptable SSHTransport.
 type fakeTransport struct {
 	installFingerprint string
 	installErr         error
 	dialErr            error
 	reconnectErr       error
-	session            *fakeSession
+	// reconnectErrs, if set, overrides reconnectErr per call (0-indexed; a
+	// call beyond its length reuses reconnectErr).
+	reconnectErrs []error
+	session       *fakeSession
+	// reconnectSession, if set, is what ReconnectWithPinnedKey returns
+	// (the fresh session after a transport error); otherwise session.
+	reconnectSession *fakeSession
 
 	installCalls            int
 	dialCalls               int
 	reconnectCalls          int
 	installedKeyLines       []string // every authorizedKeyLine InstallPubkeyViaPassword was called with, in order
 	reconnectedFingerprints []string // every hostKeyFingerprint ReconnectWithPinnedKey was called with, in order
+	reconnectedAddrs        []string
+	reconnectedKeys         [][]byte
 }
 
 func (t *fakeTransport) InstallPubkeyViaPassword(_ context.Context, addr, user, password, authorizedKeyLine string) (string, error) {
@@ -76,10 +231,23 @@ func (t *fakeTransport) DialWithKey(_ context.Context, addr, user string, privat
 }
 
 func (t *fakeTransport) ReconnectWithPinnedKey(_ context.Context, addr, user string, privateKeyPEM []byte, hostKeyFingerprint string) (SSHSession, error) {
+	idx := t.reconnectCalls
 	t.reconnectCalls++
 	t.reconnectedFingerprints = append(t.reconnectedFingerprints, hostKeyFingerprint)
-	if t.reconnectErr != nil {
-		return nil, t.reconnectErr
+	t.reconnectedAddrs = append(t.reconnectedAddrs, addr)
+	t.reconnectedKeys = append(t.reconnectedKeys, append([]byte(nil), privateKeyPEM...))
+	err := t.reconnectErr
+	if idx < len(t.reconnectErrs) {
+		err = t.reconnectErrs[idx]
+	}
+	if err != nil {
+		return nil, err
+	}
+	// A reconnect is a FRESH session (after a transport error) when the run
+	// already connected: by DialWithKey on a first bootstrap, or by an
+	// earlier reconnect.
+	if fresh := idx > 0 || t.dialCalls > 0; fresh && t.reconnectSession != nil {
+		return t.reconnectSession, nil
 	}
 	return t.session, nil
 }
@@ -97,9 +265,15 @@ type fakeValidator struct {
 	lastCfg        APIConfig
 	lastExpectNode string
 	cfgsByCall     []APIConfig // every cfg passed, in call order
+	// onCall, if set, runs at the start of each call (0-indexed): tests use
+	// it to change the roster at an exact point in a run.
+	onCall func(call int)
 }
 
 func (v *fakeValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, expectNode string) error {
+	if v.onCall != nil {
+		v.onCall(v.calls)
+	}
 	v.lastCfg = cfg
 	v.lastExpectNode = expectNode
 	v.cfgsByCall = append(v.cfgsByCall, cfg)
@@ -196,19 +370,20 @@ func TestRun_HappyPath(t *testing.T) {
 		t.Fatalf("persisted token secret = %q, want %q", plaintext, "tok-secret-123")
 	}
 
-	// createToken must attempt a best-effort delete before the add, so a
-	// leftover token from a prior partial run doesn't block a retry.
-	foundRemove, foundAdd := false, false
-	for _, c := range session.commands {
-		if strings.HasPrefix(c, "pveum user token remove") {
-			foundRemove = true
-		}
-		if strings.HasPrefix(c, "pveum user token add") {
-			foundAdd = true
-		}
+	// R1: a first mint issues NO remove (the token list showed it absent):
+	// removing blindly would revoke a same-named token another roster uses.
+	if session.ran("pveum user token remove") || !session.ran("pveum user token add") {
+		t.Errorf("expected an add and no remove, got: %v", session.commands)
 	}
-	if !foundRemove || !foundAdd {
-		t.Errorf("expected both a token remove and a token add command, got: %v", session.commands)
+	if res.TokenOutcome != OutcomeMinted || res.Validation != ValidationVerified || res.PriorRevoked {
+		t.Errorf("outcome = %q/%q prior_revoked=%v, want minted/verified/false", res.TokenOutcome, res.Validation, res.PriorRevoked)
+	}
+	// Preflight order: role list, nodes, token list, then the add.
+	wantOrder := []string{"pveum role list", "pvesh get /nodes", "pveum user token list", "pveum user token add"}
+	for i, w := range wantOrder {
+		if i >= len(session.commands) || !strings.HasPrefix(session.commands[i], w) {
+			t.Fatalf("command %d = %v, want prefix %q (all: %v)", i, session.commands, w, session.commands)
+		}
 	}
 }
 
@@ -419,12 +594,15 @@ func TestRun_TokenCreationFailure(t *testing.T) {
 	transport := &fakeTransport{installFingerprint: "SHA256:abc", session: session}
 	validator := &fakeValidator{}
 
-	_, err := Run(context.Background(), baseOptions(rosterPath), transport, validator)
+	res, err := Run(context.Background(), baseOptions(rosterPath), transport, validator)
 	if err == nil {
 		t.Fatal("expected error when token creation fails")
 	}
-	if !strings.Contains(err.Error(), "create token") {
+	if !strings.Contains(err.Error(), "pveum user token add exited 1") {
 		t.Errorf("error should identify the failing step: %v", err)
+	}
+	if res == nil || res.TokenOutcome != OutcomeDiscarded || errors.Is(err, ErrPriorTokenRevoked) {
+		t.Errorf("want a partial result, outcome discarded, no prior revocation; got %+v, %v", res, err)
 	}
 	if !session.closed {
 		t.Error("session should still be closed on failure")
@@ -472,11 +650,19 @@ func TestRun_ValidationFailure_NoGrants(t *testing.T) {
 		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("s"), ExitCode: 0}},
 	}}
 	transport := &fakeTransport{installFingerprint: "SHA256:abc", session: session}
-	validator := &fakeValidator{err: errors.New("token authenticates but appears to have no working grants")}
+	// A VERDICT (the ErrNoGrants alias): the fresh token must be removed
+	// and never persisted. A plain error is the non-verdict twin (R14).
+	validator := &fakeValidator{err: fmt.Errorf("%w", ErrNoGrants)}
 
-	_, err := Run(context.Background(), baseOptions(rosterPath), transport, validator)
+	res, err := Run(context.Background(), baseOptions(rosterPath), transport, validator)
 	if err == nil {
 		t.Fatal("expected error when validation reports no grants")
+	}
+	if res == nil || res.Validation != ValidationFailed || res.TokenOutcome != OutcomeDiscarded {
+		t.Fatalf("want validation=failed, outcome=discarded; got %+v", res)
+	}
+	if session.count("pveum user token remove") != 1 {
+		t.Fatalf("the fresh token must be removed once, got: %v", session.commands)
 	}
 
 	// Nothing should be persisted to the roster if validation failed —
@@ -570,8 +756,10 @@ func TestRun_IdempotentReRun(t *testing.T) {
 	if _, err := Run(context.Background(), baseOptions(rosterPath), transport2, validator); err != nil {
 		t.Fatalf("second (idempotent) Run: %v", err)
 	}
-	if len(transport2.session.commands) != 0 {
-		t.Fatalf("expected the second run to skip token creation/ACL grant entirely, got commands: %v", transport2.session.commands)
+	// N2: the preflight's three reads run on every reconnect; nothing may
+	// change a token.
+	if m := transport2.session.mutating(); len(m) != 0 {
+		t.Fatalf("expected the second run to skip token creation/ACL grant entirely, got: %v", m)
 	}
 
 	r, err := roster.Load(rosterPath)
@@ -790,8 +978,11 @@ func TestRun_SkipsTokenRecreateWhenExistingTokenValid(t *testing.T) {
 	if res.TokenID != "root@pam!pveforge" {
 		t.Errorf("expected the existing token id to be returned, got %q", res.TokenID)
 	}
-	if len(session.commands) != 0 {
-		t.Fatalf("expected zero remote commands (no createToken/grantACL), got: %v", session.commands)
+	if m := session.mutating(); len(m) != 0 {
+		t.Fatalf("expected no token-changing command (only the preflight reads), got: %v", m)
+	}
+	if res.TokenOutcome != OutcomeReused {
+		t.Errorf("outcome = %q, want reused", res.TokenOutcome)
 	}
 	if validator.calls != 1 {
 		t.Fatalf("expected exactly one ValidateTokenGrants call (the skip-check), got %d", validator.calls)
@@ -861,8 +1052,8 @@ func TestRun_FallsThroughWhenRequestedTokenIDDiffersFromPersisted(t *testing.T) 
 	if res.TokenID != "root@pam!pveforge-2" {
 		t.Fatalf("expected the newly-requested token id to be returned, got %q", res.TokenID)
 	}
-	if len(session.commands) == 0 {
-		t.Fatal("expected createToken/grantACL to run: a token-id mismatch must never be treated as a skippable no-op")
+	if !session.ran("pveum user token add") {
+		t.Fatal("expected a mint: a token-id mismatch must never be treated as a skippable no-op")
 	}
 	if validator.calls != 1 {
 		t.Fatalf("expected exactly one ValidateTokenGrants call (post-mint only — the id mismatch must short-circuit before any skip-check validation call), got %d", validator.calls)
@@ -885,13 +1076,13 @@ func TestRun_FallsThroughWhenRequestedTokenIDDiffersFromPersisted(t *testing.T) 
 	}
 }
 
-// TestRun_FallsThroughWhenExistingTokenFailsValidation covers the "fails
-// validation" branch of the Proposed fix: the skip-check's own
-// ValidateTokenGrants call fails (e.g. the token was revoked out-of-band),
-// so Run must fall through to the normal mint-fresh-token flow rather than
-// hard-failing — and the freshly minted token (which the second
-// ValidateTokenGrants call accepts) must end up persisted.
-func TestRun_FallsThroughWhenExistingTokenFailsValidation(t *testing.T) {
+// TestRun_ReplacesOnVerdict (S6, formerly
+// TestRun_FallsThroughWhenExistingTokenFailsValidation): the skip-check
+// returns a VERDICT about the held token (the ErrNoGrants alias), so Run
+// removes it (it is present on PVE), clears the roster's copy, mints and
+// persists a fresh one. Its twin, TestRun_AbortsOnNonVerdict
+// (rotation_test.go, R7), gives a PLAIN error and must change nothing.
+func TestRun_ReplacesOnVerdict(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	opts := baseOptions(rosterPath)
 	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
@@ -916,13 +1107,13 @@ func TestRun_FallsThroughWhenExistingTokenFailsValidation(t *testing.T) {
 		t.Fatalf("WriteTokenAuth: %v", err)
 	}
 
-	session := &fakeSession{byCmd: map[string]fakeRunResult{
+	session := &fakeSession{pve: newFakePVE("pveforge"), byCmd: map[string]fakeRunResult{
 		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("fresh-secret"), ExitCode: 0}},
 	}}
 	transport := &fakeTransport{session: session}
 	validator := &fakeValidator{errs: []error{
-		errors.New("token authenticates but appears to have no working grants"), // the skip-check
-		nil, // the post-mint validation
+		fmt.Errorf("%w", ErrNoGrants), // the skip-check: a verdict
+		nil,                           // the post-mint validation
 	}}
 
 	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
@@ -931,8 +1122,8 @@ func TestRun_FallsThroughWhenExistingTokenFailsValidation(t *testing.T) {
 	if validator.calls != 2 {
 		t.Fatalf("expected exactly two ValidateTokenGrants calls (skip-check + post-mint), got %d", validator.calls)
 	}
-	if len(session.commands) == 0 {
-		t.Fatal("expected createToken/grantACL to run after the skip-check failed validation")
+	if !session.ran("pveum user token remove") || !session.ran("pveum user token add") {
+		t.Fatalf("expected remove then add after a verdict, got: %v", session.commands)
 	}
 
 	r, err := roster.Load(rosterPath)
@@ -949,12 +1140,12 @@ func TestRun_FallsThroughWhenExistingTokenFailsValidation(t *testing.T) {
 }
 
 // TestRun_FallsThroughWhenExistingTokenUndecryptable covers the "fails to
-// decrypt" branch: the persisted token's secret was encrypted under a
-// different passphrase than the one this Run is using (simulating
-// corrupted/drifted ciphertext, the same technique
-// TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData uses in the other
-// direction). This must fall through to minting a fresh token, not
-// surface a hard decrypt error.
+// decrypt" branch when the token no longer exists on PVE (the fake host
+// lists no tokens): the persisted token's secret was encrypted under a
+// different passphrase than the one this Run is using. Gone from PVE, it is
+// known dead, so this must fall through to minting a fresh token, not
+// surface a hard decrypt error. A token that still exists is never
+// replaced on a decrypt failure (TestRun_R5c_UndecryptablePresentAborts).
 func TestRun_FallsThroughWhenExistingTokenUndecryptable(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	opts := baseOptions(rosterPath)
@@ -990,8 +1181,8 @@ func TestRun_FallsThroughWhenExistingTokenUndecryptable(t *testing.T) {
 	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(session.commands) == 0 {
-		t.Fatal("expected createToken/grantACL to run when the existing token can't be decrypted")
+	if !session.ran("pveum user token add") {
+		t.Fatal("expected a mint when the existing token can't be decrypted")
 	}
 	if validator.calls != 1 {
 		t.Fatalf("expected exactly one ValidateTokenGrants call (the skip-check must not even run when decrypt fails), got %d", validator.calls)
@@ -1047,8 +1238,8 @@ func TestRun_NoSkipCheckWhenNoExistingTokenPersisted(t *testing.T) {
 	if validator.calls != 1 {
 		t.Fatalf("expected exactly one ValidateTokenGrants call (post-mint only, no skip-check), got %d", validator.calls)
 	}
-	if len(session.commands) == 0 {
-		t.Fatal("expected createToken/grantACL to run when no token was persisted yet")
+	if !session.ran("pveum user token add") {
+		t.Fatal("expected a mint when no token was persisted yet")
 	}
 }
 
@@ -1150,8 +1341,8 @@ func TestRun_RetryWithoutInsecureTLSFlag_DoesNotClearPersistedValue(t *testing.T
 	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(session.commands) != 0 {
-		t.Fatalf("expected the skip-recreate fast path (zero remote commands), got: %v", session.commands)
+	if m := session.mutating(); len(m) != 0 {
+		t.Fatalf("expected the skip-recreate fast path (no token-changing command), got: %v", m)
 	}
 
 	r, err := roster.Load(rosterPath)
@@ -1333,29 +1524,28 @@ func TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData(t *testing.T) {
 	}
 }
 
-// TestLoadExistingTokenAuth_NilWhenNoTokenAuthYet exercises
-// loadExistingTokenAuth directly: no token auth persisted yet -> nil
-// (nothing for trySkipTokenRecreate to check).
-func TestLoadExistingTokenAuth_NilWhenNoTokenAuthYet(t *testing.T) {
+// TestLoadHeldToken_EmptyWhenNoTokenAuthYet exercises loadHeldToken
+// directly: no token auth persisted yet -> an empty ID (nothing held).
+func TestLoadHeldToken_EmptyWhenNoTokenAuthYet(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	if err := roster.AppendTarget(rosterPath, roster.Target{ID: "qa-pve-01", Host: "h", Node: "n"}); err != nil {
 		t.Fatalf("AppendTarget: %v", err)
 	}
 	opts := baseOptions(rosterPath)
 
-	got, err := loadExistingTokenAuth(opts)
+	got, err := loadHeldToken(opts)
 	if err != nil {
-		t.Fatalf("loadExistingTokenAuth: %v", err)
+		t.Fatalf("loadHeldToken: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("expected nil (no token auth yet), got %+v", got)
+	if got.ID != "" || got.DecryptErr != nil {
+		t.Fatalf("expected nothing held (no token auth yet), got %+v", got)
 	}
 }
 
-// TestLoadExistingTokenAuth_ReturnsPersistedToken exercises the success
-// path directly: an existing, decryptable token returns its full id and
+// TestLoadHeldToken_ReturnsPersistedToken exercises the success path
+// directly: an existing, decryptable token returns its full id and
 // decrypted secret.
-func TestLoadExistingTokenAuth_ReturnsPersistedToken(t *testing.T) {
+func TestLoadHeldToken_ReturnsPersistedToken(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	opts := baseOptions(rosterPath)
 	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
@@ -1368,20 +1558,20 @@ func TestLoadExistingTokenAuth_ReturnsPersistedToken(t *testing.T) {
 		t.Fatalf("WriteTokenAuth: %v", err)
 	}
 
-	got, err := loadExistingTokenAuth(opts)
+	got, err := loadHeldToken(opts)
 	if err != nil {
-		t.Fatalf("loadExistingTokenAuth: %v", err)
+		t.Fatalf("loadHeldToken: %v", err)
 	}
-	if got == nil || got.FullTokenID != "root@pam!pveforge" || got.Secret != "a-real-secret" {
+	if got.ID != "root@pam!pveforge" || got.Secret != "a-real-secret" || got.DecryptErr != nil {
 		t.Fatalf("expected the persisted token to be returned decrypted, got %+v", got)
 	}
 }
 
-// TestLoadExistingTokenAuth_WrongPassphraseErrors exercises the decrypt-
-// failure path directly: a genuinely wrong passphrase must return an
-// error (trySkipTokenRecreate is what turns this into a graceful
-// fall-through — this unit test just proves the error surfaces here).
-func TestLoadExistingTokenAuth_WrongPassphraseErrors(t *testing.T) {
+// TestLoadHeldToken_UndecryptableIsReportedNotAnError exercises the
+// decrypt-failure path directly: a token that will not decrypt is still
+// HELD (its id is known) and the failure is reported in DecryptErr, not as
+// an error. A roster that will not load at all is the error case (R7d).
+func TestLoadHeldToken_UndecryptableIsReportedNotAnError(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	opts := baseOptions(rosterPath)
 	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
@@ -1396,8 +1586,12 @@ func TestLoadExistingTokenAuth_WrongPassphraseErrors(t *testing.T) {
 
 	wrongOpts := opts
 	wrongOpts.Passphrase = "wrong-passphrase"
-	if _, err := loadExistingTokenAuth(wrongOpts); err == nil {
-		t.Fatal("expected an error decrypting with the wrong passphrase")
+	got, err := loadHeldToken(wrongOpts)
+	if err != nil {
+		t.Fatalf("loadHeldToken: a decrypt failure must not be an error, got %v", err)
+	}
+	if got.ID != "root@pam!pveforge" || got.DecryptErr == nil || got.Secret != "" {
+		t.Fatalf("expected a held, undecryptable token, got %+v", got)
 	}
 }
 
@@ -1405,7 +1599,7 @@ func TestLoadExistingTokenAuth_WrongPassphraseErrors(t *testing.T) {
 // TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData: an unrelated
 // SSH-decrypt failure must not block reading the token data, since this
 // call never touches SSH.PrivateKeyEnc at all.
-func TestLoadExistingTokenAuth_IgnoresUndecryptableSSHData(t *testing.T) {
+func TestLoadHeldToken_IgnoresUndecryptableSSHData(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
 	opts := baseOptions(rosterPath)
 	if err := roster.AppendTarget(rosterPath, roster.Target{ID: opts.TargetID, Host: opts.Host, Node: opts.Node}); err != nil {
@@ -1432,11 +1626,11 @@ func TestLoadExistingTokenAuth_IgnoresUndecryptableSSHData(t *testing.T) {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
 
-	got, err := loadExistingTokenAuth(opts)
+	got, err := loadHeldToken(opts)
 	if err != nil {
-		t.Fatalf("loadExistingTokenAuth should succeed using only the token data, got error: %v", err)
+		t.Fatalf("loadHeldToken should succeed using only the token data, got error: %v", err)
 	}
-	if got == nil || got.FullTokenID != "root@pam!pveforge" || got.Secret != "a-real-secret" {
+	if got.ID != "root@pam!pveforge" || got.Secret != "a-real-secret" {
 		t.Fatalf("expected the persisted token to be returned despite undecryptable ssh data, got %+v", got)
 	}
 }
