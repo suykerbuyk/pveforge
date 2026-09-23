@@ -505,6 +505,180 @@ func TestRoutedForwarding_SetVMConfigFieldCAS(t *testing.T) {
 	}
 }
 
+// TestRoutedForwarding_DeleteVMConfigFieldCAS pins the digest-guarded
+// delete: the form carries PVE's own `delete` parameter and the digest, and
+// never `<field>=` — which would be a write of an empty value instead.
+func TestRoutedForwarding_DeleteVMConfigFieldCAS(t *testing.T) {
+	cases := []struct {
+		node   string
+		vmid   int
+		field  string
+		digest string
+		want   string
+	}{
+		{fwdTargetNode, fwdVMID, "description", "d1g3st", "PUT /nodes/qa-pve-03/qemu/4242/config delete=description&digest=d1g3st"},
+		{fwdTargetNode2, fwdVMID2, "tags", "d2g3st", "PUT /nodes/qa-pve-04/qemu/5151/config delete=tags&digest=d2g3st"},
+	}
+	for _, c := range cases {
+		t.Run(c.node, func(t *testing.T) {
+			srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+			if err := fwdClientOn(t, srv, c.node).DeleteVMConfigFieldCAS(context.Background(), c.vmid, c.field, c.digest); err != nil {
+				t.Fatalf("DeleteVMConfigFieldCAS: %v", err)
+			}
+			assertRequests(t, rec.got(), c.want)
+		})
+	}
+}
+
+// TestRoutedForwarding_DeleteVMConfigFieldCAS_RefusesRootOnly: a root-only
+// field has no compare-and-swap over SSH, so the CAS delete refuses it
+// without sending anything, in words IsDigestConflictError cannot mistake
+// for a retryable conflict.
+func TestRoutedForwarding_DeleteVMConfigFieldCAS_RefusesRootOnly(t *testing.T) {
+	sshSrv, tg := newFwdSSH(t)
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	rc := &RoutedClient{rest: testClient(t, srv), target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	err := rc.DeleteVMConfigFieldCAS(context.Background(), fwdVMID, "args", "d1g3st")
+	if err == nil {
+		t.Fatal("a root-only CAS delete must be refused")
+	}
+	if IsDigestConflictError(err) {
+		t.Errorf("the refusal must not read as a digest conflict: %v", err)
+	}
+	assertNoRequests(t, rec.got())
+	assertNoCommands(t, sshSrv.got())
+}
+
+// TestRoutedForwarding_DeleteVMConfigField_REST pins the REST leg: PVE's
+// delete parameter, no digest.
+func TestRoutedForwarding_DeleteVMConfigField_REST(t *testing.T) {
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	rc := fwdClientOn(t, srv, fwdTargetNode)
+	for _, c := range []struct {
+		vmid  int
+		field string
+	}{{fwdVMID, "description"}, {fwdVMID2, "tags"}} {
+		if err := rc.DeleteVMConfigField(context.Background(), c.vmid, c.field); err != nil {
+			t.Fatalf("DeleteVMConfigField: %v", err)
+		}
+	}
+	assertRequests(t, rec.got(),
+		"PUT /nodes/qa-pve-03/qemu/4242/config delete=description",
+		"PUT /nodes/qa-pve-03/qemu/5151/config delete=tags")
+}
+
+// TestRoutedForwarding_DeleteVMConfigField_SSHRootOnly pins the SSH leg for
+// a registered root-only field: `qm set --delete`, never REST.
+func TestRoutedForwarding_DeleteVMConfigField_SSHRootOnly(t *testing.T) {
+	sshSrv, tg := newFwdSSH(t)
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "a root-only field must never reach REST", http.StatusInternalServerError)
+	})
+	rc := &RoutedClient{rest: testClient(t, srv), target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	for _, vmid := range []int{fwdVMID, fwdVMID2} {
+		if err := rc.DeleteVMConfigField(context.Background(), vmid, "args"); err != nil {
+			t.Fatalf("DeleteVMConfigField(%d): %v", vmid, err)
+		}
+	}
+	assertCommands(t, sshSrv.got(), "qm set '4242' --delete 'args'", "qm set '5151' --delete 'args'")
+	assertNoRequests(t, rec.got())
+}
+
+// TestRoutedForwarding_DeleteVMConfigField_SSHFallback pins the second SSH
+// call site: a REST delete PVE refuses as root-only is retried once over SSH.
+func TestRoutedForwarding_DeleteVMConfigField_SSHFallback(t *testing.T) {
+	sshSrv, tg := newFwdSSH(t)
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "only root can set 'hookscript' config", http.StatusInternalServerError)
+	})
+	rc := &RoutedClient{rest: testClient(t, srv), target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	for _, vmid := range []int{fwdVMID, fwdVMID2} {
+		if err := rc.DeleteVMConfigField(context.Background(), vmid, "hookscript"); err != nil {
+			t.Fatalf("DeleteVMConfigField(%d): %v", vmid, err)
+		}
+	}
+	assertRequests(t, rec.got(),
+		"PUT /nodes/qa-pve-03/qemu/4242/config delete=hookscript",
+		"PUT /nodes/qa-pve-03/qemu/5151/config delete=hookscript")
+	assertCommands(t, sshSrv.got(), "qm set '4242' --delete 'hookscript'", "qm set '5151' --delete 'hookscript'")
+}
+
+// TestRoutedForwarding_DeleteVMConfigField_NoFallbackOnOtherErrors pins the
+// guard on the delete's SSH fallback, as its set twin does: only PVE's
+// root-only refusal may be retried over SSH. The SSH vector runs as root,
+// so retrying any other failure — a 403 above all — would delete a key the
+// API token's ACL refused to let it touch. A fake SSH server IS configured,
+// so an unguarded retry would succeed there and this test would see it.
+func TestRoutedForwarding_DeleteVMConfigField_NoFallbackOnOtherErrors(t *testing.T) {
+	sshSrv, tg := newFwdSSH(t)
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/qemu/4242/") {
+			http.Error(w, "Permission check failed (/vms/4242, VM.Config.Options)", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "unable to parse value of 'delete'", http.StatusInternalServerError)
+	})
+	rc := &RoutedClient{rest: testClient(t, srv), target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	for _, c := range []struct {
+		vmid    int
+		field   string
+		wantErr string
+	}{
+		{fwdVMID, "description", "Permission check failed (/vms/4242, VM.Config.Options)"},
+		{fwdVMID2, "tags", "unable to parse value of 'delete'"},
+	} {
+		err := rc.DeleteVMConfigField(context.Background(), c.vmid, c.field)
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("DeleteVMConfigField(%d, %q) err = %v, want the original REST error %q", c.vmid, c.field, err, c.wantErr)
+		}
+	}
+	assertRequests(t, rec.got(),
+		"PUT /nodes/qa-pve-03/qemu/4242/config delete=description",
+		"PUT /nodes/qa-pve-03/qemu/5151/config delete=tags")
+	assertNoCommands(t, sshSrv.got())
+	if rc.ssh != nil {
+		t.Error("a non-root-only REST failure must never dial SSH")
+	}
+}
+
+// TestRoutedForwarding_OverSSHMethodsNeverTouchREST pins the two SSH-only
+// fallbacks: each sends exactly one `qm set` and no REST request at all,
+// whatever the field (here a field that is NOT registered root-only, the
+// case a CAS refusal falls back for).
+func TestRoutedForwarding_OverSSHMethodsNeverTouchREST(t *testing.T) {
+	sshSrv, tg := newFwdSSH(t)
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "an SSH-only fallback must never reach REST", http.StatusInternalServerError)
+	})
+	rc := &RoutedClient{rest: testClient(t, srv), target: tg, passphrase: "roster-pass"}
+	defer rc.Close()
+
+	if err := rc.SetVMConfigFieldOverSSH(context.Background(), fwdVMID, "hookscript", "local:snippets/hook-4242.sh"); err != nil {
+		t.Fatalf("SetVMConfigFieldOverSSH: %v", err)
+	}
+	if err := rc.DeleteVMConfigFieldOverSSH(context.Background(), fwdVMID2, "hookscript"); err != nil {
+		t.Fatalf("DeleteVMConfigFieldOverSSH: %v", err)
+	}
+	assertCommands(t, sshSrv.got(),
+		"qm set '4242' --hookscript 'local:snippets/hook-4242.sh'",
+		"qm set '5151' --delete 'hookscript'")
+	assertNoRequests(t, rec.got())
+}
+
 // snippetPayloadArg extracts the base64 argument sshexec.Client.WriteFile
 // embeds in its remote script.
 var snippetPayloadArg = regexp.MustCompile(`printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d`)
@@ -936,7 +1110,7 @@ type bindingCase struct {
 	want   []string
 }
 
-// TestRoutedForwarding_NodeBinding pins how each of the 27 node-resolving
+// TestRoutedForwarding_NodeBinding pins how each of the 29 node-resolving
 // pass-throughs picks its node. The other 10 take no node at all.
 //
 // Two different node sources exist, and each has its own wrong answer:
@@ -1229,6 +1403,22 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 				return rc.SetVMConfigFieldCAS(ctx, fwdVMID2, "description", "web-5151", "d2g3st")
 			}, []string{"PUT /nodes/qa-pve-04/qemu/5151/config description=web-5151&digest=d2g3st"}},
 		}},
+		{"DeleteVMConfigField", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				return rc.DeleteVMConfigField(ctx, fwdVMID, "description")
+			}, []string{"PUT /nodes/qa-pve-03/qemu/4242/config delete=description"}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				return rc.DeleteVMConfigField(ctx, fwdVMID2, "tags")
+			}, []string{"PUT /nodes/qa-pve-04/qemu/5151/config delete=tags"}},
+		}},
+		{"DeleteVMConfigFieldCAS", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				return rc.DeleteVMConfigFieldCAS(ctx, fwdVMID, "description", "d1g3st")
+			}, []string{"PUT /nodes/qa-pve-03/qemu/4242/config delete=description&digest=d1g3st"}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				return rc.DeleteVMConfigFieldCAS(ctx, fwdVMID2, "tags", "d2g3st")
+			}, []string{"PUT /nodes/qa-pve-04/qemu/5151/config delete=tags&digest=d2g3st"}},
+		}},
 		{"ListSnapshots", []bindingCase{
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				_, err := rc.ListSnapshots(ctx, fwdVMID)
@@ -1279,8 +1469,8 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 		}},
 	}
 
-	if len(methods) != 27 {
-		t.Fatalf("node-binding table covers %d methods, want all 27 node-resolving pass-throughs", len(methods))
+	if len(methods) != 29 {
+		t.Fatalf("node-binding table covers %d methods, want all 29 node-resolving pass-throughs", len(methods))
 	}
 	for _, m := range methods {
 		t.Run(m.name, func(t *testing.T) {
@@ -1416,43 +1606,47 @@ var routedClientSeam = map[string]seamEntry{
 	"Node":  {exempt: "accessor: returns c.target.Node and forwards nothing"},
 	"Close": {exempt: "lifecycle: closes the lazily dialed SSH connection and forwards nothing"},
 
-	"GetNode":               {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetNodes":              {tests: []string{"TestRoutedClient_TypedReadForwarding"}},
-	"FindByTag":             {tests: []string{"TestRoutedForwarding_FindByTag", "TestRoutedClient_FindByTag_Forwards"}},
-	"GetVM":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetVMs":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetStorage":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetStorages":           {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetStorageVolumes":     {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"ClaimedVolumes":        {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"OrphanVolumes":         {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"OrphanVolumesForVMID":  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetNetworkInterface":   {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetNetworkInterfaces":  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"NextVMID":              {tests: []string{"TestRoutedForwarding_NextVMID_Exclude", "TestRoutedClient_NextVMID_Forwards"}},
-	"WaitForTask":           {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"CreateVM":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"StopVM":                {tests: []string{"TestRoutedForwarding_StopVM", "TestRoutedForwarding_NodeBinding"}},
-	"DestroyVM":             {tests: []string{"TestRoutedForwarding_DestroyVM", "TestRoutedForwarding_NodeBinding"}},
-	"TagStillClaimed":       {tests: []string{"TestRoutedForwarding_TagStillClaimed"}},
-	"AgentExec":             {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"AgentExecStatus":       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"WaitForAgentExec":      {tests: []string{"TestRoutedForwarding_WaitForAgentExec", "TestRoutedForwarding_NodeBinding"}},
-	"AgentInterfaces":       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"VMNetMACs":             {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"APIDocTree":            {tests: []string{"TestRoutedForwarding_APIDocTree"}},
-	"RawRequest":            {tests: []string{"TestRoutedForwarding_RawRequest"}},
-	"SetVMConfigField":      {tests: []string{"TestRoutedForwarding_SetVMConfigField_REST", "TestRoutedForwarding_SetVMConfigField_SSHRootOnly", "TestRoutedForwarding_SetVMConfigField_SSHFallback", "TestRoutedForwarding_SetVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
-	"SetVMConfigFieldCAS":   {tests: []string{"TestRoutedForwarding_SetVMConfigFieldCAS", "TestRoutedForwarding_NodeBinding"}},
-	"UploadSnippet":         {tests: []string{"TestRoutedForwarding_UploadSnippet"}},
-	"TapLinkState":          {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_TapLinkState_Forwards"}},
-	"LinkState":             {tests: []string{"TestRoutedForwarding_LinkState"}},
-	"SetBridgePortIsolated": {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_SetBridgePortIsolated_Forwards"}},
-	"ListSnapshots":         {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"CreateSnapshot":        {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_Snapshot_Forwards"}},
-	"ShutdownVM":            {tests: []string{"TestRoutedForwarding_NodeBinding", "TestShutdownVM_MakesExactlyOneRequestOnEveryPath"}},
-	"CloneVM":               {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_CloneVM_Forwards"}},
-	"StorageType":           {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_StorageType_Forwards"}},
+	"GetNode":                    {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetNodes":                   {tests: []string{"TestRoutedClient_TypedReadForwarding"}},
+	"FindByTag":                  {tests: []string{"TestRoutedForwarding_FindByTag", "TestRoutedClient_FindByTag_Forwards"}},
+	"GetVM":                      {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetVMs":                     {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorage":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorages":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorageVolumes":          {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"ClaimedVolumes":             {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumes":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumesForVMID":       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetNetworkInterface":        {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetNetworkInterfaces":       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"NextVMID":                   {tests: []string{"TestRoutedForwarding_NextVMID_Exclude", "TestRoutedClient_NextVMID_Forwards"}},
+	"WaitForTask":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"CreateVM":                   {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"StopVM":                     {tests: []string{"TestRoutedForwarding_StopVM", "TestRoutedForwarding_NodeBinding"}},
+	"DestroyVM":                  {tests: []string{"TestRoutedForwarding_DestroyVM", "TestRoutedForwarding_NodeBinding"}},
+	"TagStillClaimed":            {tests: []string{"TestRoutedForwarding_TagStillClaimed"}},
+	"AgentExec":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"AgentExecStatus":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"WaitForAgentExec":           {tests: []string{"TestRoutedForwarding_WaitForAgentExec", "TestRoutedForwarding_NodeBinding"}},
+	"AgentInterfaces":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"VMNetMACs":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"APIDocTree":                 {tests: []string{"TestRoutedForwarding_APIDocTree"}},
+	"RawRequest":                 {tests: []string{"TestRoutedForwarding_RawRequest"}},
+	"SetVMConfigField":           {tests: []string{"TestRoutedForwarding_SetVMConfigField_REST", "TestRoutedForwarding_SetVMConfigField_SSHRootOnly", "TestRoutedForwarding_SetVMConfigField_SSHFallback", "TestRoutedForwarding_SetVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
+	"SetVMConfigFieldCAS":        {tests: []string{"TestRoutedForwarding_SetVMConfigFieldCAS", "TestRoutedForwarding_NodeBinding"}},
+	"UploadSnippet":              {tests: []string{"TestRoutedForwarding_UploadSnippet"}},
+	"SetVMConfigFieldOverSSH":    {tests: []string{"TestRoutedForwarding_OverSSHMethodsNeverTouchREST"}},
+	"DeleteVMConfigFieldOverSSH": {tests: []string{"TestRoutedForwarding_OverSSHMethodsNeverTouchREST"}},
+	"DeleteVMConfigField":        {tests: []string{"TestRoutedForwarding_DeleteVMConfigField_REST", "TestRoutedForwarding_DeleteVMConfigField_SSHRootOnly", "TestRoutedForwarding_DeleteVMConfigField_SSHFallback", "TestRoutedForwarding_DeleteVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
+	"DeleteVMConfigFieldCAS":     {tests: []string{"TestRoutedForwarding_DeleteVMConfigFieldCAS", "TestRoutedForwarding_DeleteVMConfigFieldCAS_RefusesRootOnly", "TestRoutedForwarding_NodeBinding"}},
+	"TapLinkState":               {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_TapLinkState_Forwards"}},
+	"LinkState":                  {tests: []string{"TestRoutedForwarding_LinkState"}},
+	"SetBridgePortIsolated":      {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_SetBridgePortIsolated_Forwards"}},
+	"ListSnapshots":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"CreateSnapshot":             {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_Snapshot_Forwards"}},
+	"ShutdownVM":                 {tests: []string{"TestRoutedForwarding_NodeBinding", "TestShutdownVM_MakesExactlyOneRequestOnEveryPath"}},
+	"CloneVM":                    {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_CloneVM_Forwards"}},
+	"StorageType":                {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_StorageType_Forwards"}},
 
 	// Added by unit 5b, with their forwarding test in snapshot_test.go.
 	"NewerSnapshots":         {tests: []string{"TestRoutedClient_SnapshotRollback_Forwards"}},
@@ -1620,7 +1814,7 @@ func TestRoutedForwarding_NodeBindingRowsCallTheirOwnMethod(t *testing.T) {
 		}
 		return false
 	})
-	if rows != 27 {
-		t.Errorf("found %d node-binding rows, want 27", rows)
+	if rows != 29 {
+		t.Errorf("found %d node-binding rows, want 29", rows)
 	}
 }

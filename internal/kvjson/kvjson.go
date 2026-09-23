@@ -307,9 +307,23 @@ func ParseKVArgs(args []string) ([]Pair, error) {
 // (RoutedClient.SetVMConfigField) takes string, string, and this package
 // has no business judging how a given field's type should be stringified.
 func ParseJSONFields(data []byte) ([]Pair, error) {
+	pairs, _, err := parseJSONFields(data, false)
+	return pairs, err
+}
+
+// ParseJSONFieldsWithDeletes is ParseJSONFields for an input that may also
+// remove keys (vm set): a JSON null value means "delete this key", and is
+// returned in deletes (sorted, like pairs) rather than as a Pair — never as
+// an empty string, which would be a write of an empty value instead. Every
+// other non-string value is still refused.
+func ParseJSONFieldsWithDeletes(data []byte) (pairs []Pair, deletes []string, err error) {
+	return parseJSONFields(data, true)
+}
+
+func parseJSONFields(data []byte, allowDelete bool) ([]Pair, []string, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parse json fields: %w", err)
+		return nil, nil, fmt.Errorf("parse json fields: %w", err)
 	}
 
 	keys := make([]string, 0, len(m))
@@ -319,6 +333,7 @@ func ParseJSONFields(data []byte) ([]Pair, error) {
 	sort.Strings(keys)
 
 	pairs := make([]Pair, 0, len(keys))
+	var deletes []string
 	for _, k := range keys {
 		// Decoding straight into a string would silently accept a JSON
 		// null too: unmarshaling null into any non-pointer/interface/map/
@@ -330,13 +345,20 @@ func ParseJSONFields(data []byte) ([]Pair, error) {
 		// turning it into "".
 		var iface interface{}
 		if err := json.Unmarshal(m[k], &iface); err != nil {
-			return nil, fmt.Errorf("parse json fields: field %q: %w", k, err)
+			return nil, nil, fmt.Errorf("parse json fields: field %q: %w", k, err)
+		}
+		if iface == nil && allowDelete {
+			deletes = append(deletes, k)
+			continue
 		}
 		s, ok := iface.(string)
 		if !ok {
-			return nil, fmt.Errorf("parse json fields: field %q: value must be a JSON string", k)
+			if allowDelete {
+				return nil, nil, fmt.Errorf("parse json fields: field %q: value must be a JSON string, or null to delete the key", k)
+			}
+			return nil, nil, fmt.Errorf("parse json fields: field %q: value must be a JSON string", k)
 		}
 		pairs = append(pairs, Pair{Field: k, Value: s})
 	}
-	return pairs, nil
+	return pairs, deletes, nil
 }

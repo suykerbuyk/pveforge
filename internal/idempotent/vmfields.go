@@ -43,14 +43,24 @@ type VMFieldsEnsure struct {
 	// order-independent map.
 	Pairs []kvjson.Pair
 
+	// Deletes are config keys to remove from VMID's config entirely,
+	// through PVE's own delete parameter, in caller order. Removing a key is
+	// not writing it empty: a Pair {k, ""} leaves k present with empty
+	// content, while a Deletes entry k leaves no k at all. Satisfied tells
+	// them apart by presence alone — never by comparing a value to "".
+	Deletes []string
+
 	// current is set by Read and consumed by Apply to skip a field
 	// already at its wanted value — refreshed on every attempt, including
 	// a Run-driven retry after ErrConflict.
 	current map[string]string
 
-	// Applied is the field names Apply actually wrote, in write order —
-	// reset at the start of every Apply call and populated as each write
-	// succeeds (never derived after the fact from Before/After diffing:
+	// Applied is the field names Apply actually wrote, in first-write
+	// order, populated as each write succeeds and ACCUMULATED across every
+	// Apply of one Run: a conflict retry re-runs Apply after earlier fields
+	// of the batch were already written, and those writes happened, so they
+	// must still be reported. Each field appears once. An Op serves one
+	// Run. (Never derived after the fact from Before/After diffing:
 	// idempotent.Run's own best-effort post-Apply re-read can fail while
 	// leaving Changed true and After==Before (with the cause only in
 	// Result.AfterErr), which would make a diff-
@@ -60,6 +70,12 @@ type VMFieldsEnsure struct {
 	// without idempotent.Run's Result type needing to know anything
 	// field-shaped.
 	Applied []string
+
+	// Deleted is the keys Apply actually removed, in order — accumulated
+	// across one Run's attempts and de-duplicated the way Applied is, and
+	// kept apart from it so a removed key can
+	// never be reported as a field written with an empty value.
+	Deleted []string
 }
 
 // Validate reports whether op is well-formed: VMID must be positive, at
@@ -77,15 +93,28 @@ func (op *VMFieldsEnsure) Validate() error {
 	if op.VMID <= 0 {
 		return fmt.Errorf("vm fields ensure: vmid must be positive, got %d", op.VMID)
 	}
-	if len(op.Pairs) == 0 {
-		return fmt.Errorf("vm fields ensure: vm %d: at least one field is required", op.VMID)
+	if len(op.Pairs) == 0 && len(op.Deletes) == 0 {
+		return fmt.Errorf("vm fields ensure: vm %d: at least one field to set or delete is required", op.VMID)
 	}
-	seen := make(map[string]bool, len(op.Pairs))
+	seen := make(map[string]bool, len(op.Pairs)+len(op.Deletes))
 	for _, p := range op.Pairs {
 		if seen[p.Field] {
 			return fmt.Errorf("vm fields ensure: vm %d: field %q specified more than once", op.VMID, p.Field)
 		}
 		seen[p.Field] = true
+	}
+	deleted := make(map[string]bool, len(op.Deletes))
+	for _, f := range op.Deletes {
+		if f == "" {
+			return fmt.Errorf("vm fields ensure: vm %d: a field to delete must be named", op.VMID)
+		}
+		if deleted[f] {
+			return fmt.Errorf("vm fields ensure: vm %d: field %q is deleted more than once", op.VMID, f)
+		}
+		if seen[f] {
+			return fmt.Errorf("vm fields ensure: vm %d: field %q is both set and deleted", op.VMID, f)
+		}
+		deleted[f] = true
 	}
 	return nil
 }
@@ -115,6 +144,19 @@ func (op *VMFieldsEnsure) Read(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("vm fields ensure: vm %d: field %q: %w", op.VMID, p.Field, err)
 		}
 		current[p.Field] = s
+	}
+	// A key to delete is recorded only when present, so Satisfied and Apply
+	// see its presence; its value is never compared to anything.
+	for _, f := range op.Deletes {
+		raw, ok := snap.fields[f]
+		if !ok {
+			continue
+		}
+		s, err := kvjson.Scalar(raw)
+		if err != nil {
+			return "", fmt.Errorf("vm fields ensure: vm %d: field %q: %w", op.VMID, f, err)
+		}
+		current[f] = s
 	}
 	op.current = current
 
@@ -162,6 +204,14 @@ func (op *VMFieldsEnsure) Satisfied(current string) bool {
 	for _, p := range op.Pairs {
 		val, ok := m[p.Field]
 		if !ok || !fieldsEqual(val, p.Value) {
+			return false
+		}
+	}
+	// A key to delete is satisfied only by its absence. A present key is
+	// unsatisfied whatever its value — "" included, which is exactly what
+	// deleting is not.
+	for _, f := range op.Deletes {
+		if _, ok := m[f]; ok {
 			return false
 		}
 	}
@@ -232,7 +282,6 @@ func (op *VMFieldsEnsure) Apply(ctx context.Context) error {
 	if err := op.Validate(); err != nil {
 		return err
 	}
-	op.Applied = nil
 
 	for _, p := range op.Pairs {
 		if val, ok := op.current[p.Field]; ok && fieldsEqual(val, p.Value) {
@@ -243,7 +292,7 @@ func (op *VMFieldsEnsure) Apply(ctx context.Context) error {
 			if err := op.Client.SetVMConfigField(ctx, op.VMID, p.Field, p.Value); err != nil {
 				return fmt.Errorf("vm fields ensure: vm %d: set field %q: %w", op.VMID, p.Field, err)
 			}
-			op.Applied = append(op.Applied, p.Field)
+			op.Applied = appendOnce(op.Applied, p.Field)
 			continue
 		}
 
@@ -257,14 +306,59 @@ func (op *VMFieldsEnsure) Apply(ctx context.Context) error {
 			case pve.IsDigestConflictError(err):
 				return fmt.Errorf("vm fields ensure: vm %d: field %q: %w: %w", op.VMID, p.Field, ErrConflict, err)
 			case sshexec.IsRootOnlyWriteError(err):
-				if fallbackErr := op.Client.SetVMConfigField(ctx, op.VMID, p.Field, p.Value); fallbackErr != nil {
+				// Straight to SSH: a REST retry would re-send this write with
+				// no digest, and REST has just refused it.
+				if fallbackErr := op.Client.SetVMConfigFieldOverSSH(ctx, op.VMID, p.Field, p.Value); fallbackErr != nil {
 					return fmt.Errorf("vm fields ensure: vm %d: set field %q: rejected as root-only by rest, ssh fallback also failed: %w", op.VMID, p.Field, fallbackErr)
 				}
 			default:
 				return fmt.Errorf("vm fields ensure: vm %d: set field %q: %w", op.VMID, p.Field, err)
 			}
 		}
-		op.Applied = append(op.Applied, p.Field)
+		op.Applied = appendOnce(op.Applied, p.Field)
+	}
+
+	// Deletes, after every set, under the same rules as a write: a root-only
+	// key goes over SSH with no CAS; any other key is removed with a fresh
+	// digest, re-read immediately before the delete, and a digest conflict
+	// is ErrConflict. A key already absent — at Read, or on that fresh read —
+	// is skipped rather than sent: what PVE answers for deleting an absent
+	// key is not verified against a live host (see
+	// pve.Client.DeleteVMConfigFieldCAS).
+	for _, f := range op.Deletes {
+		if _, ok := op.current[f]; !ok {
+			continue
+		}
+
+		if sshexec.RootOnlyFields[f] {
+			if err := op.Client.DeleteVMConfigField(ctx, op.VMID, f); err != nil {
+				return fmt.Errorf("vm fields ensure: vm %d: delete field %q: %w", op.VMID, f, err)
+			}
+			op.Deleted = appendOnce(op.Deleted, f)
+			continue
+		}
+
+		snap, err := op.readConfig(ctx)
+		if err != nil {
+			return fmt.Errorf("vm fields ensure: vm %d: re-read digest before deleting field %q: %w", op.VMID, f, err)
+		}
+		if _, ok := snap.fields[f]; !ok {
+			continue
+		}
+
+		if err := op.Client.DeleteVMConfigFieldCAS(ctx, op.VMID, f, snap.digest); err != nil {
+			switch {
+			case pve.IsDigestConflictError(err):
+				return fmt.Errorf("vm fields ensure: vm %d: delete field %q: %w: %w", op.VMID, f, ErrConflict, err)
+			case sshexec.IsRootOnlyWriteError(err):
+				if fallbackErr := op.Client.DeleteVMConfigFieldOverSSH(ctx, op.VMID, f); fallbackErr != nil {
+					return fmt.Errorf("vm fields ensure: vm %d: delete field %q: rejected as root-only by rest, ssh fallback also failed: %w", op.VMID, f, fallbackErr)
+				}
+			default:
+				return fmt.Errorf("vm fields ensure: vm %d: delete field %q: %w", op.VMID, f, err)
+			}
+		}
+		op.Deleted = appendOnce(op.Deleted, f)
 	}
 	return nil
 }
@@ -311,4 +405,14 @@ func (op *VMFieldsEnsure) readConfig(ctx context.Context) (vmConfigSnapshot, err
 	}
 
 	return vmConfigSnapshot{fields: fields, digest: digest}, nil
+}
+
+// appendOnce appends s to list unless it is already there.
+func appendOnce(list []string, s string) []string {
+	for _, v := range list {
+		if v == s {
+			return list
+		}
+	}
+	return append(list, s)
 }

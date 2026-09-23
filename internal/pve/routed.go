@@ -338,17 +338,79 @@ func (c *RoutedClient) SetVMConfigFieldCAS(ctx context.Context, vmid int, field,
 	return c.rest.SetVMConfigFieldCAS(ctx, c.target.Node, vmid, field, value, expectDigest)
 }
 
-// setViaSSH dials the standing SSH vector on first use and reuses it for
-// every subsequent root-only-field write on this RoutedClient — but never
-// reuses a connection once it's found to be dead (see sshConnectionHealthy).
+// DeleteVMConfigField removes one VM config field from this target's VM,
+// routed exactly as SetVMConfigField routes a write: a root-only field over
+// the standing SSH vector (`qm set --delete`), anything else over REST (PVE's
+// `delete` parameter), with the same one-time SSH retry when REST answers
+// with PVE's root-only error text. Whether PVE uses that same text to refuse
+// a DELETE of a root-only key is NOT verified against a live host; if it
+// does not, the REST error simply surfaces.
+func (c *RoutedClient) DeleteVMConfigField(ctx context.Context, vmid int, field string) error {
+	if sshexec.RootOnlyFields[field] {
+		return c.deleteViaSSH(ctx, vmid, field)
+	}
+
+	err := c.rest.DeleteVMConfigField(ctx, c.target.Node, vmid, field)
+	if err != nil && sshexec.IsRootOnlyWriteError(err) {
+		if sshErr := c.deleteViaSSH(ctx, vmid, field); sshErr == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// DeleteVMConfigFieldCAS is DeleteVMConfigField with the digest guard, and
+// refuses a root-only field for the reason SetVMConfigFieldCAS does: the
+// SSH vector has no compare-and-swap to honor. Its message avoids the word
+// "digest" for the same reason too.
+func (c *RoutedClient) DeleteVMConfigFieldCAS(ctx context.Context, vmid int, field, expectDigest string) error {
+	if sshexec.RootOnlyFields[field] {
+		return fmt.Errorf("delete vm %d field %q: root-only fields routed over the standing SSH vector have no compare-and-swap mechanism to honor an expected prior value with", vmid, field)
+	}
+	return c.rest.DeleteVMConfigFieldCAS(ctx, c.target.Node, vmid, field, expectDigest)
+}
+
+// SetVMConfigFieldOverSSH writes field over the standing SSH vector ONLY,
+// with no REST attempt. It is the fallback after PVE refused a CAS write as
+// root-only: SetVMConfigField would first re-send the same write over REST
+// with no digest — a second, unguarded write PVE has already said REST
+// cannot make — before reaching SSH.
+func (c *RoutedClient) SetVMConfigFieldOverSSH(ctx context.Context, vmid int, field, value string) error {
+	return c.setViaSSH(ctx, vmid, field, value)
+}
+
+// DeleteVMConfigFieldOverSSH is SetVMConfigFieldOverSSH's delete: `qm set
+// --delete` over the standing SSH vector only, never REST.
+func (c *RoutedClient) DeleteVMConfigFieldOverSSH(ctx context.Context, vmid int, field string) error {
+	return c.deleteViaSSH(ctx, vmid, field)
+}
+
+// setViaSSH writes a root-only field over the standing SSH vector.
 func (c *RoutedClient) setViaSSH(ctx context.Context, vmid int, field, value string) error {
+	return c.rootFieldViaSSH(ctx, fmt.Sprintf("set vm %d field %q", vmid, field), func(ssh *sshexec.Client) error {
+		return ssh.SetVMConfigField(ctx, vmid, field, value)
+	})
+}
+
+// deleteViaSSH removes a root-only field over the standing SSH vector.
+func (c *RoutedClient) deleteViaSSH(ctx context.Context, vmid int, field string) error {
+	return c.rootFieldViaSSH(ctx, fmt.Sprintf("delete vm %d field %q", vmid, field), func(ssh *sshexec.Client) error {
+		return ssh.DeleteVMConfigField(ctx, vmid, field)
+	})
+}
+
+// rootFieldViaSSH dials the standing SSH vector on first use and reuses it
+// for every subsequent root-only-field change on this RoutedClient — but
+// never reuses a connection once it's found to be dead (see
+// sshConnectionHealthy). what prefixes a dial error.
+func (c *RoutedClient) rootFieldViaSSH(ctx context.Context, what string, fn func(ssh *sshexec.Client) error) error {
 	if c.ssh == nil {
 		if err := c.dialSSH(ctx); err != nil {
-			return fmt.Errorf("set vm %d field %q: %w", vmid, field, err)
+			return fmt.Errorf("%s: %w", what, err)
 		}
 	}
 
-	err := c.ssh.SetVMConfigField(ctx, vmid, field, value)
+	err := fn(c.ssh)
 	if err != nil && !c.sshConnectionHealthy() {
 		// The cached connection is presumed dead — a transient network
 		// drop, a NAT idle timeout, sshd's ClientAliveInterval, or a

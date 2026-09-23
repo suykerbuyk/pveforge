@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -286,20 +287,25 @@ func TestVMFieldsEnsure_Apply_TracksActuallyWrittenFields(t *testing.T) {
 // reflects only THIS Apply call's own writes, not a stale accumulation
 // left over from a previous, abandoned attempt (e.g. a
 // conflict-triggered retry re-invokes Read/Satisfied/Apply from scratch).
-func TestVMFieldsEnsure_Apply_ResetsAppliedOnEachCall(t *testing.T) {
+// TestVMFieldsEnsure_Apply_AccumulatesAppliedAcrossAttempts: Applied is
+// what this Op wrote over its whole Run, so an Apply after a conflict retry
+// keeps what an earlier attempt already wrote, and a field written in both
+// attempts is listed once. (It replaces the old reset-per-Apply contract,
+// which lost writes that had happened: see the Run-level tests below.)
+func TestVMFieldsEnsure_Apply_AccumulatesAppliedAcrossAttempts(t *testing.T) {
 	client := &fakeClient{
 		node:              "qa-pve-01",
 		rawRequestResults: []json.RawMessage{json.RawMessage(`{"digest":"d2"}`)},
 	}
-	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("cores", "4")}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("memory", "8192", "cores", "4")}
 	op.current = map[string]string{}
-	op.Applied = []string{"stale", "leftover"}
+	op.Applied = []string{"memory"} // written by an earlier attempt of this Run
 
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(op.Applied) != 1 || op.Applied[0] != "cores" {
-		t.Errorf("expected Applied to be reset and contain only cores, got %v", op.Applied)
+	if want := []string{"memory", "cores"}; !slices.Equal(op.Applied, want) {
+		t.Errorf("Applied = %v, want %v (earlier writes kept, each field once)", op.Applied, want)
 	}
 }
 
@@ -423,9 +429,13 @@ func TestVMFieldsEnsure_Apply_UnregisteredRootOnlyFallback(t *testing.T) {
 	if client.setFieldCalls != 1 {
 		t.Errorf("expected exactly 1 CAS attempt before falling back, got %d", client.setFieldCalls)
 	}
-	if client.setFieldPlainCalls != 1 || client.lastPlainField != "somefield" {
-		t.Errorf("expected the plain-setter fallback to be used, got calls=%d field=%q",
-			client.setFieldPlainCalls, client.lastPlainField)
+	// The fallback goes over SSH only: no further REST write (a plain,
+	// REST-first SetVMConfigField would re-send it with no digest).
+	if client.setFieldPlainCalls != 0 {
+		t.Errorf("plain (REST-first) setter calls = %d, want 0", client.setFieldPlainCalls)
+	}
+	if want := []casCall{{field: "somefield", value: "x"}}; !slices.Equal(client.sshSets, want) {
+		t.Errorf("SSH-only writes = %+v, want %+v", client.sshSets, want)
 	}
 }
 

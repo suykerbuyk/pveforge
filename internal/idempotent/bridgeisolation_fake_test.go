@@ -15,6 +15,10 @@ import (
 type fakeBridgeClient struct {
 	node string
 
+	// sshSetValues records every SetVMConfigFieldOverSSH value, in order.
+	sshSetValues []string
+	sshSetErr    error // returned by SetVMConfigFieldOverSSH
+
 	getVMResults []*proxmox.VirtualMachine
 	getVMErr     error
 	getVMCalls   int
@@ -71,6 +75,21 @@ func (f *fakeBridgeClient) SetVMConfigFieldCAS(_ context.Context, _ int, field, 
 		return f.setFieldCASErrs[idx]
 	}
 	return nil
+}
+
+func (f *fakeBridgeClient) DeleteVMConfigFieldCAS(context.Context, int, string, string) error {
+	return nil
+}
+func (f *fakeBridgeClient) DeleteVMConfigField(context.Context, int, string) error { return nil }
+func (f *fakeBridgeClient) DeleteVMConfigFieldOverSSH(context.Context, int, string) error {
+	return nil
+}
+
+// SetVMConfigFieldOverSSH records its value in sshSetValues: the SSH-only
+// fallback is told apart from a plain (REST-first) SetVMConfigField.
+func (f *fakeBridgeClient) SetVMConfigFieldOverSSH(_ context.Context, _ int, _, value string) error {
+	f.sshSetValues = append(f.sshSetValues, value)
+	return f.sshSetErr
 }
 
 func (f *fakeBridgeClient) SetVMConfigField(_ context.Context, _ int, _, value string) error {

@@ -197,6 +197,14 @@ func (a *uvBridgeAdapter) SetVMConfigFieldCAS(context.Context, int, string, stri
 	return nil
 }
 func (a *uvBridgeAdapter) SetVMConfigField(context.Context, int, string, string) error { return nil }
+func (a *uvBridgeAdapter) DeleteVMConfigFieldCAS(context.Context, int, string, string) error {
+	return nil
+}
+func (a *uvBridgeAdapter) DeleteVMConfigField(context.Context, int, string) error { return nil }
+func (a *uvBridgeAdapter) SetVMConfigFieldOverSSH(context.Context, int, string, string) error {
+	return nil
+}
+func (a *uvBridgeAdapter) DeleteVMConfigFieldOverSSH(context.Context, int, string) error { return nil }
 func (a *uvBridgeAdapter) UploadSnippet(context.Context, string, string, []byte) error {
 	return nil
 }

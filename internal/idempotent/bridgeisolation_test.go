@@ -320,12 +320,13 @@ func TestBridgeIsolationEnsure_Apply_WrapsDigestConflictAsErrConflict(t *testing
 	}
 }
 
-// TestBridgeIsolationEnsure_Apply_RootOnlyHookscriptFallsBackToPlainSetter
+// TestBridgeIsolationEnsure_Apply_RootOnlyHookscriptFallsBackToSSHOnly
 // covers the unverified-live risk this Op's own doc comment flags:
 // whether "hookscript" is REST-writable from a scoped token, or root-only
-// like "args". If PVE rejects the CAS write as root-only, Apply must fall
-// back to the plain (non-CAS) setter rather than failing outright.
-func TestBridgeIsolationEnsure_Apply_RootOnlyHookscriptFallsBackToPlainSetter(t *testing.T) {
+// like "args". If PVE rejects the CAS write as root-only, Apply falls back
+// over SSH ONLY: exactly one SSH write and no further REST write — a REST
+// retry would re-send the write with no digest.
+func TestBridgeIsolationEnsure_Apply_RootOnlyHookscriptFallsBackToSSHOnly(t *testing.T) {
 	client := &fakeBridgeClient{
 		setFieldCASErrs: []error{errors.New(`set vm 100 field "hookscript": only root can set 'hookscript' config`)},
 	}
@@ -334,18 +335,18 @@ func TestBridgeIsolationEnsure_Apply_RootOnlyHookscriptFallsBackToPlainSetter(t 
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if client.setFieldCalls != 1 {
-		t.Fatalf("expected the plain setter to be called as a fallback, got %d calls", client.setFieldCalls)
+	if client.setFieldCalls != 0 {
+		t.Errorf("plain (REST-first) setter calls = %d, want 0: the fallback must not re-send over REST", client.setFieldCalls)
 	}
-	if client.lastFieldValue != op.wantedHookscript() {
-		t.Errorf("fallback value = %q, want %q", client.lastFieldValue, op.wantedHookscript())
+	if len(client.sshSetValues) != 1 || client.sshSetValues[0] != op.wantedHookscript() {
+		t.Errorf("SSH-only writes = %q, want exactly [%q]", client.sshSetValues, op.wantedHookscript())
 	}
 }
 
 func TestBridgeIsolationEnsure_Apply_RootOnlyFallbackAlsoFails(t *testing.T) {
 	client := &fakeBridgeClient{
 		setFieldCASErrs: []error{errors.New(`only root can set 'hookscript' config`)},
-		setFieldErrs:    []error{errors.New("ssh unavailable")},
+		sshSetErr:       errors.New("ssh unavailable"),
 	}
 	op := &BridgeIsolationEnsure{Client: client, VMID: 100, NetIndices: []int{0}, StorageID: "local"}
 

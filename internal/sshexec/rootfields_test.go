@@ -3,6 +3,7 @@ package sshexec
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -106,6 +107,67 @@ func TestSetVMConfigField_RejectsUnsafeFieldName(t *testing.T) {
 		if err := client.SetVMConfigField(ctx, 100, field, "value"); err == nil {
 			t.Fatalf("expected rejection of unsafe field name %q", field)
 		}
+	}
+}
+
+// TestDeleteVMConfigField: a root-only field is removed with qm's own
+// --delete parameter, never by writing it empty.
+func TestDeleteVMConfigField(t *testing.T) {
+	fs := newFakeServer(t)
+	kp, pub := clientKeypair(t)
+	fs.allowPublicKey(pub)
+
+	var receivedCmd string
+	fs.handleExec = func(cmd string) (string, string, int) {
+		receivedCmd = cmd
+		return "", "", 0
+	}
+	fs.Start(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.DeleteVMConfigField(ctx, 100, "args"); err != nil {
+		t.Fatalf("DeleteVMConfigField: %v", err)
+	}
+	if receivedCmd != `qm set '100' --delete 'args'` {
+		t.Fatalf("unexpected remote command: %q", receivedCmd)
+	}
+}
+
+// TestDeleteVMConfigField_RejectsUnsafeFieldName: a field name outside the
+// safe identifier shape is refused before anything reaches the host.
+func TestDeleteVMConfigField_RejectsUnsafeFieldName(t *testing.T) {
+	fs := newFakeServer(t)
+	kp, pub := clientKeypair(t)
+	fs.allowPublicKey(pub)
+	var execs atomic.Int32
+	fs.handleExec = func(string) (string, string, int) {
+		execs.Add(1)
+		return "", "", 0
+	}
+	fs.Start(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.Close()
+
+	for _, field := range []string{"args; rm -rf /", "args'; echo pwned", "", "with space"} {
+		if err := client.DeleteVMConfigField(ctx, 100, field); err == nil {
+			t.Errorf("expected rejection of unsafe field name %q", field)
+		}
+	}
+	if n := execs.Load(); n != 0 {
+		t.Errorf("%d command(s) reached the host for unsafe field names", n)
 	}
 }
 

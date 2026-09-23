@@ -39,6 +39,9 @@ type BridgeIsolationClient interface {
 	// dictates. Used as Apply's fallback for hookscript specifically —
 	// see Apply's own doc comment.
 	SetVMConfigField(ctx context.Context, vmid int, field, value string) error
+	// SetVMConfigFieldOverSSH writes over the SSH vector only, never REST:
+	// Apply's fallback after PVE refused the CAS write as root-only.
+	SetVMConfigFieldOverSSH(ctx context.Context, vmid int, field, value string) error
 	// UploadSnippet deploys content to PVE's "snippets" storage content
 	// type on storageID, as filename.
 	UploadSnippet(ctx context.Context, storageID, filename string, content []byte) error
@@ -205,8 +208,9 @@ func (op *BridgeIsolationEnsure) Satisfied(current string) bool {
 // the plain SetVMConfigField) has no automatic retry-over-SSH built in for
 // an unregistered root-only field — it just surfaces PVE's rejection — so
 // this Apply does that fallback itself: on
-// sshexec.IsRootOnlyWriteError(err), it retries via the plain
-// (non-CAS) SetVMConfigField before giving up.
+// sshexec.IsRootOnlyWriteError(err), it retries over SSH only
+// (SetVMConfigFieldOverSSH) before giving up — never over REST again, which
+// would be a second, digest-less write REST has already refused.
 func (op *BridgeIsolationEnsure) Apply(ctx context.Context) error {
 	if err := op.Validate(); err != nil {
 		return err
@@ -223,7 +227,7 @@ func (op *BridgeIsolationEnsure) Apply(ctx context.Context) error {
 			case pve.IsDigestConflictError(err):
 				return fmt.Errorf("bridge isolation ensure: vm %d: %w: %w", op.VMID, ErrConflict, err)
 			case sshexec.IsRootOnlyWriteError(err):
-				if fallbackErr := op.Client.SetVMConfigField(ctx, op.VMID, "hookscript", wanted); fallbackErr != nil {
+				if fallbackErr := op.Client.SetVMConfigFieldOverSSH(ctx, op.VMID, "hookscript", wanted); fallbackErr != nil {
 					return fmt.Errorf("bridge isolation ensure: vm %d: set hookscript: rejected as root-only by rest, ssh fallback also failed: %w", op.VMID, fallbackErr)
 				}
 			default:
