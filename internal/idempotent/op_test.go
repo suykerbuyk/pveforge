@@ -326,3 +326,51 @@ func TestRun_HoldsLockAcrossTheWholeCycle(t *testing.T) {
 		t.Fatalf("second Run: %v", err)
 	}
 }
+
+// holdCheckOp is an Op whose Apply outlasts the lock-wait bound and records
+// whether the ctx Read and Apply ran under carried a deadline or ended.
+type holdCheckOp struct {
+	hold          time.Duration
+	sawDeadline   bool
+	ctxErrAtApply error
+}
+
+func (o *holdCheckOp) Read(ctx context.Context) (string, error) {
+	if _, ok := ctx.Deadline(); ok {
+		o.sawDeadline = true
+	}
+	return "a", nil
+}
+
+func (o *holdCheckOp) Satisfied(string) bool { return false }
+
+func (o *holdCheckOp) Apply(ctx context.Context) error {
+	if _, ok := ctx.Deadline(); ok {
+		o.sawDeadline = true
+	}
+	time.Sleep(o.hold)
+	o.ctxErrAtApply = ctx.Err()
+	return nil
+}
+
+// TestRun_WaitBoundDoesNotReachHold: lock.WithWait bounds acquiring the lock
+// only. A cycle that holds the lock far longer than the bound must run to
+// completion under a ctx with no deadline.
+func TestRun_WaitBoundDoesNotReachHold(t *testing.T) {
+	op := &holdCheckOp{hold: 200 * time.Millisecond}
+	ctx := lock.WithWait(context.Background(), 50*time.Millisecond)
+
+	res, err := Run(ctx, testRosterPath(t), testKey(), op, false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected the Apply to have run")
+	}
+	if op.sawDeadline {
+		t.Error("Read or Apply ran under a deadline: the lock-wait bound leaked into the hold")
+	}
+	if op.ctxErrAtApply != nil {
+		t.Errorf("the ctx ended during a hold longer than the lock-wait bound: %v", op.ctxErrAtApply)
+	}
+}

@@ -204,6 +204,7 @@ part of the create itself, so the VM is never briefly untagged.`,
 		},
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of create parameters (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of create parameters (values must be JSON strings)")
 	markMutating(cmd)
@@ -217,6 +218,7 @@ func newVMGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	resolveFormat := addOutputFlag(cmd)
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -374,6 +376,7 @@ status is still 0.`,
 		},
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of field=value pairs (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of field=value pairs (values must be JSON strings)")
 	markMutating(cmd)

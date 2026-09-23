@@ -25,6 +25,7 @@ func newNodeGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	resolveFormat := addOutputFlag(cmd)
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {

@@ -28,6 +28,7 @@ func newNetworkGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	resolveFormat := addOutputFlag(cmd)
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -188,6 +189,7 @@ there is no safe way to force past that, so no bypass is offered.`,
 		},
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	cmd.Flags().StringVar(&managementBridge, "management-bridge", "", "the node's own management bridge (e.g. vmbr0) — required, no default; see this command's --help for why")
 	if err := cmd.MarkFlagRequired("management-bridge"); err != nil {
 		panic(err)
@@ -266,6 +268,7 @@ depends on iface before running this.`,
 		},
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	cmd.Flags().StringVar(&managementBridge, "management-bridge", "", "the node's own management bridge (e.g. vmbr0) — required, no default; see this command's --help for why")
 	if err := cmd.MarkFlagRequired("management-bridge"); err != nil {
 		panic(err)
@@ -343,6 +346,7 @@ safe way to force past that.`,
 		},
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	markMutating(cmd)
 	return cmd
 }

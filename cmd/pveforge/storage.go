@@ -28,6 +28,7 @@ func newStorageGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	resolveFormat := addOutputFlag(cmd)
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -75,6 +76,7 @@ func newStorageOrphansCmd() *cobra.Command {
 		Args:  cobra.RangeArgs(1, 2),
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
 	resolveFormat := addOutputFlag(cmd)
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
