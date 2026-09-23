@@ -32,6 +32,15 @@ const (
 	// was revoked by this run (a fresh token minted then removed, or an
 	// abort before any add).
 	OutcomeDiscarded = "discarded"
+	// OutcomeImported: an externally minted token was validated and is now
+	// held by the roster (Import). Nothing was created or revoked on PVE.
+	OutcomeImported = "imported"
+	// OutcomeAlreadyHeld: Import found exactly this token (id and secret)
+	// already held, and it still validates; nothing was written.
+	OutcomeAlreadyHeld = "already_held"
+	// OutcomeNotImported: Import did not write the token (it failed
+	// validation, or could not be verified). Nothing on PVE was touched.
+	OutcomeNotImported = "not_imported"
 )
 
 // Validation states (Result.Validation).
@@ -120,7 +129,7 @@ var (
 	// ErrTokenOwnerMismatch, so a run tripping both an identity and a
 	// transport condition reports the identity one (TestRun_CT4c…,
 	// TestRun_CT5d…).
-	ErrKeylessTargetNeedsFlag = errors.New("this target was bootstrapped without an SSH key, so --no-ssh-key is required")
+	ErrKeylessTargetNeedsFlag = errors.New("this target holds a token but no SSH key (bootstrapped with --no-ssh-key, or its token imported), so --no-ssh-key is required")
 	// ErrRoleHasNoPrivileges: a requested role exists on PVE but grants
 	// nothing (NoAccess), so no token holding it could ever validate.
 	ErrRoleHasNoPrivileges = errors.New("the requested ACL role grants no privileges")
@@ -173,6 +182,7 @@ func matchesAny(err error, set []error) bool {
 // Seams (unexported package vars, the project's idiom for tests).
 var (
 	dryRunTokenWrite    = roster.DryRunTokenWrite
+	writeTokenAuthFn    = roster.WriteTokenAuth // Import's write; a test can make it store something else
 	cleanupTimeout      = 30 * time.Second
 	postMintRetryDelay  = 1 * time.Second
 	persistTargetMetaFn = persistTargetMeta
