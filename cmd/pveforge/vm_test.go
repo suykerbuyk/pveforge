@@ -703,6 +703,43 @@ func TestVMSet_AfterErrWarning_ThroughRunRoot(t *testing.T) {
 	}
 }
 
+// TestVMSet_LineUnsafeTargetID_RefusedThroughRunRoot: a roster whose
+// target id carries a line break (a valid TOML escape, so it parses) is
+// refused when vm set loads it — before any PVE request — so no output
+// line can ever begin with a forged id: exit 1, nothing on stdout, and the
+// error on one stderr line naming the id quoted. This is what makes the
+// target id safe to print bare in vm set's stdout lines and its warning.
+func TestVMSet_LineUnsafeTargetID_RefusedThroughRunRoot(t *testing.T) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	const id = "qa\nwarning: forged"
+	rosterPath := newTestRosterWithTLSTarget(t, srv, id, "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"vm", "set", "--roster", rosterPath, id, "100", "cores=4"})
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	if code := runRoot(root, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Errorf("PVE requests = %d, want 0: the id must be refused before any request", n)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	got := stderr.String()
+	if strings.Count(got, "\n") != 1 || !strings.Contains(got, `target id "qa\nwarning: forged"`) {
+		t.Errorf("stderr = %q, want one line naming the quoted id", got)
+	}
+}
+
 // TestNewVMSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied is the
 // regression test for a third real, shipped bug: VMFieldsEnsure.Validate
 // (which rejects a duplicate field name) was only ever called from

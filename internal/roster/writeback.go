@@ -81,6 +81,11 @@ func AppendTarget(path string, t Target) error {
 	if t.ID == "" {
 		return fmt.Errorf("append target: id is required")
 	}
+	// Before the lock and the read: Decode would refuse the result anyway,
+	// but only after the write was composed, as a "safety check failed".
+	if err := ValidateTargetID(t.ID); err != nil {
+		return fmt.Errorf("append target: %w", err)
+	}
 	if t.Host == "" {
 		return fmt.Errorf("append target %q: host is required", t.ID)
 	}

@@ -88,6 +88,32 @@ func TestBootstrap_BT8_BadOwnerFailsBeforeAnyPromptOrSeam(t *testing.T) {
 	}
 }
 
+// A target id the roster would refuse (roster.ValidateTargetID: here a line
+// break that could forge an output line) fails before the roster path, both
+// secret prompts and the seams, as one stderr line naming the id quoted.
+// MUST STAY SERIAL (it swaps os.Stdin, via withCountingSeams).
+func TestBootstrap_LineUnsafeTargetIDFailsBeforeAnyPromptOrSeam(t *testing.T) {
+	c := withCountingSeams(t)
+	root := newRootCmd()
+	root.SetArgs([]string{"bootstrap", "qa\nwarning: forged", "--host", "h", "--node", "n", "--grant", "/:PVEVMAdmin::1"})
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	if code := runRoot(root, &stderr); code == 0 {
+		t.Fatal("exit 0 with a line-unsafe target id")
+	}
+	got := stderr.String()
+	if strings.Count(got, "\n") != 1 || !strings.Contains(got, `target id "qa\nwarning: forged"`) ||
+		strings.Contains(got, "passphrase") || strings.Contains(got, "PVE password") {
+		t.Fatalf("stderr = %q, want one line naming the quoted id and no secret prompt", got)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	if c.transport != 0 || c.validator != 0 {
+		t.Fatalf("seams constructed: %+v", *c)
+	}
+}
+
 // A-T9: --acl-path and --acl-role are gone: cobra's unknown-flag error,
 // no prompt, no seam (one row per flag). MUST STAY SERIAL (os.Stdin).
 func TestBootstrap_AT9_RemovedFlagsAreUnknown(t *testing.T) {

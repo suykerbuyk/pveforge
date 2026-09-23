@@ -1,6 +1,7 @@
 package roster
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -599,6 +600,48 @@ func TestAppendTarget_DuplicateID(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for duplicate target id")
+	}
+}
+
+// AppendTarget refuses a line-unsafe id itself, before taking the roster
+// lock: the file is untouched, no lock file is ever created, and the error
+// names the id rather than surfacing as Decode's "safety check failed" on
+// the composed result. A line-safe id still appends and loads back.
+func TestAppendTarget_RejectsLineUnsafeTargetID(t *testing.T) {
+	withTestWorkFactor(t)
+	for _, id := range lineUnsafeTargetIDs {
+		path := writeTempRoster(t, fixtureTwoTargets)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = AppendTarget(path, Target{ID: id, Host: "h", Node: "n"})
+		if err == nil {
+			t.Errorf("id %q: AppendTarget accepted a line-unsafe target id", id)
+			continue
+		}
+		if want := fmt.Sprintf("append target: target id %q", id); !strings.Contains(err.Error(), want) {
+			t.Errorf("id %q: error = %q, want it to contain %q", id, err, want)
+		}
+		if _, statErr := os.Stat(path + ".lock"); !os.IsNotExist(statErr) {
+			t.Errorf("id %q: roster lock file exists (stat err %v): the id was checked after the lock, not before", id, statErr)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Errorf("id %q: roster changed", id)
+		}
+	}
+	for _, id := range lineSafeTargetIDs {
+		if id == "qa-pve-01" {
+			continue // already in fixtureTwoTargets
+		}
+		path := writeTempRoster(t, fixtureTwoTargets)
+		if err := AppendTarget(path, Target{ID: id, Host: "h", Node: "n"}); err != nil {
+			t.Errorf("id %q: AppendTarget: %v", id, err)
+			continue
+		}
+		if r, err := Load(path); err != nil || r.Find(id) == nil {
+			t.Errorf("id %q: appended but did not load back (err %v)", id, err)
+		}
 	}
 }
 
