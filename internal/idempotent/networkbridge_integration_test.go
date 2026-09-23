@@ -2,11 +2,8 @@ package idempotent
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"fmt"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -16,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/suykerbuyk/pveforge/internal/pve"
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -42,8 +40,10 @@ import (
 //
 // Because this file lives outside package pve, it cannot reach pve's own
 // private test harness (routed_test.go's bootstrappedTarget/
-// newFakeSSHServer/testClient, all unexported) — it rebuilds the small
-// pieces it needs from pve's and sshexec's EXPORTED surface only:
+// newFakeSSHServer/testClient, all unexported). The fake SSH server and the
+// scripted REST server come from internal/pvefake, shared with
+// cmd/pveforge's runRoot tests of the same commands; the rest is built from
+// pve's and sshexec's EXPORTED surface only:
 //   - the REST side is redirected via roster.Target's own ordinary
 //     Host/APIPort/InsecureTLS fields pointed at a real httptest.NewTLSServer
 //     (exactly cmd/pveforge's own newTestRosterWithTLSTarget pattern — no
@@ -55,158 +55,12 @@ import (
 //     addition that makes this genuine cross-package integration test
 //     possible at all; production code never calls it.
 
-// fakeIntegrationSSHServer is a minimal in-process SSH server, self-
-// contained in this file: internal/pve's own equivalent
-// (fakesshserver_test.go's fakeSSHServer) is unexported and can't be
-// reused from this package, and no shared/exported test-SSH-server helper
-// exists anywhere in this project (internal/bootstrap rolls its own
-// private copy too) — this is the established convention, not a shortcut.
-type fakeIntegrationSSHServer struct {
-	hostSigner ssh.Signer
-	allowedPub ssh.PublicKey
-	listener   net.Listener
-	addr       string
-
-	mu   sync.Mutex
-	cmds []string
-
-	handleExec func(cmd string) (stdout, stderr string, exitCode int)
-}
-
-func newFakeIntegrationSSHServer(t *testing.T) *fakeIntegrationSSHServer {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate host key: %v", err)
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("host key signer: %v", err)
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-
-	return &fakeIntegrationSSHServer{
-		hostSigner: signer,
-		listener:   ln,
-		addr:       ln.Addr().String(),
-		handleExec: func(string) (string, string, int) { return "", "", 0 },
-	}
-}
-
-func (fs *fakeIntegrationSSHServer) port(t *testing.T) int {
-	t.Helper()
-	_, portStr, err := net.SplitHostPort(fs.addr)
-	if err != nil {
-		t.Fatalf("split host port: %v", err)
-	}
-	p, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("parse port %q: %v", portStr, err)
-	}
-	return p
-}
-
-func (fs *fakeIntegrationSSHServer) start() {
-	go func() {
-		for {
-			conn, err := fs.listener.Accept()
-			if err != nil {
-				return
-			}
-			go fs.handleConn(conn)
-		}
-	}()
-}
-
-func (fs *fakeIntegrationSSHServer) handleConn(conn net.Conn) {
-	cfg := &ssh.ServerConfig{
-		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if fs.allowedPub != nil && string(key.Marshal()) == string(fs.allowedPub.Marshal()) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("auth rejected")
-		},
-	}
-	cfg.AddHostKey(fs.hostSigner)
-
-	sconn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
-	if err != nil {
-		_ = conn.Close()
-		return
-	}
-	defer func() { _ = sconn.Close() }()
-	go ssh.DiscardRequests(reqs)
-
-	for newChan := range chans {
-		if newChan.ChannelType() != "session" {
-			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported channel type")
-			continue
-		}
-		ch, chReqs, err := newChan.Accept()
-		if err != nil {
-			continue
-		}
-		go fs.handleSession(ch, chReqs)
-	}
-}
-
-func (fs *fakeIntegrationSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
-	defer func() { _ = ch.Close() }()
-	for req := range reqs {
-		if req.Type != "exec" {
-			if req.WantReply {
-				_ = req.Reply(false, nil)
-			}
-			continue
-		}
-		cmd := string(req.Payload[4:])
-		if req.WantReply {
-			_ = req.Reply(true, nil)
-		}
-		fs.mu.Lock()
-		fs.cmds = append(fs.cmds, cmd)
-		fs.mu.Unlock()
-
-		stdout, stderr, code := fs.handleExec(cmd)
-		_, _ = ch.Write([]byte(stdout))
-		_, _ = ch.Stderr().Write([]byte(stderr))
-		status := make([]byte, 4)
-		status[3] = byte(code)
-		_, _ = ch.SendRequest("exit-status", false, status)
-		return
-	}
-}
-
-func (fs *fakeIntegrationSSHServer) cmdSequence() []string {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	out := make([]string, len(fs.cmds))
-	copy(out, fs.cmds)
-	return out
-}
-
-// linkExistsJSON is the `ip -j link show` JSON body for an existing
-// interface with the given up/down state.
-func linkExistsJSON(iface string, up bool) string {
-	state, flags := "DOWN", `["BROADCAST","MULTICAST"]`
-	if up {
-		state, flags = "UP", `["UP","BROADCAST","MULTICAST"]`
-	}
-	return fmt.Sprintf(`[{"ifname":%q,"operstate":%q,"flags":%s}]`, iface, state, flags)
-}
-
-const linkMissingStderrFmt = `Device "%s" does not exist.`
-
 // bootstrappedIntegrationTarget builds a roster.Target with real,
 // working token and SSH auth against restSrv/fs — mirroring
 // internal/pve's own routed_test.go bootstrappedTarget, rebuilt here from
 // exported roster/sshexec API only (see this file's own top-of-file doc
 // comment on why it can't just call pve's private copy).
-func bootstrappedIntegrationTarget(t *testing.T, restSrv *httptest.Server, fs *fakeIntegrationSSHServer, passphrase string) *roster.Target {
+func bootstrappedIntegrationTarget(t *testing.T, restSrv *httptest.Server, fs *pvefake.SSHServer, passphrase string) *roster.Target {
 	t.Helper()
 
 	kp, err := sshexec.GenerateEd25519Keypair("test")
@@ -217,11 +71,11 @@ func bootstrappedIntegrationTarget(t *testing.T, restSrv *httptest.Server, fs *f
 	if err != nil {
 		t.Fatalf("ParsePrivateKey: %v", err)
 	}
-	fs.allowedPub = signer.PublicKey()
-	fs.start()
+	fs.AllowKey(signer.PublicKey())
+	fs.Start()
 
 	var captured sshexec.CapturedHostKey
-	c, err := sshexec.Dial(context.Background(), fs.addr, "root", kp.PrivateKeyPEM, sshexec.CaptureHostKeyCallback(&captured))
+	c, err := sshexec.Dial(context.Background(), fs.Addr(), "root", kp.PrivateKeyPEM, sshexec.CaptureHostKeyCallback(&captured))
 	if err != nil {
 		t.Fatalf("dial to capture host key: %v", err)
 	}
@@ -264,81 +118,6 @@ func bootstrappedIntegrationTarget(t *testing.T, restSrv *httptest.Server, fs *f
 	}
 }
 
-// networkBridgeRESTScript is a small, ordered fake REST server for exactly
-// the PVE calls NetworkBridgeEnsure.Apply issues: pre/post-stage snapshots
-// and the guard self-check GET against /nodes/{node}/network/{iface}, the
-// stage POST/DELETE and commit PUT against /nodes/{node}/network, an
-// optional revert DELETE against the same collection path, and the task
-// status poll GET against /nodes/{node}/tasks/{upid}/status.
-type networkBridgeRESTScript struct {
-	t    *testing.T
-	node string
-
-	mgmtFields  string
-	stageResp   string
-	ifaceFields string
-	commitUPID  string
-	revertResp  string
-
-	mu   sync.Mutex
-	hits []string
-}
-
-func newNetworkBridgeRESTScript(t *testing.T, node string) *networkBridgeRESTScript {
-	t.Helper()
-	return &networkBridgeRESTScript{t: t, node: node, stageResp: `null`, revertResp: `null`}
-}
-
-func (s *networkBridgeRESTScript) server() *httptest.Server {
-	mgmtPath := fmt.Sprintf("/api2/json/nodes/%s/network/vmbr0", s.node)
-	collectionPath := fmt.Sprintf("/api2/json/nodes/%s/network", s.node)
-
-	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.mu.Lock()
-		s.hits = append(s.hits, r.Method+" "+r.URL.Path)
-		s.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == mgmtPath:
-			_, _ = fmt.Fprintf(w, `{"data":%s}`, s.mgmtFields)
-
-		case r.Method == http.MethodGet && r.URL.Path != mgmtPath && strings.HasPrefix(r.URL.Path, collectionPath+"/") && !strings.Contains(r.URL.Path, "/tasks/"):
-			_, _ = fmt.Fprintf(w, `{"data":%s}`, s.ifaceFields)
-
-		case r.Method == http.MethodPost && r.URL.Path == collectionPath:
-			_, _ = fmt.Fprintf(w, `{"data":%s}`, s.stageResp)
-
-		case r.Method == http.MethodDelete && r.URL.Path == collectionPath:
-			_, _ = fmt.Fprintf(w, `{"data":%s}`, s.revertResp)
-
-		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, collectionPath+"/"):
-			_, _ = fmt.Fprintf(w, `{"data":%s}`, s.stageResp)
-
-		case r.Method == http.MethodPut && r.URL.Path == collectionPath:
-			_, _ = fmt.Fprintf(w, `{"data":%q}`, s.commitUPID)
-
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, fmt.Sprintf("/api2/json/nodes/%s/tasks/", s.node)) && strings.HasSuffix(r.URL.Path, "/status"):
-			_, _ = fmt.Fprintf(w, `{"data":{"status":"stopped","exitstatus":"OK","upid":%q,"node":%q}}`, s.commitUPID, s.node)
-
-		default:
-			s.t.Fatalf("networkBridgeRESTScript: unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-}
-
-func (s *networkBridgeRESTScript) hitSequence() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, len(s.hits))
-	copy(out, s.hits)
-	return out
-}
-
-func wellFormedNetworkUPID(node, iface string) string {
-	return fmt.Sprintf("UPID:%s:00001234:00ABCDEF:5F000000:qmnetwork:%s:root@pam:", node, iface)
-}
-
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -362,23 +141,26 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 	const mgmtIface = "vmbr0"
 	const targetIface = "vmbr1"
 
-	upid := wellFormedNetworkUPID(node, targetIface)
-	restScript := newNetworkBridgeRESTScript(t, node)
-	restScript.mgmtFields = `{"iface":"vmbr0","type":"bridge","bridge_ports":"eth0","cidr":"10.0.0.5/24"}`
-	restScript.ifaceFields = `{"iface":"vmbr1","type":"bridge","bridge_ports":"eth1"}` // no "active": not yet committed
-	restScript.commitUPID = upid
-	restSrv := restScript.server()
+	upid := pvefake.NetworkUPID(node, targetIface)
+	restScript := pvefake.NewBridgeREST(t, node)
+	restScript.MgmtFields = `{"iface":"vmbr0","type":"bridge","bridge_ports":"eth0","cidr":"10.0.0.5/24"}`
+	restScript.IfaceResponses = []string{
+		pvefake.IfaceAbsent, // pre-stage read: the bridge does not exist yet
+		`{"iface":"vmbr1","type":"bridge","bridge_ports":"eth1"}`, // guard: staged, no "active": not yet committed
+	}
+	restScript.CommitUPID = upid
+	restSrv := restScript.Server()
 	defer restSrv.Close()
 
-	fs := newFakeIntegrationSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	mgmtCmd := fmt.Sprintf("ip -j link show dev '%s'", mgmtIface)
 	ifaceCmd := fmt.Sprintf("ip -j link show dev '%s'", targetIface)
 	var ifaceCalls int
 	var mu sync.Mutex
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		switch cmd {
 		case mgmtCmd:
-			return linkExistsJSON(mgmtIface, true), "", 0
+			return pvefake.LinkJSON(mgmtIface, true), "", 0
 		case ifaceCmd:
 			mu.Lock()
 			idx := ifaceCalls
@@ -386,18 +168,18 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 			mu.Unlock()
 			if idx == 0 {
 				// step 4 guard self-check: not yet live.
-				return "", fmt.Sprintf(linkMissingStderrFmt, targetIface), 1
+				return "", fmt.Sprintf(pvefake.LinkMissingStderrFmt, targetIface), 1
 			}
 			// step 8 post-apply check: now live.
-			return linkExistsJSON(targetIface, true), "", 0
+			return pvefake.LinkJSON(targetIface, true), "", 0
 		default:
-			t.Fatalf("unexpected ssh command: %q", cmd)
-			return "", "", 1
+			t.Errorf("unexpected ssh command: %q", cmd) // not Fatalf: this runs on the fake server's goroutine
+			return "", "unexpected ssh command", 127
 		}
-	}
+	})
 
 	tg := bootstrappedIntegrationTarget(t, restSrv, fs, "roster-pass")
-	restore := pve.SetSSHPortForIntegrationTests(fs.port(t))
+	restore := pve.SetSSHPortForIntegrationTests(fs.Port(t))
 	t.Cleanup(restore)
 
 	rc, err := pve.NewRoutedClient(tg, "roster-pass")
@@ -422,6 +204,7 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 
 	wantREST := []string{
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr0",
+		"GET /api2/json/nodes/qa-pve-01/network/vmbr1", // pre-stage read: absent
 		"POST /api2/json/nodes/qa-pve-01/network",
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr0",
 		"GET /api2/json/nodes/qa-pve-01/network/vmbr1",
@@ -432,12 +215,19 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 		// replaced, pinged once up front and again in its loop: twice.)
 		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
 	}
-	if got := restScript.hitSequence(); !equalStringSlices(got, wantREST) {
+	wantWrites := []string{
+		"POST /api2/json/nodes/qa-pve-01/network bridge_ports=eth1&iface=vmbr1&type=bridge",
+		"PUT /api2/json/nodes/qa-pve-01/network",
+	}
+	if got := restScript.Hits(); !equalStringSlices(got, wantREST) {
 		t.Fatalf("REST hit sequence:\n got:  %v\n want: %v", got, wantREST)
+	}
+	if got := restScript.Writes(); !equalStringSlices(got, wantWrites) {
+		t.Fatalf("REST writes:\n got:  %q\n want: %q", got, wantWrites)
 	}
 
 	wantSSH := []string{mgmtCmd, ifaceCmd, mgmtCmd, ifaceCmd}
-	if got := fs.cmdSequence(); !equalStringSlices(got, wantSSH) {
+	if got := fs.Commands(); !equalStringSlices(got, wantSSH) {
 		t.Fatalf("SSH command sequence:\n got:  %v\n want: %v", got, wantSSH)
 	}
 }
@@ -452,23 +242,23 @@ func TestNetworkBridgeEnsure_Apply_Destroy_FullStack(t *testing.T) {
 	const mgmtIface = "vmbr0"
 	const targetIface = "vmbr1"
 
-	upid := wellFormedNetworkUPID(node, targetIface)
-	restScript := newNetworkBridgeRESTScript(t, node)
-	restScript.mgmtFields = `{"iface":"vmbr0","type":"bridge","bridge_ports":"eth0","cidr":"10.0.0.5/24"}`
-	restScript.ifaceFields = `{"iface":"vmbr1","type":"bridge","bridge_ports":"eth1","active":"1"}` // still active pre-commit
-	restScript.commitUPID = upid
-	restSrv := restScript.server()
+	upid := pvefake.NetworkUPID(node, targetIface)
+	restScript := pvefake.NewBridgeREST(t, node)
+	restScript.MgmtFields = `{"iface":"vmbr0","type":"bridge","bridge_ports":"eth0","cidr":"10.0.0.5/24"}`
+	restScript.IfaceFields = `{"iface":"vmbr1","type":"bridge","bridge_ports":"eth1","active":"1"}` // still active pre-commit
+	restScript.CommitUPID = upid
+	restSrv := restScript.Server()
 	defer restSrv.Close()
 
-	fs := newFakeIntegrationSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	mgmtCmd := fmt.Sprintf("ip -j link show dev '%s'", mgmtIface)
 	ifaceCmd := fmt.Sprintf("ip -j link show dev '%s'", targetIface)
 	var ifaceCalls int
 	var mu sync.Mutex
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		switch cmd {
 		case mgmtCmd:
-			return linkExistsJSON(mgmtIface, true), "", 0
+			return pvefake.LinkJSON(mgmtIface, true), "", 0
 		case ifaceCmd:
 			mu.Lock()
 			idx := ifaceCalls
@@ -476,18 +266,18 @@ func TestNetworkBridgeEnsure_Apply_Destroy_FullStack(t *testing.T) {
 			mu.Unlock()
 			if idx == 0 {
 				// step 4 guard self-check: still live pre-commit.
-				return linkExistsJSON(targetIface, true), "", 0
+				return pvefake.LinkJSON(targetIface, true), "", 0
 			}
 			// step 8 post-apply check: now gone.
-			return "", fmt.Sprintf(linkMissingStderrFmt, targetIface), 1
+			return "", fmt.Sprintf(pvefake.LinkMissingStderrFmt, targetIface), 1
 		default:
-			t.Fatalf("unexpected ssh command: %q", cmd)
-			return "", "", 1
+			t.Errorf("unexpected ssh command: %q", cmd) // not Fatalf: this runs on the fake server's goroutine
+			return "", "unexpected ssh command", 127
 		}
-	}
+	})
 
 	tg := bootstrappedIntegrationTarget(t, restSrv, fs, "roster-pass")
-	restore := pve.SetSSHPortForIntegrationTests(fs.port(t))
+	restore := pve.SetSSHPortForIntegrationTests(fs.Port(t))
 	t.Cleanup(restore)
 
 	rc, err := pve.NewRoutedClient(tg, "roster-pass")
@@ -522,12 +312,19 @@ func TestNetworkBridgeEnsure_Apply_Destroy_FullStack(t *testing.T) {
 		// replaced, pinged once up front and again in its loop: twice.)
 		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
 	}
-	if got := restScript.hitSequence(); !equalStringSlices(got, wantREST) {
+	wantWrites := []string{
+		"DELETE /api2/json/nodes/qa-pve-01/network/vmbr1",
+		"PUT /api2/json/nodes/qa-pve-01/network",
+	}
+	if got := restScript.Hits(); !equalStringSlices(got, wantREST) {
 		t.Fatalf("REST hit sequence:\n got:  %v\n want: %v", got, wantREST)
+	}
+	if got := restScript.Writes(); !equalStringSlices(got, wantWrites) {
+		t.Fatalf("REST writes:\n got:  %q\n want: %q", got, wantWrites)
 	}
 
 	wantSSH := []string{mgmtCmd, ifaceCmd, mgmtCmd, ifaceCmd}
-	if got := fs.cmdSequence(); !equalStringSlices(got, wantSSH) {
+	if got := fs.Commands(); !equalStringSlices(got, wantSSH) {
 		t.Fatalf("SSH command sequence:\n got:  %v\n want: %v", got, wantSSH)
 	}
 }

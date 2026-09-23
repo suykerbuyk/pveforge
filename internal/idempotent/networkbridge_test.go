@@ -304,9 +304,25 @@ func TestNetworkBridgeEnsure_Satisfied(t *testing.T) {
 
 	t.Run("exists with matching fields, create wanted -> satisfied", func(t *testing.T) {
 		op := &NetworkBridgeEnsure{Wanted: map[string]string{"bridge_ports": "eth0"}}
-		current := `{"bridge_ports":"eth0","active":"1"}`
+		current := `{"type":"bridge","bridge_ports":"eth0","active":"1"}`
 		if !op.Satisfied(current) {
 			t.Fatalf("expected satisfied")
+		}
+	})
+
+	// The create's type=bridge default is part of what is checked, not only
+	// of what is sent: an existing interface of another type with otherwise
+	// matching fields is not the bridge that was asked for.
+	t.Run("exists as another type with matching fields, no type named -> not satisfied", func(t *testing.T) {
+		op := &NetworkBridgeEnsure{Wanted: map[string]string{"mtu": "9000"}}
+		if op.Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
+			t.Fatalf("an OVSBridge must not satisfy a bridge create")
+		}
+	})
+	t.Run("explicit type named and matching -> satisfied", func(t *testing.T) {
+		op := &NetworkBridgeEnsure{Wanted: map[string]string{"mtu": "9000", "type": "OVSBridge"}}
+		if !op.Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
+			t.Fatalf("an explicitly named type that matches must satisfy")
 		}
 	})
 
@@ -373,25 +389,25 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "vlan_filtering: caller typed true, pve answers json number 1",
 			wanted:  map[string]string{"vlan_filtering": "true"},
-			current: `{"vlan_filtering":1,"active":1}`,
+			current: `{"type":"bridge","vlan_filtering":1,"active":1}`,
 			want:    true,
 		},
 		{
 			name:    "vlan_filtering: caller typed PVE-CLI 1, pve answers json bool true",
 			wanted:  map[string]string{"vlan_filtering": "1"},
-			current: `{"vlan_filtering":true}`,
+			current: `{"type":"bridge","vlan_filtering":true}`,
 			want:    true,
 		},
 		{
 			name:    "autostart: caller typed false, pve answers json number 0",
 			wanted:  map[string]string{"autostart": "false"},
-			current: `{"autostart":0}`,
+			current: `{"type":"bridge","autostart":0}`,
 			want:    true,
 		},
 		{
 			name:    "bridge_vlan_aware: caller typed 0, pve answers json bool false",
 			wanted:  map[string]string{"bridge_vlan_aware": "0"},
-			current: `{"bridge_vlan_aware":false}`,
+			current: `{"type":"bridge","bridge_vlan_aware":false}`,
 			want:    true,
 		},
 
@@ -399,7 +415,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "vlan_filtering: wanted 0 against a live true stays unsatisfied",
 			wanted:  map[string]string{"vlan_filtering": "0"},
-			current: `{"vlan_filtering":true}`,
+			current: `{"type":"bridge","vlan_filtering":true}`,
 			want:    false,
 		},
 		{
@@ -408,7 +424,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 			// boolean-false-shaped. Same case the sibling pins.
 			name:    "empty string is not boolean-false-shaped",
 			wanted:  map[string]string{"vlan_filtering": "false"},
-			current: `{"vlan_filtering":""}`,
+			current: `{"type":"bridge","vlan_filtering":""}`,
 			want:    false,
 		},
 		{
@@ -416,13 +432,13 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 			// through to an exact compare and correctly does not match.
 			name:    "yes is not boolish, so it does not match 1",
 			wanted:  map[string]string{"vlan_filtering": "yes"},
-			current: `{"vlan_filtering":1}`,
+			current: `{"type":"bridge","vlan_filtering":1}`,
 			want:    false,
 		},
 		{
 			name:    "non-boolish mismatch still unsatisfied",
 			wanted:  map[string]string{"bridge_ports": "eth0"},
-			current: `{"bridge_ports":"eth1"}`,
+			current: `{"type":"bridge","bridge_ports":"eth1"}`,
 			want:    false,
 		},
 
@@ -438,7 +454,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "absent key is never already-matching",
 			wanted:  map[string]string{"vlan_filtering": "1"},
-			current: `{"bridge_ports":"eth0"}`,
+			current: `{"type":"bridge","bridge_ports":"eth0"}`,
 			want:    false,
 		},
 		{
@@ -446,7 +462,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 			// confused with absent, in either direction.
 			name:    "absent key is not already-matching even for a wanted empty string",
 			wanted:  map[string]string{"bridge_stp": ""},
-			current: `{"bridge_ports":"eth0"}`,
+			current: `{"type":"bridge","bridge_ports":"eth0"}`,
 			want:    false,
 		},
 
@@ -454,13 +470,13 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "non-boolish string match unaffected",
 			wanted:  map[string]string{"bridge_ports": "eth0"},
-			current: `{"bridge_ports":"eth0"}`,
+			current: `{"type":"bridge","bridge_ports":"eth0"}`,
 			want:    true,
 		},
 		{
 			name:    "non-boolish numeric match unaffected",
 			wanted:  map[string]string{"mtu": "9000"},
-			current: `{"mtu":9000}`,
+			current: `{"type":"bridge","mtu":9000}`,
 			want:    true,
 		},
 	}
@@ -482,6 +498,42 @@ func mgmtFields(v string) map[string]json.RawMessage {
 }
 
 // --- (a) matching pre/pending management-bridge fields -> commit called, success.
+
+// TestNetworkBridgeEnsure_Apply_ExistingOtherTypeRefusedBeforeStaging: a
+// create of an interface that already exists as another type is refused
+// before anything is staged — not staged for PVE or the guard to reject,
+// and never reported as done. An existing bridge is not refused here (the
+// step-4 guard still judges it, as before).
+func TestNetworkBridgeEnsure_Apply_ExistingOtherTypeRefusedBeforeStaging(t *testing.T) {
+	for name, c := range map[string]struct {
+		wanted   map[string]string
+		existing string
+	}{
+		"no type named, exists as OVSBridge": {map[string]string{"mtu": "9000"}, "OVSBridge"},
+		"OVSBridge named, exists as bridge":  {map[string]string{"mtu": "9000", "type": "OVSBridge"}, "bridge"},
+		"no type named, exists with no type": {map[string]string{"mtu": "9000"}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeNetworkBridgeClient("pve1")
+			client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+			fields := map[string]json.RawMessage{"mtu": rawField("9000")}
+			if c.existing != "" {
+				fields["type"] = rawField(c.existing)
+			}
+			client.getResponses["vmbr99"] = []getResponse{{fields: fields}}
+			client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+
+			op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", Wanted: c.wanted}
+			err := op.Apply(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "already exists as type") || !strings.Contains(err.Error(), "nothing staged") {
+				t.Fatalf("Apply = %v, want a refusal naming the existing type", err)
+			}
+			if client.lastStageParams != nil || client.commitCalls != 0 || client.revertCalls != 0 {
+				t.Errorf("staged=%v commits=%d reverts=%d, want nothing sent", client.lastStageParams, client.commitCalls, client.revertCalls)
+			}
+		})
+	}
+}
 
 func TestNetworkBridgeEnsure_Apply_CreateSucceeds(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
@@ -509,6 +561,47 @@ func TestNetworkBridgeEnsure_Apply_CreateSucceeds(t *testing.T) {
 	}
 	if client.lastStageParams.Get("bridge_ports") != "eth1" {
 		t.Fatalf("expected stage params to carry bridge_ports=eth1, got %v", client.lastStageParams)
+	}
+	// Exactly: the requested field, the interface, and type=bridge — which
+	// PVE requires on a create, and which the caller did not name.
+	if got, want := client.lastStageParams.Encode(), "bridge_ports=eth1&iface=vmbr99&type=bridge"; got != want {
+		t.Fatalf("stage params = %q, want exactly %q", got, want)
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_CreateSendsAnExplicitTypeAsGiven: a type the
+// caller named is sent as given, not replaced by the default.
+func TestNetworkBridgeEnsure_Apply_CreateSendsAnExplicitTypeAsGiven(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}} // same both reads (index clamps to last)
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}}             // guard: not yet live
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}} // same both reads
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}, {Exists: true}}
+	client.commitUPID = "UPID:pve1:00000001:00000002:00000003:00000004:test:root@pam:"
+
+	op := &NetworkBridgeEnsure{
+		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
+		Wanted: map[string]string{"bridge_ports": "eth1", "type": "OVSBridge"},
+	}
+	if err := op.Apply(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.commitCalls != 1 {
+		t.Fatalf("expected commit called once, got %d", client.commitCalls)
+	}
+	if client.revertCalls != 0 {
+		t.Fatalf("expected no revert, got %d", client.revertCalls)
+	}
+	if client.lastStageParams.Get("iface") != "vmbr99" {
+		t.Fatalf("expected stage params to set iface=vmbr99, got %v", client.lastStageParams)
+	}
+	if client.lastStageParams.Get("bridge_ports") != "eth1" {
+		t.Fatalf("expected stage params to carry bridge_ports=eth1, got %v", client.lastStageParams)
+	}
+	// Exactly: the requested field, the interface, and type=bridge — which
+	// PVE requires on a create, and which the caller did not name.
+	if got, want := client.lastStageParams.Encode(), "bridge_ports=eth1&iface=vmbr99&type=OVSBridge"; got != want {
+		t.Fatalf("stage params = %q, want exactly %q", got, want)
 	}
 }
 
@@ -581,8 +674,8 @@ func TestNetworkBridgeEnsure_Apply_PostApplyManagementBridgeKernelMismatch(t *te
 
 func TestNetworkBridgeEnsure_Apply_ByteIdenticalStanzaStillGuardChecked(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
-	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}} // identical every read
-	client.getResponses["vmbr99"] = []getResponse{{fields: map[string]json.RawMessage{"active": rawField("1")}}}
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}                                                    // identical every read
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}, {fields: map[string]json.RawMessage{"active": rawField("1")}}} // pre-stage: absent; guard: active
 	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
 	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: true}}
 
@@ -713,7 +806,7 @@ func TestNetworkBridgeEnsure_Apply_Create_GuardActiveAlreadyTrue_Aborts(t *testi
 		{fields: mgmtFields("eth0")},
 		{fields: mgmtFields("eth9")}, // ALSO differs, to prove step 4 catches this before step 5 ever runs
 	}
-	client.getResponses["vmbr99"] = []getResponse{{fields: map[string]json.RawMessage{"active": rawField("1")}}}
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}, {fields: map[string]json.RawMessage{"active": rawField("1")}}} // pre-stage: absent; guard: active
 	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
 	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}}
 

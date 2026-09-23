@@ -193,6 +193,11 @@ func ifaceEntry(iface string, fields map[string]json.RawMessage) map[string]json
 		out[k] = v
 	}
 	out["iface"] = rawField(iface)
+	// Every interface in PVE's list carries its type; NetworkFieldsEnsure's
+	// stage sends the target's, so a fixture without one is unrealistic.
+	if _, ok := out["type"]; !ok {
+		out["type"] = rawField("bridge")
+	}
 	return out
 }
 
@@ -428,6 +433,78 @@ func TestNetworkFieldsEnsure_ReadThenSatisfied_VLANFilteringBooleanCoercion(t *t
 	}
 }
 
+// --- the stage carries the interface's CURRENT type --------------------
+
+// TestNetworkFieldsEnsure_Apply_StageSendsTheInterfacesCurrentType: PVE
+// requires type on PUT /nodes/{node}/network/{iface}, matching the existing
+// interface's type. The stage sends exactly the requested fields plus the
+// target's type as listed, for a bridge and for non-bridge interfaces alike —
+// so a stage that hard-coded "bridge" fails every non-bridge row.
+func TestNetworkFieldsEnsure_Apply_StageSendsTheInterfacesCurrentType(t *testing.T) {
+	for _, typ := range []string{"bridge", "OVSBridge", "eth", "vlan"} {
+		t.Run(typ, func(t *testing.T) {
+			client := newFakeNetworkFieldsClient("pve1")
+			target := func(mtu string) map[string]json.RawMessage {
+				return ifaceEntry("eno5", map[string]json.RawMessage{"type": rawField(typ), "mtu": rawField(mtu)})
+			}
+			client.listResponses = []listResponse{
+				{entries: []map[string]json.RawMessage{target("1500"), ifaceEntry("vmbr0", nil)}},
+				{entries: []map[string]json.RawMessage{target("9000"), ifaceEntry("vmbr0", nil)}},
+			}
+			client.linkStates = []sshexec.LinkState{{Exists: true, Up: true}}
+			client.commitUPID = "UPID:pve1:1:1:1:1:test:root@pam:"
+
+			op := &NetworkFieldsEnsure{Client: client, Node: "pve1", Iface: "eno5", Pairs: []kvjson.Pair{{Field: "mtu", Value: "9000"}}}
+			if err := op.Apply(context.Background()); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			want := url.Values{"mtu": {"9000"}, "type": {typ}}.Encode()
+			if got := client.lastStageParams.Encode(); got != want {
+				t.Errorf("stage params = %q, want exactly %q", got, want)
+			}
+		})
+	}
+}
+
+// TestNetworkFieldsEnsure_Apply_UnknownTypeRefusesBeforeStaging: without the
+// target's current type the stage cannot be sent, and guessing one would be
+// a type change — so Apply refuses before staging anything (nothing to
+// revert, no commit).
+func TestNetworkFieldsEnsure_Apply_UnknownTypeRefusesBeforeStaging(t *testing.T) {
+	for name, target := range map[string]map[string]json.RawMessage{
+		"target not listed": nil,
+		"no type":           {"iface": rawField("vmbr5"), "mtu": rawField("1500")},
+		"empty type":        {"iface": rawField("vmbr5"), "type": rawField("")},
+		"null type":         {"iface": rawField("vmbr5"), "type": json.RawMessage("null")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeNetworkFieldsClient("pve1")
+			entries := []map[string]json.RawMessage{ifaceEntry("vmbr0", nil)}
+			if target != nil {
+				entries = append(entries, target)
+			}
+			client.listResponses = []listResponse{{entries: entries}}
+			op := &NetworkFieldsEnsure{Client: client, Node: "pve1", Iface: "vmbr5", Pairs: []kvjson.Pair{{Field: "mtu", Value: "9000"}}}
+			err := op.Apply(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "refusing to stage") {
+				t.Fatalf("Apply err = %v, want a refusal to stage", err)
+			}
+			if client.lastStageParams != nil || client.commitCalls != 0 || client.revertCalls != 0 {
+				t.Errorf("staged=%v commits=%d reverts=%d, want nothing sent", client.lastStageParams, client.commitCalls, client.revertCalls)
+			}
+		})
+	}
+}
+
+// TestNetworkFieldsEnsure_Validate_RefusesType: the stage sends the current
+// type itself, so a caller-supplied type is refused rather than sent.
+func TestNetworkFieldsEnsure_Validate_RefusesType(t *testing.T) {
+	op := &NetworkFieldsEnsure{Node: "pve1", Iface: "vmbr5", Pairs: []kvjson.Pair{{Field: "mtu", Value: "9000"}, {Field: "type", Value: "OVSBridge"}}}
+	if err := op.Validate(); err == nil || !strings.Contains(err.Error(), `"type" cannot be set`) {
+		t.Fatalf("Validate = %v, want a refusal of the type field", err)
+	}
+}
+
 // --- Apply: (a) matching before/after other-interface hashes -> commits ---
 
 func TestNetworkFieldsEnsure_Apply_MTUSet_OtherInterfacesUnchanged_Commits(t *testing.T) {
@@ -531,7 +608,7 @@ func TestNetworkFieldsEnsure_Apply_PreStageListError_Propagates(t *testing.T) {
 
 func TestNetworkFieldsEnsure_Apply_StageError_Propagates(t *testing.T) {
 	client := newFakeNetworkFieldsClient("pve1")
-	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr0", nil)}}}
+	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr5", nil), ifaceEntry("vmbr0", nil)}}}
 	client.stageErr = errors.New("pve rejected the staged update")
 
 	op := &NetworkFieldsEnsure{Client: client, Node: "pve1", Iface: "vmbr5", Pairs: []kvjson.Pair{{Field: "mtu", Value: "9000"}}}
@@ -546,7 +623,7 @@ func TestNetworkFieldsEnsure_Apply_StageError_Propagates(t *testing.T) {
 
 func TestNetworkFieldsEnsure_Apply_CommitError_Propagates(t *testing.T) {
 	client := newFakeNetworkFieldsClient("pve1")
-	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr0", nil)}}}
+	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr5", nil), ifaceEntry("vmbr0", nil)}}}
 	client.commitErr = errors.New("pve rejected the commit")
 
 	op := &NetworkFieldsEnsure{Client: client, Node: "pve1", Iface: "vmbr5", Pairs: []kvjson.Pair{{Field: "mtu", Value: "9000"}}}
@@ -561,7 +638,7 @@ func TestNetworkFieldsEnsure_Apply_CommitError_Propagates(t *testing.T) {
 
 func TestNetworkFieldsEnsure_Apply_CommitReturnsEmptyUPID_HardError(t *testing.T) {
 	client := newFakeNetworkFieldsClient("pve1")
-	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr0", nil)}}}
+	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr5", nil), ifaceEntry("vmbr0", nil)}}}
 	client.commitUPID = ""
 
 	op := &NetworkFieldsEnsure{Client: client, Node: "pve1", Iface: "vmbr5", Pairs: []kvjson.Pair{{Field: "mtu", Value: "9000"}}}
@@ -576,7 +653,7 @@ func TestNetworkFieldsEnsure_Apply_CommitReturnsEmptyUPID_HardError(t *testing.T
 
 func TestNetworkFieldsEnsure_Apply_WaitForTaskFails_Propagates(t *testing.T) {
 	client := newFakeNetworkFieldsClient("pve1")
-	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr0", nil)}}}
+	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr5", nil), ifaceEntry("vmbr0", nil)}}}
 	client.commitUPID = "UPID:pve1:1:1:1:1:test:root@pam:"
 	client.waitForTaskErr = errors.New("timed out waiting for task to complete")
 
@@ -595,7 +672,7 @@ func TestNetworkFieldsEnsure_Apply_WaitForTaskFails_Propagates(t *testing.T) {
 
 func TestNetworkFieldsEnsure_Apply_PostApplyLinkStateGone_HardError(t *testing.T) {
 	client := newFakeNetworkFieldsClient("pve1")
-	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr0", nil)}}}
+	client.listResponses = []listResponse{{entries: []map[string]json.RawMessage{ifaceEntry("vmbr5", nil), ifaceEntry("vmbr0", nil)}}}
 	client.commitUPID = "UPID:pve1:1:1:1:1:test:root@pam:"
 	client.linkStates = []sshexec.LinkState{{Exists: false}}
 

@@ -97,6 +97,9 @@ func (op *NetworkFieldsEnsure) Validate() error {
 		if seen[p.Field] {
 			return fmt.Errorf("network fields ensure: iface %s: field %q specified more than once", op.Iface, p.Field)
 		}
+		if p.Field == "type" {
+			return fmt.Errorf("network fields ensure: iface %s: \"type\" cannot be set: the stage always sends the interface's current type itself, as PVE requires, and an interface's type cannot be changed this way", op.Iface)
+		}
 		seen[p.Field] = true
 	}
 	return nil
@@ -194,13 +197,21 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
 	}
+	// The stage must carry the interface's current type (see stage), read
+	// here from this same pre-stage snapshot rather than from Read, so it is
+	// the freshest value under the lock and Apply never depends on a Read it
+	// did not do. Nothing is staged yet, so a failure needs no revert.
+	ifaceType, err := currentInterfaceType(before, op.Iface)
+	if err != nil {
+		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
+	}
 
 	// --- Step 2: stage ---------------------------------------------------
 	// A failed stage is NOT reverted, for NetworkBridgeEnsure.Apply's
 	// reason: the revert is a whole-node discard, and when our own stage
 	// failed, whatever is pending most likely belongs to someone else. From
 	// here on, every failure before the commit reverts.
-	if err := op.stage(ctx); err != nil {
+	if err := op.stage(ctx, ifaceType); err != nil {
 		return fmt.Errorf("network fields ensure: %s: stage: %w", op.Iface, err)
 	}
 
@@ -259,17 +270,48 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 }
 
 // stage is Apply's step 2: PUT /nodes/{node}/network/{iface} with Pairs'
-// field=value params — matches confirmed NodeNetwork.Update semantics for
-// an EXISTING interface's field update (see this task's own "3a source
-// verification" record), distinct from 3a's POST-to-list create path.
-func (op *NetworkFieldsEnsure) stage(ctx context.Context) error {
+// field=value params plus type=ifaceType, the interface's CURRENT type
+// (never caller-supplied: Validate refuses a "type" pair). PVE's schema
+// lists type as required on this PUT, and PVE's update_network requires it
+// to match the existing interface's type. go-proxmox's NodeNetwork.Update
+// sends it too, because it PUTs the whole NodeNetwork struct; sending only
+// the changed fields, as this did before, omitted it.
+//
+// UNVERIFIED against a live host: that PVE refuses this PUT without type,
+// and accepts it with the unchanged current type alongside only the changed
+// fields (every other existing field left as it is). The nested harness
+// (pveforge-nested-pve-test-harness) must check both, on a bridge and on a
+// non-bridge interface, and that a type differing from the current one is
+// refused.
+func (op *NetworkFieldsEnsure) stage(ctx context.Context, ifaceType string) error {
 	params := url.Values{}
 	for _, p := range op.Pairs {
 		params.Set(p.Field, p.Value)
 	}
+	params.Set("type", ifaceType)
 	path := fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(op.Node), url.PathEscape(op.Iface))
 	_, err := op.Client.RawRequest(ctx, http.MethodPut, path, params)
 	return err
+}
+
+// currentInterfaceType is iface's "type" in a fetchAllInterfaces snapshot.
+// A missing interface, or one without a non-empty string type, is an error:
+// the stage cannot be sent without it, and guessing one would be a type
+// change.
+func currentInterfaceType(all map[string]map[string]json.RawMessage, iface string) (string, error) {
+	fields, ok := all[iface]
+	if !ok {
+		return "", fmt.Errorf("interface is not in the node's interface list, so its current type is unknown; refusing to stage")
+	}
+	raw, ok := fields["type"]
+	if !ok {
+		return "", fmt.Errorf("interface has no type in the node's interface list; refusing to stage without one")
+	}
+	var typ string
+	if err := json.Unmarshal(raw, &typ); err != nil || typ == "" {
+		return "", fmt.Errorf("interface's type %s is not a non-empty string; refusing to stage", raw)
+	}
+	return typ, nil
 }
 
 // otherInterfaceHashes canonicalHashes every interface in all EXCEPT

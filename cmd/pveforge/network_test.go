@@ -120,13 +120,13 @@ func TestNewNetworkGetCmd_RequiresTwoArgs(t *testing.T) {
 }
 
 // --- network bridge create/destroy: CLI wiring and argument/flag
-// validation. The full mutation round trip (real REST+SSH stage/guard/
-// commit/verify sequence) is exercised end to end against a real
-// *pve.RoutedClient by internal/idempotent's own
-// TestNetworkBridgeEnsure_Apply_Create_FullStack/..._Destroy_FullStack —
-// deliberately not duplicated here; these tests cover only what's unique
-// to this layer: flag/arg wiring and the CLI-specific duplicate-field
-// guard, none of which need a live roster or server.
+// validation. The Op's own round trip (REST+SSH stage/guard/commit/verify)
+// is pinned in internal/idempotent's
+// TestNetworkBridgeEnsure_Apply_Create_FullStack/..._Destroy_FullStack; the
+// command's success path through runRoot — its "created"/"destroyed" line
+// included — is pinned in ssh_success_test.go, over the same
+// internal/pvefake servers rather than a copy of them. These tests cover
+// flag/arg wiring and the CLI-specific duplicate-field guard.
 
 func TestWantedFieldsFromKVArgs_DuplicateFieldRejected(t *testing.T) {
 	_, err := wantedFieldsFromKVArgs([]string{"bridge_ports=eth0", "bridge_ports=eth1"})
@@ -366,7 +366,7 @@ func TestNewNetworkBridgeCreateCmd_AlreadySatisfied_ReportsNoOpAndDoesNotStage(t
 		// The bridge already exists with exactly the wanted fields, and
 		// PVE answers vlan_filtering in its own encoding (a JSON number),
 		// not the caller's ("true").
-		_, _ = w.Write([]byte(`{"data":{"bridge_ports":"eth0","vlan_filtering":1,"active":1}}`))
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","bridge_ports":"eth0","vlan_filtering":1,"active":1}}`))
 	}))
 	defer srv.Close()
 

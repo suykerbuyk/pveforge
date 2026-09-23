@@ -28,6 +28,14 @@ const rosterPassphrase = "test-roster-pass"
 // the client accepts the test server's self-signed cert.
 func newTestRosterWithTLSTarget(t *testing.T, srv *httptest.Server, targetID, node string) string {
 	t.Helper()
+	return writeTestRoster(t, srv, targetID, node, "")
+}
+
+// writeTestRoster is newTestRosterWithTLSTarget with extra TOML appended to
+// the target's block after its [targets.token] subtable — how
+// newTestRosterWithSSHTarget (sshharness_test.go) adds [targets.ssh].
+func writeTestRoster(t *testing.T, srv *httptest.Server, targetID, node, extra string) string {
+	t.Helper()
 	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
 	if err != nil {
 		t.Fatalf("split host port: %v", err)
@@ -53,7 +61,7 @@ insecure_tls = true
   id = "root@pam!pveforge"
   secret_enc = '''
 %s'''
-`, targetID, host, node, port, armored)
+%s`, targetID, host, node, port, armored, extra)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.toml")
