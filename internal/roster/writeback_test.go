@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 // fixtureTwoTargets deliberately carries a leading comment, mixed spacing,
@@ -322,6 +324,33 @@ func TestQuoteTOMLBasicString_Escapes(t *testing.T) {
 	for in, want := range cases {
 		if got := quoteTOMLBasicString(in); got != want {
 			t.Errorf("quoteTOMLBasicString(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Every string quoteTOMLBasicString renders must be a valid TOML basic
+// string that go-toml decodes back to the input: each control rune TOML
+// forbids raw (U+0000-U+001F, U+007F) — tab included, though it is legal
+// raw — alone and embedded, plus runes that are legal raw and must pass
+// through unchanged (C1 U+0085, U+2028, non-ASCII), quote and backslash.
+func TestQuoteTOMLBasicString_RoundTripsEveryControlRune(t *testing.T) {
+	withTestWorkFactor(t)
+	var inputs []string
+	for r := rune(0); r < 0x20; r++ {
+		inputs = append(inputs, string(r), "a"+string(r)+"b")
+	}
+	inputs = append(inputs, "\x7f", "a\x7fb", "\u0085", "\u2028", "\u2029", "é", "日本", `"`, `\`, `\u0041`, "mixed\x00\b\f\x1b[0m\x7f\u2028\"\\end")
+	for _, in := range inputs {
+		q := quoteTOMLBasicString(in)
+		var v struct {
+			V string `toml:"v"`
+		}
+		if err := toml.Unmarshal([]byte("v = "+q+"\n"), &v); err != nil {
+			t.Errorf("quoteTOMLBasicString(%q) = %q: not valid TOML: %v", in, q, err)
+			continue
+		}
+		if v.V != in {
+			t.Errorf("quoteTOMLBasicString(%q) = %q: decodes to %q", in, q, v.V)
 		}
 	}
 }
