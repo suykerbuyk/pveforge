@@ -341,3 +341,24 @@ func TestNewSchemaCmd_OutputContainsExpectedFields(t *testing.T) {
 		}
 	}
 }
+
+// TestSortedFlagValues_SameNameOrderIsDeterministic: two global flags with
+// one name and different usage (which flagIdentity keeps apart) come out in
+// the same order every time, not in map-iteration order. Repeated, since a
+// name-only sort passes by luck on any single run.
+func TestSortedFlagValues_SameNameOrderIsDeterministic(t *testing.T) {
+	m := map[string]flagSchema{}
+	for _, u := range []string{"usage b", "usage a", "usage c"} {
+		m["lock-wait\x00"+u] = flagSchema{Name: "lock-wait", Usage: u}
+	}
+	m["roster\x00r"] = flagSchema{Name: "roster", Usage: "r"}
+	for i := 0; i < 50; i++ {
+		var got []string
+		for _, f := range sortedFlagValues(m) {
+			got = append(got, f.Name+"/"+f.Usage)
+		}
+		if want := "lock-wait/usage a,lock-wait/usage b,lock-wait/usage c,roster/r"; strings.Join(got, ",") != want {
+			t.Fatalf("run %d: order %v, want %s", i, got, want)
+		}
+	}
+}

@@ -113,6 +113,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tokenOwner, "token-owner", "", "PVE principal that will own the token, as name@realm (default: --pve-user). It is not the SSH login and needs no SSH account. A non-root owner must itself hold the whole role at each granted path, or bootstrap refuses before touching anything. Changing it deliberately leaves the previous token live on PVE, held by nobody (orphaned_token), never revoked; omitting it when the roster holds another owner's token is refused")
 	cmd.Flags().StringVar(&tokenID, "token-id", "pveforge", "name of the scoped API token to create")
 	cmd.Flags().StringArrayVar(&grantSpecs, "grant", nil, "an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")
+	addLockWaitFlag(cmd)
 
 	// destructive, not mutating: a verdict about the held token makes
 	// bootstrap remove it on PVE, which revokes its secret for EVERY roster

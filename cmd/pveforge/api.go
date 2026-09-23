@@ -70,6 +70,8 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 	}
 	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
+	cmd.Flags().Lookup("lock-wait").Usage += apiLockWaitNote
 	resolveFormat := addOutputFlag(cmd)
 	cmd.Flags().StringArrayVar(&dataPairs, "data", nil, "a key=value request parameter (repeatable)")
 	cmd.Flags().BoolVar(&unsafeNoLock, "unsafe-no-lock", false, "proceed without internal/lock protection when <path> doesn't match a known pveforge-managed object type")
@@ -205,6 +207,11 @@ func parseDataParams(dataPairs []string) (url.Values, error) {
 	return params, nil
 }
 
+// apiLockWaitNote ends --lock-wait's help on the api verbs: only a path
+// that maps to a pveforge object key is locked (apiObjectKey), so on any
+// other path, or with --unsafe-no-lock, the flag has nothing to bound.
+const apiLockWaitNote = ". On a path with no pveforge object key, or with --unsafe-no-lock, no lock is taken and this flag has no effect"
+
 // apiLong is `api get`'s help body; apiMutationLong is post/put/delete's.
 const apiLong = `Raw PVE REST passthrough for a path with no dedicated pveforge command yet.
 
@@ -224,7 +231,9 @@ Tasks: when PVE answers with a task id (a UPID — a bare string starting
 only if the task ends with exit status OK. The UPID is printed to stderr as
 soon as the task is dispatched; stdout is printed only after the task
 succeeds. The wait can take up to %[1]s (lower it with --wait-timeout), and
-the object lock is held for the whole wait.
+the object lock is held for the whole wait. --lock-wait bounds only
+acquiring that lock; --wait-timeout bounds the task wait done while holding
+it.
 
 A wait that times out (--wait-timeout, or the %[1]s ceiling) reports an
 outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C ends

@@ -36,6 +36,7 @@ package lock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +44,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
 // ObjectKey identifies one lockable PVE object within one roster's scope.
@@ -71,6 +74,73 @@ func (k ObjectKey) String() string {
 // matters more here. A var, not a const, purely so this package's own
 // tests can shrink it instead of waiting on production timing.
 var pollInterval = 20 * time.Millisecond
+
+// DefaultWait is how long Mutation and Read wait to acquire a lock when the
+// caller set no bound (WithWait). It exceeds pve.TaskWaitCeiling (10m)
+// deliberately: a legitimate holder may spend that whole ceiling in a PVE
+// task wait while it holds the lock, and a waiter behind one such hold
+// should normally still get its turn. cmd/pveforge pins the relation.
+const DefaultWait = 15 * time.Minute
+
+// MaxWait is the longest bound WithWait's callers may ask for
+// (cmd/pveforge's --lock-wait is validated against it).
+const MaxWait = time.Hour
+
+// defaultWait is DefaultWait, as a var purely so this package's own tests
+// can shrink it, like pollInterval.
+var defaultWait = DefaultWait
+
+// ErrLockWaitTimeout: the lock-wait bound (WithWait, else DefaultWait) ran
+// out before the lock could be acquired. Nothing was done under the lock.
+// A caller's own deadline or cancellation is NOT this error: it surfaces as
+// the context's own error, as it always has.
+var ErrLockWaitTimeout = errors.New("timed out waiting for the lock")
+
+// errWaitBound is the cause the lock-wait bound's own timer cancels with,
+// which is how a bound that ran out is told apart from the caller's ctx.
+var errWaitBound = errors.New("lock-wait bound reached")
+
+type waitKey struct{}
+
+// WithWait returns ctx carrying d as the bound on acquiring a lock: every
+// Mutation and Read called with the result waits at most d, in total, to
+// acquire (both of Mutation's phases share one deadline). d <= 0 means
+// DefaultWait. Only the acquisition is bounded: the ctx the caller goes on
+// to use while holding the lock gets no deadline from this.
+func WithWait(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, waitKey{}, d)
+}
+
+// waitBound is ctx's lock-wait bound: WithWait's, else defaultWait.
+func waitBound(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(waitKey{}).(time.Duration); ok && d > 0 {
+		return d
+	}
+	return defaultWait
+}
+
+// What a waiter blocked in each phase is waiting behind, for
+// ErrLockWaitTimeout's text. A service-queue wait means a mutation is
+// queued for, or holds, the object (it holds the turnstile while it waits
+// for the resource); a resource wait means the object is held.
+const (
+	queuedText = "another mutation is queued for or holds this object"
+	heldText   = "it is held by another command"
+)
+
+// acquireErr reports a failed acquisition of l within wctx (derived from
+// ctx by the lock-wait bound). The bound running out while ctx itself is
+// still live is ErrLockWaitTimeout, named with the key, the bound, what was
+// waited behind and the lock file (pveforge records no holder; fuser lists
+// the processes with the file open; the path is shell-quoted so the
+// command can be pasted as is). Anything else keeps its own error.
+func acquireErr(ctx, wctx context.Context, key ObjectKey, bound time.Duration, l *flock.Flock, behind, step string, err error) error {
+	if ctx.Err() == nil && errors.Is(context.Cause(wctx), errWaitBound) {
+		return fmt.Errorf("lock %s: %w after %s (the lock-wait bound, --lock-wait): %s; pveforge records no holder: fuser -v %s lists the processes with it open, holders and waiters alike",
+			key, ErrLockWaitTimeout, bound, behind, sshexec.ShellQuote(l.Path()))
+	}
+	return fmt.Errorf("lock %s: %s: %w", key, step, err)
+}
 
 // keyFiles are the two lock files backing one ObjectKey.
 type keyFiles struct {
@@ -113,10 +183,11 @@ func sanitizePart(s string) string {
 }
 
 // Mutation acquires an exclusive lock for key, scoped to rosterPath,
-// blocking (subject to ctx) until acquired. Must be held for the caller's
-// ENTIRE read-compare-mutate cycle, not just the final write — releasing
-// it early would let a concurrent reader observe state this mutation is
-// still in the middle of changing. Every Read for the same key yields to
+// blocking until acquired, for at most ctx's lock-wait bound (WithWait,
+// else DefaultWait: then ErrLockWaitTimeout) and never past ctx itself.
+// Must be held for the caller's ENTIRE read-compare-mutate cycle, not
+// just the final write — releasing it early would let a concurrent reader
+// observe state this mutation is still in the middle of changing. Every Read for the same key yields to
 // this the instant it starts waiting: a Read that arrives after this call
 // begins is never granted the resource lock ahead of it, no matter how
 // long this call has to wait for already-in-progress reads to finish.
@@ -130,12 +201,18 @@ func Mutation(ctx context.Context, rosterPath string, key ObjectKey) (unlock fun
 		return nil, err
 	}
 
-	if err := acquire(ctx, kf.serviceQueue, false); err != nil {
-		return nil, fmt.Errorf("lock %s: acquire service queue: %w", key, err)
+	// One deadline for the whole acquisition, both phases: a bound per
+	// phase would let a waiter take up to twice what it asked for.
+	bound := waitBound(ctx)
+	wctx, cancel := context.WithTimeoutCause(ctx, bound, errWaitBound)
+	defer cancel()
+
+	if err := acquire(wctx, kf.serviceQueue, false); err != nil {
+		return nil, acquireErr(ctx, wctx, key, bound, kf.serviceQueue, queuedText, "acquire service queue", err)
 	}
-	if err := acquire(ctx, kf.resource, false); err != nil {
+	if err := acquire(wctx, kf.resource, false); err != nil {
 		_ = kf.serviceQueue.Unlock()
-		return nil, fmt.Errorf("lock %s: acquire resource: %w", key, err)
+		return nil, acquireErr(ctx, wctx, key, bound, kf.resource, heldText, "acquire resource", err)
 	}
 	if err := kf.serviceQueue.Unlock(); err != nil {
 		_ = kf.resource.Unlock()
@@ -147,8 +224,9 @@ func Mutation(ctx context.Context, rosterPath string, key ObjectKey) (unlock fun
 	}, nil
 }
 
-// Read acquires a shared lock for key that yields to any Mutation
-// currently waiting or held for the same key — used by read-only
+// Read acquires a shared lock for key (waiting at most ctx's lock-wait
+// bound, as Mutation does) that yields to any Mutation currently waiting
+// or held for the same key — used by read-only
 // commands that want a consistent view of an object without starving out
 // a mutation queued behind them. Multiple Read calls for the same key may
 // hold their locks concurrently; a Mutation call for that key blocks
@@ -160,18 +238,22 @@ func Read(ctx context.Context, rosterPath string, key ObjectKey) (unlock func() 
 		return nil, err
 	}
 
+	bound := waitBound(ctx)
+	wctx, cancel := context.WithTimeoutCause(ctx, bound, errWaitBound)
+	defer cancel()
+
 	// The turnstile: block only long enough to prove no writer is
 	// currently waiting-for-or-holding the resource lock ahead of us,
 	// then release immediately — never held for the read itself.
-	if err := acquire(ctx, kf.serviceQueue, false); err != nil {
-		return nil, fmt.Errorf("lock %s: acquire service queue: %w", key, err)
+	if err := acquire(wctx, kf.serviceQueue, false); err != nil {
+		return nil, acquireErr(ctx, wctx, key, bound, kf.serviceQueue, queuedText, "acquire service queue", err)
 	}
 	if err := kf.serviceQueue.Unlock(); err != nil {
 		return nil, fmt.Errorf("lock %s: release service queue: %w", key, err)
 	}
 
-	if err := acquire(ctx, kf.resource, true); err != nil {
-		return nil, fmt.Errorf("lock %s: acquire resource (shared): %w", key, err)
+	if err := acquire(wctx, kf.resource, true); err != nil {
+		return nil, acquireErr(ctx, wctx, key, bound, kf.resource, heldText, "acquire resource (shared)", err)
 	}
 	return func() error {
 		return kf.resource.Unlock()
@@ -188,7 +270,9 @@ func ensureLockDir(rosterPath string, key ObjectKey) (keyFiles, error) {
 
 // acquire blocks (subject to ctx) until l is locked — exclusively, or
 // (shared=true) in shared mode — retrying every pollInterval, mirroring
-// internal/roster/writeback.go's own TryLockContext idiom.
+// internal/roster/writeback.go's own TryLockContext idiom. When ctx ends,
+// flock returns ctx's own error (gofrs/flock tryCtx), so a wait that runs
+// out is always an error here, never a quiet "not locked".
 func acquire(ctx context.Context, l *flock.Flock, shared bool) error {
 	var locked bool
 	var err error
@@ -201,7 +285,10 @@ func acquire(ctx context.Context, l *flock.Flock, shared bool) error {
 		return err
 	}
 	if !locked {
-		return fmt.Errorf("timed out waiting for lock %s", l.Path())
+		// Not a timeout path: flock never reports "not locked" without an
+		// error. Kept so a future flock that did would fail closed rather
+		// than be taken for an acquired lock.
+		return fmt.Errorf("flock reported neither a lock nor an error for %s", l.Path())
 	}
 	return nil
 }

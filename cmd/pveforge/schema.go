@@ -230,6 +230,14 @@ func sortedFlagValues(m map[string]flagSchema) []flagSchema {
 	for _, f := range m {
 		flags = append(flags, f)
 	}
-	sort.Slice(flags, func(i, j int) bool { return flags[i].Name < flags[j].Name })
+	// Name, then usage: two global flags may share a name with different
+	// usage (flagIdentity keeps them apart, e.g. --lock-wait on the api
+	// verbs), and a name-only sort would leave their order to map iteration.
+	sort.Slice(flags, func(i, j int) bool {
+		if flags[i].Name != flags[j].Name {
+			return flags[i].Name < flags[j].Name
+		}
+		return flags[i].Usage < flags[j].Usage
+	})
 	return flags
 }
