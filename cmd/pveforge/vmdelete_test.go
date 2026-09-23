@@ -29,6 +29,14 @@ type deleteFakePVE struct {
 	requests int
 	writes   []string // each PUT's form, re-encoded with sorted keys
 	failGet  int      // 1-based GET to answer 500 (0: none)
+
+	// pendingStatus and pendingBody answer GET .../pending (post-apply-verify):
+	// a status other than 200 is sent with pendingBody as its raw body; a 200
+	// wraps pendingBody (default: an empty list) in PVE's data envelope.
+	// pendingReads counts those reads, which are not config GETs.
+	pendingStatus int
+	pendingBody   string
+	pendingReads  int
 }
 
 func newDeleteFakePVE(t *testing.T, config map[string]string) (*deleteFakePVE, *httptest.Server) {
@@ -42,6 +50,21 @@ func newDeleteFakePVE(t *testing.T, config map[string]string) (*deleteFakePVE, *
 func (f *deleteFakePVE) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/qa-pve-01/qemu/100/pending" {
+		f.pendingReads++
+		if f.pendingStatus != 0 && f.pendingStatus != http.StatusOK {
+			w.WriteHeader(f.pendingStatus)
+			_, _ = w.Write([]byte(f.pendingBody))
+			return
+		}
+		body := f.pendingBody
+		if body == "" {
+			body = "[]"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":` + body + `}`))
+		return
+	}
 	f.requests++
 	if r.URL.Path != "/api2/json/nodes/qa-pve-01/qemu/100/config" {
 		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)

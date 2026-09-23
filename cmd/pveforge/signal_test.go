@@ -135,6 +135,9 @@ func TestInterrupt_WhileHoldingTheLock(t *testing.T) {
 	writeArrived := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":{"digest":"d1","cores":"2"}}`))
@@ -216,9 +219,11 @@ func TestInterrupt_DuringAPITaskWait(t *testing.T) {
 }
 
 // TestInterrupt_AfterTheWriteSucceeded (B7): a signal that lands after vm
-// set's write succeeded ends only the re-read. The outcome was observed, so
-// the exit is 0: the applied line on stdout, post-apply-err's re-read
-// warning on stderr, and no "interrupted" line.
+// set's write succeeded ends only the reads after it. The outcome was
+// observed, so the exit is 0: the applied line on stdout; on stderr
+// post-apply-err's re-read warning, then (T15, post-apply-verify) the
+// pending check's warning, since the cancelled context ends that read too;
+// and no "interrupted" line.
 func TestInterrupt_AfterTheWriteSucceeded(t *testing.T) {
 	var mu sync.Mutex
 	config := map[string]string{"digest": "d1", "cores": "2"}
@@ -226,6 +231,9 @@ func TestInterrupt_AfterTheWriteSucceeded(t *testing.T) {
 	reread := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet {
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("ParseForm: %v", err)
@@ -276,8 +284,12 @@ func TestInterrupt_AfterTheWriteSucceeded(t *testing.T) {
 	if stdout != "qa-pve-01: cores=4\n" {
 		t.Errorf("stdout %q, want the applied line", stdout)
 	}
-	if strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, "the write was applied but its result could not be re-read") {
-		t.Errorf("stderr %q, want exactly the re-read warning", stderr)
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if len(lines) != 2 ||
+		!strings.HasPrefix(lines[0], "warning: qa-pve-01: vm 100: the write was applied but its result could not be re-read: ") ||
+		!strings.HasPrefix(lines[1], "warning: qa-pve-01: vm 100: the change was applied but whether it is pending could not be checked: ") ||
+		!strings.Contains(lines[1], "SIGINT") {
+		t.Errorf("stderr %q, want exactly the re-read warning, then the pending check's, which names the signal", stderr)
 	}
 	if strings.Contains(stderr, "interrupted (") {
 		t.Errorf("a completed command must not be reported as interrupted: %q", stderr)

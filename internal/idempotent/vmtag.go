@@ -89,6 +89,9 @@ type Client interface {
 // duplicate-tag sense of "did someone else already add this tag between
 // our read and our write"; that's exactly what the CAS guard plus Run's
 // ErrConflict retry handles.
+//
+// Not a PostApplier yet: it has no CLI caller, and a tag write has no
+// pending state to check (Read already compares the tag set itself).
 type VMTagEnsure struct {
 	Client Client
 	VMID   int

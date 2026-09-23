@@ -249,6 +249,9 @@ func TestVMSet_RootOnlyField_Success_ThroughRunRoot(t *testing.T) {
 	config := map[string]string{"digest": "d1", "cores": "2"}
 	var hits []string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		hits = append(hits, r.Method+" "+r.URL.Path)

@@ -257,11 +257,17 @@ func TestVMFieldsEnsure_Run_MidBatchConflictKeepsEarlierWrites(t *testing.T) {
 			json.RawMessage(`{"digest":"d4","a":"1","b":"2"}`), // Run's re-read
 		},
 		setFieldErrs: []error{nil, errors.New("update rejected: digest mismatch"), nil},
+		// RPV2: a was written on the superseded attempt, b on the last; c
+		// is pending from someone else.
+		pendingResults: []json.RawMessage{json.RawMessage(`[{"key":"a","pending":"1"},{"key":"b","pending":"2"},{"key":"c","pending":"3"}]`)},
 	}
 	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("a", "1", "b", "2")}
 	res, err := Run(context.Background(), testRosterPath(t), testKey(), op, false)
-	if err != nil || !res.Changed {
+	if err != nil || !res.Changed || res.PostApplyErr != nil {
 		t.Fatalf("Run = %+v, %v", res, err)
+	}
+	if want := []string{"a", "b"}; !slices.Equal(op.Pending, want) {
+		t.Errorf("Pending = %v, want %v: a, written on the superseded attempt, is this Run's too; c is not", op.Pending, want)
 	}
 	if client.setFieldCalls != 3 {
 		t.Fatalf("CAS writes = %d, want 3 (a, b conflicting, b again)", client.setFieldCalls)
@@ -283,11 +289,17 @@ func TestVMFieldsEnsure_Run_MidBatchConflictKeepsEarlierDeletes(t *testing.T) {
 			json.RawMessage(`{"digest":"d4"}`),                 // Run's re-read
 		},
 		deleteCASErrs: []error{nil, errors.New("update rejected: digest mismatch"), nil},
+		// RPV2: a was removed on the superseded attempt, b on the last; c's
+		// removal is pending from someone else.
+		pendingResults: []json.RawMessage{json.RawMessage(`[{"key":"a","value":"x","delete":1},{"key":"b","value":"y","delete":1},{"key":"c","value":"z","delete":1}]`)},
 	}
 	op := &VMFieldsEnsure{Client: client, VMID: 100, Deletes: []string{"a", "b"}}
 	res, err := Run(context.Background(), testRosterPath(t), testKey(), op, false)
-	if err != nil || !res.Changed {
+	if err != nil || !res.Changed || res.PostApplyErr != nil {
 		t.Fatalf("Run = %+v, %v", res, err)
+	}
+	if want := []string{"a", "b"}; !slices.Equal(op.PendingDeletes, want) {
+		t.Errorf("PendingDeletes = %v, want %v: a, removed on the superseded attempt, is this Run's too; c is not", op.PendingDeletes, want)
 	}
 	if len(client.deletes) != 3 {
 		t.Fatalf("deletes = %+v, want 3 (a, b conflicting, b again)", client.deletes)

@@ -499,6 +499,11 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_NoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	// RPV1: PostApply runs on every changed Run; the fake answers
+	// /pending with "nothing pending", so its check must come back clean.
+	if res.PostApplyErr != nil {
+		t.Errorf("PostApplyErr = %v, want nil", res.PostApplyErr)
+	}
 	if res.Changed {
 		t.Error("expected a no-op: cores is already 4")
 	}
@@ -525,6 +530,11 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_MultiField(t *testing.T) {
 	res, err := Run(context.Background(), testRosterPath(t), key, op, false)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	// RPV1: PostApply runs on every changed Run; the fake answers
+	// /pending with "nothing pending", so its check must come back clean.
+	if res.PostApplyErr != nil {
+		t.Errorf("PostApplyErr = %v, want nil", res.PostApplyErr)
 	}
 	if !res.Changed {
 		t.Error("expected Changed=true")
@@ -565,6 +575,11 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_ConflictThenSuccess_ResumesNotRedoes(t *
 	res, err := Run(context.Background(), testRosterPath(t), key, op, false)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	// RPV1: PostApply runs on every changed Run; the fake answers
+	// /pending with "nothing pending", so its check must come back clean.
+	if res.PostApplyErr != nil {
+		t.Errorf("PostApplyErr = %v, want nil", res.PostApplyErr)
 	}
 	if !res.Changed {
 		t.Error("expected Changed=true")
@@ -629,6 +644,11 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_BooleanFieldAlreadyCorrectIsNoOp(t *test
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	// RPV1: PostApply runs on every changed Run; the fake answers
+	// /pending with "nothing pending", so its check must come back clean.
+	if res.PostApplyErr != nil {
+		t.Errorf("PostApplyErr = %v, want nil", res.PostApplyErr)
+	}
 	if res.Changed {
 		t.Error("expected Changed=false: protection is already true, matching caller-supplied \"1\"")
 	}
@@ -663,6 +683,11 @@ func TestVMFieldsEnsure_ViaRun_EndToEnd_ApplySkipsAlreadyCorrectBooleanFieldInMi
 	res, err := Run(context.Background(), testRosterPath(t), key, op, false)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	// RPV1: PostApply runs on every changed Run; the fake answers
+	// /pending with "nothing pending", so its check must come back clean.
+	if res.PostApplyErr != nil {
+		t.Errorf("PostApplyErr = %v, want nil", res.PostApplyErr)
 	}
 	if !res.Changed {
 		t.Error("expected Changed=true: cores genuinely needs a write")

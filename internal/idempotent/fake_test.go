@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
@@ -61,6 +62,16 @@ type fakeClient struct {
 	rawRequestCalls   int
 	lastRawMethod     string
 	lastRawPath       string
+	// rawCalls records every RawRequest in order: "METHOD path?query".
+	rawCalls []string
+
+	// pendingResults answers VMFieldsEnsure.PostApply's GET .../pending,
+	// indexed by call like rawRequestResults, and apart from it: a pending
+	// read neither consumes a config answer nor counts in rawRequestCalls.
+	// Unscripted, it is "[]" — nothing pending — so a test that scripts only
+	// config answers never hands PostApply a config object to reject.
+	pendingResults []json.RawMessage
+	pendingCalls   int
 }
 
 func (f *fakeClient) Node() string { return f.node }
@@ -154,9 +165,21 @@ func (f *fakeClient) DeleteVMConfigField(_ context.Context, vmid int, field stri
 	return nil
 }
 
-func (f *fakeClient) RawRequest(_ context.Context, method, path string, _ url.Values) (json.RawMessage, error) {
+func (f *fakeClient) RawRequest(_ context.Context, method, path string, params url.Values) (json.RawMessage, error) {
 	f.lastRawMethod = method
 	f.lastRawPath = path
+	f.rawCalls = append(f.rawCalls, method+" "+path+"?"+params.Encode())
+	if strings.HasSuffix(path, "/pending") {
+		idx := f.pendingCalls
+		f.pendingCalls++
+		if f.rawRequestErr != nil {
+			return nil, f.rawRequestErr
+		}
+		if len(f.pendingResults) == 0 {
+			return json.RawMessage(`[]`), nil
+		}
+		return f.pendingResults[min(idx, len(f.pendingResults)-1)], nil
+	}
 	idx := f.rawRequestCalls
 	f.rawRequestCalls++
 	if f.rawRequestErr != nil {

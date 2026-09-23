@@ -77,6 +77,10 @@ type BridgeIsolationClient interface {
 // post-start) and the live, ephemeral tap-device isolation flag (recreated
 // fresh on every boot, and only actionable while the VM is currently
 // running — see Read/Satisfied's own handling of the not-running case).
+//
+// Not a PostApplier yet: it has no CLI caller. Apply writes the hookscript
+// and sets the live tap isolation flag but re-checks neither afterwards — a
+// candidate for PostApply once a command uses it.
 type BridgeIsolationEnsure struct {
 	Client BridgeIsolationClient
 	VMID   int

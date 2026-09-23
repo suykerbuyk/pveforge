@@ -209,6 +209,10 @@ func ifaceEntryNamesTarget(entry, iface string) bool {
 // step that this code controls. This is a load-bearing regression guard,
 // not a nicety: do not "simplify" Apply by routing it through either of
 // those two go-proxmox methods, ever, for any reason.
+//
+// Not a PostApplier: Apply verifies its own effect inside the
+// stage/guard/commit sequence (staged-stanza hashes and kernel link state),
+// before and after the commit.
 type NetworkBridgeEnsure struct {
 	Client NetworkBridgeClient
 	Node   string

@@ -53,6 +53,26 @@ type Op interface {
 	Apply(ctx context.Context) error
 }
 
+// PostApplier is implemented by an Op that can check its own effect after
+// a successful Apply — something only the Op can judge. A generic check
+// (re-evaluating Satisfied on the re-read) cannot: VMCreate and VMClone read
+// any error as "absent", so an unreadable re-read would turn a create that
+// succeeded into a failure; PVE canonicalises some written values (net0
+// gains a MAC, disk specs are rewritten), so an exact-string Satisfied is
+// false right after a correct write; and the network Ops already verify
+// inside Apply. Each Op that does not implement it says why on its type.
+//
+// Run calls PostApply at most once per Run: after an Apply that succeeded,
+// after the final re-read, still under the object's lock — never on a
+// no-op, never after a failed Apply, never on an attempt a conflict retry
+// superseded. Its error is advisory, like a failed re-read: the mutation
+// already happened, so it is reported in Result.PostApplyErr and never
+// fails the Run. What the check found is recorded on the Op itself, the
+// way VMFieldsEnsure records Applied, so Result stays field-agnostic.
+type PostApplier interface {
+	PostApply(ctx context.Context) error
+}
+
 // ErrConflict, when an Op's Apply returns an error wrapping this (via
 // %w), tells Run the failure was a detected concurrent-modification
 // conflict rather than a terminal one — Run responds by re-running the
@@ -90,6 +110,11 @@ type Result struct {
 	// Run — the mutation already happened — so a caller that reports
 	// current state decides for itself how to say it was not re-read.
 	AfterErr error
+	// PostApplyErr is non-nil only when the Op is a PostApplier, Apply
+	// succeeded, and PostApply then failed: it wraps that check's cause.
+	// Like AfterErr it never fails the Run — the mutation already
+	// happened — and the caller decides how to report it.
+	PostApplyErr error
 }
 
 // Run acquires key's mutation lock (scoped to rosterPath, via
@@ -100,7 +125,8 @@ type Result struct {
 // read does not undo or fail an otherwise-successful Apply — Result.After
 // falls back to reporting the same value as Result.Before, since the
 // mutation itself already succeeded, and Result.AfterErr carries the
-// read's cause).
+// read's cause). If op is a PostApplier, its PostApply then runs once,
+// still under the lock; its failure is Result.PostApplyErr, advisory.
 //
 // If Apply fails with an error wrapping ErrConflict, Run re-runs the
 // entire cycle from Read, up to maxConflictRetries times, before giving
@@ -141,6 +167,13 @@ func Run(ctx context.Context, rosterPath string, key lock.ObjectKey, op Op, forc
 			result.After = after
 		} else {
 			result.AfterErr = fmt.Errorf("idempotent: %s: re-read: %w", key, readErr)
+		}
+		// Still under the lock (released by the deferred unlock), and only
+		// here, on the one attempt whose Apply succeeded.
+		if pa, ok := op.(PostApplier); ok {
+			if err := pa.PostApply(ctx); err != nil {
+				result.PostApplyErr = fmt.Errorf("idempotent: %s: post-apply check: %w", key, err)
+			}
 		}
 		return result, nil
 	}
