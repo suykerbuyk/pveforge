@@ -19,7 +19,7 @@ func resolveRoutedClient(cmd *cobra.Command, targetID string) (*pve.RoutedClient
 	if err != nil {
 		return nil, err
 	}
-	passphrase, err := roster.ResolvePassphrase()
+	passphrase, err := roster.ResolvePassphraseContext(cmd.Context())
 	if err != nil {
 		return nil, err
 	}

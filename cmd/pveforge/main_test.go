@@ -243,10 +243,10 @@ var stderrSites = map[string]int{
 	"bootstrap.go: renderBootstrapResult: fmt.Fprintf(errOut, \"warning: token %s is still live on PVE with its grants but is no longer held by this roster\\n\", q(res.OrphanedToken))":                                                                                                           1,
 	"bootstrap.go: renderBootstrapResult: fmt.Fprintf(errOut, \"warning: token %s was persisted but its grants could not be verified\\n\", id)":                                                                                                                                                    1,
 	"bootstrap.go: resolvePVEPassword: fmt.Fprint(os.Stderr, \"PVE password: \")":                                                                                                                                                                                                                  1,
-	"bootstrap.go: resolvePVEPassword: fmt.Fprintln(os.Stderr)":              1,
-	"main.go: main: runRoot(newRootCmd(), os.Stderr)":                        1,
-	"main.go: runRoot: fmt.Fprintln(stderr, kvjson.QuoteValue(err.Error()))": 1,
-	"main.go: runRoot: root.SetErr(stderr)":                                  1,
+	"bootstrap.go: resolvePVEPassword: fmt.Fprintln(os.Stderr)":      1,
+	"main.go: realMain: runRoot(root, os.Stderr)":                    1,
+	"main.go: runRoot: fmt.Fprintln(stderr, kvjson.QuoteValue(msg))": 1,
+	"main.go: runRoot: root.SetErr(stderr)":                          1,
 	"vm.go: newVMSetCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"warning: %s: vm %d: the write was applied but its result could not be re-read: %s\\n\", args[0], vmid, kvjson.QuoteValue(res.AfterErr.Error()))": 1,
 }
 

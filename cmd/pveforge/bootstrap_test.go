@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -13,7 +14,7 @@ import (
 
 func TestResolvePVEPassword_FromEnv(t *testing.T) {
 	t.Setenv(pvePasswordEnvVar, "env-password")
-	got, err := resolvePVEPassword()
+	got, err := resolvePVEPassword(context.Background())
 	if err != nil {
 		t.Fatalf("resolvePVEPassword: %v", err)
 	}
@@ -27,7 +28,7 @@ func TestResolvePVEPassword_NoEnvNonInteractive(t *testing.T) {
 	// os.Stdin in `go test` is not a terminal, so this should hit the
 	// "no PVE password available" error path rather than blocking on a
 	// prompt.
-	_, err := resolvePVEPassword()
+	_, err := resolvePVEPassword(context.Background())
 	if err == nil {
 		t.Fatal("expected an error when no env var is set and stdin is not a terminal")
 	}

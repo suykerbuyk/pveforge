@@ -96,6 +96,22 @@ var defaultWait = DefaultWait
 // the context's own error, as it always has.
 var ErrLockWaitTimeout = errors.New("timed out waiting for the lock")
 
+// ErrLockWaitInterrupted: a signal ended the caller's context while it was
+// waiting for the lock, so the operation did not start under it. It is
+// reported ONLY when the context's cancel cause identifies a signal — a
+// cause with a `Signal() os.Signal` method, which is the whole contract
+// (this package defines no signal type; cmd/pveforge's signal handler
+// cancels with one). Every other end of the caller's context — its own
+// deadline, a plain cancel, a cause that is not a signal — keeps surfacing
+// as the context's own error, exactly as before. The error wraps the
+// context's error too, so errors.Is(err, context.Canceled) still holds,
+// and the cause itself.
+var ErrLockWaitInterrupted = errors.New("interrupted while waiting for the lock")
+
+// signalCause is what a context cancel cause must implement to count as a
+// signal for ErrLockWaitInterrupted.
+type signalCause interface{ Signal() os.Signal }
+
 // errWaitBound is the cause the lock-wait bound's own timer cancels with,
 // which is how a bound that ran out is told apart from the caller's ctx.
 var errWaitBound = errors.New("lock-wait bound reached")
@@ -133,11 +149,18 @@ const (
 // still live is ErrLockWaitTimeout, named with the key, the bound, what was
 // waited behind and the lock file (pveforge records no holder; fuser lists
 // the processes with the file open; the path is shell-quoted so the
-// command can be pasted as is). Anything else keeps its own error.
+// command can be pasted as is). ctx ended by a signal is
+// ErrLockWaitInterrupted. Anything else keeps its own error.
 func acquireErr(ctx, wctx context.Context, key ObjectKey, bound time.Duration, l *flock.Flock, behind, step string, err error) error {
 	if ctx.Err() == nil && errors.Is(context.Cause(wctx), errWaitBound) {
 		return fmt.Errorf("lock %s: %w after %s (the lock-wait bound, --lock-wait): %s; pveforge records no holder: fuser -v %s lists the processes with it open, holders and waiters alike",
 			key, ErrLockWaitTimeout, bound, behind, sshexec.ShellQuote(l.Path()))
+	}
+	if ctx.Err() != nil {
+		var sig signalCause
+		if cause := context.Cause(ctx); errors.As(cause, &sig) {
+			return fmt.Errorf("lock %s: %w (%w); the operation did not start under it: %w", key, ErrLockWaitInterrupted, cause, ctx.Err())
+		}
 	}
 	return fmt.Errorf("lock %s: %s: %w", key, step, err)
 }

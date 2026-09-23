@@ -29,6 +29,15 @@ import (
 // longhand rather than deferred ON PURPOSE: os.Exit does not run deferred
 // functions, so a `defer restore()` here would silently never fire.
 func TestMain(m *testing.M) {
+	// A re-executed child of the signal tests is pveforge itself, not a
+	// test run: it gets the same trip-wires, then runs the CLI and exits
+	// with its status (see signal_subprocess_test.go).
+	if spec := os.Getenv(cliChildEnv); spec != "" {
+		netguard.Install()
+		sshexec.SetDialGuardForTests(netguard.Guard)
+		os.Exit(runCLIChild(spec))
+	}
+
 	restoreDial := netguard.Install()
 	restoreSSHGuard := sshexec.SetDialGuardForTests(netguard.Guard)
 

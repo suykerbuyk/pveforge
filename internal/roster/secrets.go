@@ -2,6 +2,8 @@ package roster
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -198,8 +200,16 @@ func DecryptString(armored string, passphrase string) ([]byte, error) {
 // ResolvePassphrase reads the roster's master passphrase from
 // PVEFORGE_ROSTER_PASSPHRASE, falling back to an interactive terminal
 // prompt. It errors rather than hanging when neither is available, so
-// pveforge stays safe to invoke from scripts, cron, and CI.
+// pveforge stays safe to invoke from scripts, cron, and CI. A command uses
+// ResolvePassphraseContext instead, so a signal ends its prompt.
 func ResolvePassphrase() (string, error) {
+	return ResolvePassphraseContext(context.Background())
+}
+
+// ResolvePassphraseContext is ResolvePassphrase whose prompt ends when ctx
+// does (ReadSecret): a signal at the prompt restores the terminal and
+// returns ErrPromptInterrupted instead of leaving the read blocked.
+func ResolvePassphraseContext(ctx context.Context) (string, error) {
 	if v, ok := os.LookupEnv(PassphraseEnvVar); ok && v != "" {
 		return v, nil
 	}
@@ -208,15 +218,60 @@ func ResolvePassphrase() (string, error) {
 		return "", fmt.Errorf("no roster passphrase available: set %s or run interactively", PassphraseEnvVar)
 	}
 	fmt.Fprint(os.Stderr, "Roster passphrase: ")
-	b, err := term.ReadPassword(fd)
+	b, err := ReadSecret(ctx, fd, "roster passphrase")
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
+		if errors.Is(err, ErrPromptInterrupted) {
+			return "", err
+		}
 		return "", fmt.Errorf("read passphrase: %w", err)
 	}
 	if len(b) == 0 {
 		return "", fmt.Errorf("empty passphrase")
 	}
 	return string(b), nil
+}
+
+// ErrPromptInterrupted: the context ended while a secret prompt was waiting
+// for input (ReadSecret). Its text names only where that happened.
+var ErrPromptInterrupted = errors.New("interrupted")
+
+// Seams over golang.org/x/term, so this package's tests can drive
+// ReadSecret without a terminal.
+var (
+	readPassword  = term.ReadPassword
+	getTermState  = term.GetState
+	restoreTermFn = term.Restore
+)
+
+// ReadSecret reads a secret from the terminal fd without echo, as
+// term.ReadPassword does, but returns when ctx ends: it restores the
+// terminal to the state it had before the prompt (the read had turned echo
+// off) and returns ErrPromptInterrupted, naming what (e.g. "roster
+// passphrase") and the context's cause. The abandoned read stays blocked on
+// the terminal; the process is on its way out.
+func ReadSecret(ctx context.Context, fd int, what string) ([]byte, error) {
+	state, err := getTermState(fd)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: save terminal state: %w", what, err)
+	}
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	read := readPassword // captured: the read may outlive this call
+	go func() {
+		b, err := read(fd)
+		done <- result{b, err}
+	}()
+	select {
+	case r := <-done:
+		return r.b, r.err
+	case <-ctx.Done():
+		_ = restoreTermFn(fd, state)
+		return nil, fmt.Errorf("%w (%v) at the %s prompt", ErrPromptInterrupted, context.Cause(ctx), what)
+	}
 }
 
 // ResolvedTarget is a short-lived, in-memory view of a Target with its
