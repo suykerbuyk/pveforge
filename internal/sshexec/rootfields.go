@@ -63,6 +63,27 @@ func (c *Client) SetVMConfigField(ctx context.Context, vmid int, field, value st
 	return nil
 }
 
+// DeleteVMConfigField removes a single root-only field from vmid's config
+// via `qm set <vmid> --delete <field>`: PVE's own delete parameter, the
+// counterpart of SetVMConfigField, never a write of an empty value. field
+// passes the same name check, and is shell-quoted as the parameter's value.
+// Whether qm reports an error for a key that is already absent is NOT
+// verified against a live host; callers skip an absent key instead.
+func (c *Client) DeleteVMConfigField(ctx context.Context, vmid int, field string) error {
+	if !isValidFieldName(field) {
+		return fmt.Errorf("delete vm config field: invalid field name %q", field)
+	}
+	cmd := fmt.Sprintf("qm set %s --delete %s", ShellQuote(strconv.Itoa(vmid)), ShellQuote(field))
+	res, err := c.Run(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("delete vm %d field %q: %w", vmid, field, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("delete vm %d field %q: qm set exited %d: %s", vmid, field, res.ExitCode, res.Stderr)
+	}
+	return nil
+}
+
 // isValidFieldName restricts field names to a safe identifier shape before
 // they're interpolated (unquoted, as a `--flag` name) into a shell command
 // line — defense in depth on top of RootOnlyFields being a fixed,

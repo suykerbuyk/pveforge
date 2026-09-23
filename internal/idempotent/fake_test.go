@@ -41,6 +41,16 @@ type fakeClient struct {
 	lastPlainField     string
 	lastPlainValue     string
 
+	// deletes records every delete in order: CAS ones with their digest,
+	// plain (SSH-routed) ones with cas=false.
+	deletes []deleteCall
+	// sshSets records every SetVMConfigFieldOverSSH, in order.
+	sshSets       []casCall
+	deleteCASErrs []error
+	deleteCASN    int
+	deleteErrs    []error
+	deleteN       int
+
 	// rawRequestResults is indexed by call number the same way as
 	// getVMResults — VMFieldsEnsure.readConfig calls RawRequest once per
 	// Read and once more per REST-CAS field write in Apply (a fresh
@@ -100,6 +110,46 @@ func (f *fakeClient) SetVMConfigField(_ context.Context, vmid int, field, value 
 	f.setFieldPlainCalls++
 	if idx < len(f.setFieldPlainErrs) {
 		return f.setFieldPlainErrs[idx]
+	}
+	return nil
+}
+
+type deleteCall struct {
+	field, digest string
+	cas           bool
+	overSSH       bool // DeleteVMConfigFieldOverSSH: SSH only, never REST
+}
+
+func (f *fakeClient) SetVMConfigFieldOverSSH(_ context.Context, vmid int, field, value string) error {
+	f.lastVMID = vmid
+	f.sshSets = append(f.sshSets, casCall{field: field, value: value})
+	return nil
+}
+
+func (f *fakeClient) DeleteVMConfigFieldOverSSH(_ context.Context, vmid int, field string) error {
+	f.lastVMID = vmid
+	f.deletes = append(f.deletes, deleteCall{field: field, overSSH: true})
+	return nil
+}
+
+func (f *fakeClient) DeleteVMConfigFieldCAS(_ context.Context, vmid int, field, expectDigest string) error {
+	f.lastVMID = vmid
+	f.deletes = append(f.deletes, deleteCall{field: field, digest: expectDigest, cas: true})
+	idx := f.deleteCASN
+	f.deleteCASN++
+	if idx < len(f.deleteCASErrs) {
+		return f.deleteCASErrs[idx]
+	}
+	return nil
+}
+
+func (f *fakeClient) DeleteVMConfigField(_ context.Context, vmid int, field string) error {
+	f.lastVMID = vmid
+	f.deletes = append(f.deletes, deleteCall{field: field})
+	idx := f.deleteN
+	f.deleteN++
+	if idx < len(f.deleteErrs) {
+		return f.deleteErrs[idx]
 	}
 	return nil
 }

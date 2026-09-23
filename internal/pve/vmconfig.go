@@ -85,7 +85,50 @@ func (c *Client) SetVMConfigFieldCAS(ctx context.Context, node string, vmid int,
 	if expectDigest != "" {
 		form.Set("digest", expectDigest)
 	}
+	return c.putVMConfig(ctx, node, vmid, form, fmt.Sprintf("set vm %d field %q", vmid, field))
+}
 
+// DeleteVMConfigField is DeleteVMConfigFieldCAS with no digest guard.
+func (c *Client) DeleteVMConfigField(ctx context.Context, node string, vmid int, field string) error {
+	return c.DeleteVMConfigFieldCAS(ctx, node, vmid, field, "")
+}
+
+// DeleteVMConfigFieldCAS removes field from vmid's config entirely, through
+// PVE's own `delete` parameter — distinct from SetVMConfigFieldCAS(field, ""),
+// which leaves the key present with empty content. The request carries
+// `delete=<field>` (and `digest`, under the same compare-and-swap rules as
+// SetVMConfigFieldCAS) and never `<field>=`, and goes through the same
+// synchronous PUT, so errors surface exactly as a set's do.
+//
+// NOT verified against a live host, and deliberately not guessed at here:
+//   - on a running VM, whether a key that cannot be hot-unplugged is removed
+//     at once or recorded as a PENDING delete. GET /config (current=0, the
+//     default) returns the pending-applied view, so a pending delete would
+//     already read as absent there — consistent with how a pending set
+//     already reads as its new value;
+//   - what PVE answers for deleting a key that is already absent. Callers
+//     (idempotent.VMFieldsEnsure) skip an absent key rather than depend on it;
+//   - whether PVE accepts an empty value for fields beyond free-text ones,
+//     which is what separates "write empty" from "unset" for a given key.
+func (c *Client) DeleteVMConfigFieldCAS(ctx context.Context, node string, vmid int, field, expectDigest string) error {
+	if node == "" {
+		return fmt.Errorf("delete vm %d field %q: node is required", vmid, field)
+	}
+	if field == "" {
+		return fmt.Errorf("delete vm %d config: field name is required", vmid)
+	}
+
+	form := url.Values{}
+	form.Set("delete", field)
+	if expectDigest != "" {
+		form.Set("digest", expectDigest)
+	}
+	return c.putVMConfig(ctx, node, vmid, form, fmt.Sprintf("delete vm %d field %q", vmid, field))
+}
+
+// putVMConfig sends form to vmid's config with the synchronous PUT, and
+// prefixes every error with what (e.g. `set vm 100 field "name"`).
+func (c *Client) putVMConfig(ctx context.Context, node string, vmid int, form url.Values, what string) error {
 	// url.PathEscape(node): node is roster-config-controlled, not external
 	// input, so this is cheap hardening rather than a real threat model —
 	// but an unescaped node name containing '/', '#', '?', or a space
@@ -94,26 +137,26 @@ func (c *Client) SetVMConfigFieldCAS(ctx context.Context, node string, vmid int,
 	reqURL := fmt.Sprintf("%s/nodes/%s/qemu/%d/config", c.baseURL, url.PathEscape(node), vmid)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return fmt.Errorf("set vm %d field %q: build request: %w", vmid, field, err)
+		return fmt.Errorf("%s: build request: %w", what, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", c.authHeader)
 
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("set vm %d field %q: %w", vmid, field, err)
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	defer func() { _ = res.Body.Close() }()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return fmt.Errorf("set vm %d field %q: read response: %w", vmid, field, err)
+		return fmt.Errorf("%s: read response: %w", what, err)
 	}
 
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
 		return nil
 	}
-	return fmt.Errorf("set vm %d field %q: pve returned %s: %s", vmid, field, res.Status, strings.TrimSpace(string(body)))
+	return fmt.Errorf("%s: pve returned %s: %s", what, res.Status, strings.TrimSpace(string(body)))
 }
 
 // digestConflictErrorSubstring is the text this project EXPECTS a PVE

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -651,5 +652,35 @@ func TestScalar_ReturnsRawStringUnescaped(t *testing.T) {
 		if got != want {
 			t.Errorf("Scalar(%s) = %q, want the raw %q", raw, got, want)
 		}
+	}
+}
+
+// TestParseJSONFieldsWithDeletes: for vm set, a JSON null means "delete this
+// key" and comes back in deletes (sorted), never as a Pair with "" — which
+// would be a write of an empty value. A string "" stays a Pair. Every other
+// non-string value is still refused.
+func TestParseJSONFieldsWithDeletes(t *testing.T) {
+	pairs, deletes, err := ParseJSONFieldsWithDeletes([]byte(`{"tags":null,"cores":"4","description":null,"name":""}`))
+	if err != nil {
+		t.Fatalf("ParseJSONFieldsWithDeletes: %v", err)
+	}
+	if want := []Pair{{Field: "cores", Value: "4"}, {Field: "name", Value: ""}}; !reflect.DeepEqual(pairs, want) {
+		t.Errorf("pairs = %+v, want %+v", pairs, want)
+	}
+	if want := []string{"description", "tags"}; !reflect.DeepEqual(deletes, want) {
+		t.Errorf("deletes = %v, want %v", deletes, want)
+	}
+	for _, in := range []string{`{"cores":4}`, `{"x":true}`, `{"x":{"a":"b"}}`} {
+		if _, _, err := ParseJSONFieldsWithDeletes([]byte(in)); err == nil {
+			t.Errorf("%s: expected a refusal of a non-string, non-null value", in)
+		}
+	}
+}
+
+// TestParseJSONFields_StillRefusesNull: the plain parser (vm create) has no
+// delete, so null stays an error there rather than becoming a delete or "".
+func TestParseJSONFields_StillRefusesNull(t *testing.T) {
+	if _, err := ParseJSONFields([]byte(`{"description":null}`)); err == nil {
+		t.Fatal("ParseJSONFields accepted a null value")
 	}
 }

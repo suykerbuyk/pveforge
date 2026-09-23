@@ -259,14 +259,22 @@ func newVMGetCmd() *cobra.Command {
 
 func newVMSetCmd() *cobra.Command {
 	var jsonBody, jsonFile string
+	var deleteFlags []string
 
 	cmd := &cobra.Command{
-		Use:   "set <target-id> <vmid> [field=value ...]",
-		Short: "Set one or more VM config fields",
-		Long: `Set one or more VM config fields, via exactly one of:
+		Use:   "set <target-id> <vmid> [field=value ...] [--delete field ...]",
+		Short: "Set or delete one or more VM config fields",
+		Long: `Set one or more VM config fields, via at most one of:
   - trailing field=value positional arguments
   - --json '{"field":"value",...}'
   - --json-file path/to/fields.json
+
+--delete field (repeatable) removes field from the VM's config entirely,
+through PVE's own delete parameter. That is not the same as field= (or
+"field":"" in JSON), which writes an empty value and leaves the key present.
+In --json/--json-file, a null value ("field":null) also deletes the key.
+--delete may be used alone or together with one input mode; a field may not
+be both set and deleted. Deletes are applied after the writes.
 
 Fields are applied in order (positional: as given; JSON: sorted by key).
 Applying stops at the first failure — earlier fields in the same
@@ -282,7 +290,11 @@ a summary of only the fields that actually changed, printed once the
 whole batch resolves rather than streamed as each field applies. If the
 writes succeed but the VM's config cannot be re-read afterwards, a
 one-line warning is printed on stderr, stdout is unchanged and the exit
-status is still 0.`,
+status is still 0.
+
+Output: one line per field written, "<target>: <field>=<value>", then one
+per field deleted, "<target>: delete=<field>". A field already absent prints
+nothing, like a field already at its value.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kvArgs := args[2:]
@@ -297,32 +309,42 @@ status is still 0.`,
 			if jsonFile != "" {
 				modes++
 			}
-			if modes != 1 {
-				return fmt.Errorf("specify exactly one of: field=value arguments, --json, or --json-file")
+			if modes > 1 || (modes == 0 && len(deleteFlags) == 0) {
+				return fmt.Errorf("specify exactly one of: field=value arguments, --json, or --json-file (or only --delete)")
 			}
 
 			var pairs []kvjson.Pair
+			var deletes []string
 			var err error
 			switch {
 			case len(kvArgs) > 0:
 				pairs, err = kvjson.ParseKVArgs(kvArgs)
 			case jsonBody != "":
-				pairs, err = kvjson.ParseJSONFields([]byte(jsonBody))
+				pairs, deletes, err = kvjson.ParseJSONFieldsWithDeletes([]byte(jsonBody))
 			case jsonFile != "":
 				var data []byte
 				data, err = os.ReadFile(jsonFile)
 				if err != nil {
 					return fmt.Errorf("read %s: %w", jsonFile, err)
 				}
-				pairs, err = kvjson.ParseJSONFields(data)
+				pairs, deletes, err = kvjson.ParseJSONFieldsWithDeletes(data)
 			}
 			if err != nil {
 				return err
 			}
+			deletes = append(deletes, deleteFlags...)
 
 			vmid, err := strconv.Atoi(args[1])
 			if err != nil {
 				return fmt.Errorf("invalid vmid %q: %w", args[1], err)
+			}
+
+			// Validate before the roster, the client or the lock: a
+			// malformed batch (a field both set and deleted, a repeat)
+			// must never reach PVE.
+			op := &idempotent.VMFieldsEnsure{VMID: vmid, Pairs: pairs, Deletes: deletes}
+			if err := op.Validate(); err != nil {
+				return err
 			}
 
 			client, err := resolveRoutedClient(cmd, args[0])
@@ -337,27 +359,26 @@ status is still 0.`,
 			}
 
 			key := lock.ObjectKey{TargetID: args[0], Kind: "vm", ID: strconv.Itoa(vmid)}
-			op := &idempotent.VMFieldsEnsure{Client: client, VMID: vmid, Pairs: pairs}
-
-			// Explicit, ahead of Run: idempotent.Run calls Satisfied
-			// before Apply, and if the batch already matches current
-			// state, Apply — and therefore its own internal Validate()
-			// call — never runs at all, silently bypassing the
-			// documented "no duplicate field name" contract for an
-			// already-satisfied batch (e.g. the same field=value pair
-			// given twice, where that value already matches). Never push
-			// this into idempotent.Run itself — shared infrastructure
-			// VMTagEnsure/BridgeIsolationEnsure also use, out of scope
-			// here.
-			if err := op.Validate(); err != nil {
-				return err
-			}
+			// op.Validate() already ran, above, and must stay explicit and
+			// ahead of Run: idempotent.Run calls Satisfied before Apply, and
+			// if the batch already matches current state, Apply — and
+			// therefore its own internal Validate() call — never runs at
+			// all, silently bypassing the documented "no duplicate field
+			// name" contract for an already-satisfied batch (e.g. the same
+			// field=value pair given twice, where that value already
+			// matches). Never push this into idempotent.Run itself —
+			// shared infrastructure VMTagEnsure/BridgeIsolationEnsure also
+			// use, out of scope here.
+			op.Client = client
 
 			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
 			if err != nil {
 				return err
 			}
 			if err := printAppliedFields(cmd.OutOrStdout(), args[0], op.Applied, pairs); err != nil {
+				return err
+			}
+			if err := printDeletedFields(cmd.OutOrStdout(), args[0], op.Deleted); err != nil {
 				return err
 			}
 			// The write succeeded, so this is advisory and the exit status
@@ -379,8 +400,24 @@ status is still 0.`,
 	addLockWaitFlag(cmd)
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of field=value pairs (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of field=value pairs (values must be JSON strings)")
+	cmd.Flags().StringArrayVar(&deleteFlags, "delete", nil, "remove this config key entirely (PVE's delete parameter), rather than writing it empty; repeatable")
 	markMutating(cmd)
 	return cmd
+}
+
+// printDeletedFields prints one "<target>: delete=<field>" line per key
+// VMFieldsEnsure.Deleted records, in the field=value shape vm set's stdout
+// already uses. "delete" is PVE's own parameter name, which no config key
+// can be, so the line cannot be mistaken for a write; and it is never
+// "<field>=", which would read as a field written empty. The field is quoted
+// like any kv value.
+func printDeletedFields(out io.Writer, targetID string, deleted []string) error {
+	for _, field := range deleted {
+		if _, err := fmt.Fprintf(out, "%s: delete=%s\n", targetID, kvjson.QuoteValue(field)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // printAppliedFields prints one confirmation line per field name in

@@ -48,6 +48,16 @@ type Client interface {
 	// fallback for a field PVE itself rejects as root-only that isn't
 	// yet in the registry.
 	SetVMConfigField(ctx context.Context, vmid int, field, value string) error
+	// DeleteVMConfigFieldCAS / DeleteVMConfigField remove a config key
+	// entirely (PVE's delete parameter), the counterparts of the two writes
+	// above: CAS over REST, and a root-only key over the SSH vector.
+	DeleteVMConfigFieldCAS(ctx context.Context, vmid int, field, expectDigest string) error
+	DeleteVMConfigField(ctx context.Context, vmid int, field string) error
+	// SetVMConfigFieldOverSSH / DeleteVMConfigFieldOverSSH go over the SSH
+	// vector only, never REST: the fallback after PVE refused a CAS change
+	// as root-only, where a REST retry would be a second, digest-less write.
+	SetVMConfigFieldOverSSH(ctx context.Context, vmid int, field, value string) error
+	DeleteVMConfigFieldOverSSH(ctx context.Context, vmid int, field string) error
 	// RawRequest issues method against path on this client's own PVE
 	// host, returning PVE's response unwrapped from its transport
 	// envelope but otherwise unreshaped (internal/pve.RawRequest's own
