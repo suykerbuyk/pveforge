@@ -81,7 +81,7 @@ func TestNetworkBridgeEnsure_Apply_ManagementBridgeVanishedDuringStage_Reverts(t
 
 func TestNetworkBridgeEnsure_Apply_GuardSelfCheckReadError_Reverts(t *testing.T) {
 	client := newHappyPathClient()
-	client.getResponses["vmbr99"] = []getResponse{{err: errStageLeakProbe}}
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}, {err: errStageLeakProbe}} // pre-stage: absent; guard read fails
 
 	err := newStageLeakBridgeOp(client).Apply(context.Background())
 	requireRevertedNotCommitted(t, client.revertCalls, client.commitCalls)

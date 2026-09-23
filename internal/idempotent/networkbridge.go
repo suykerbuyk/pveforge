@@ -339,7 +339,8 @@ func (op *NetworkBridgeEnsure) Read(ctx context.Context) (string, error) {
 func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 	exists := current != ""
 
-	if len(op.Wanted) == 0 {
+	wanted := op.effectiveWanted()
+	if len(wanted) == 0 {
 		return !exists
 	}
 	if !exists {
@@ -353,17 +354,37 @@ func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 		// other way, matching parseBridgeIsolationState's own contract.
 		return false
 	}
-	for field, wanted := range op.Wanted {
+	for field, want := range wanted {
 		raw, ok := fields[field]
 		if !ok {
 			return false
 		}
 		got, err := kvjson.Scalar(raw)
-		if err != nil || !fieldsEqual(got, wanted) {
+		if err != nil || !fieldsEqual(got, want) {
 			return false
 		}
 	}
 	return true
+}
+
+// effectiveWanted is what a create actually asks for: Wanted, plus
+// type=bridge when the caller named no type — PVE requires a type on a
+// create, and a bridge is what this Op is named after. Satisfied and stage
+// both use it, so the default that is sent is also the default that is
+// checked: an existing interface of another type with otherwise matching
+// fields is not "already up to date". Empty for a destroy.
+func (op *NetworkBridgeEnsure) effectiveWanted() map[string]string {
+	if len(op.Wanted) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(op.Wanted)+1)
+	for k, v := range op.Wanted {
+		out[k] = v
+	}
+	if _, ok := out["type"]; !ok {
+		out["type"] = "bridge"
+	}
+	return out
 }
 
 // Apply performs the full stage -> guard -> commit -> poll -> verify
@@ -395,6 +416,25 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	op.preKernelState, err = op.Client.LinkState(ctx, op.ManagementBridge)
 	if err != nil {
 		return fmt.Errorf("network bridge ensure: %s: pre-stage kernel snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
+	}
+
+	// A create of an interface that already exists as another type cannot
+	// be what was asked: refuse it here, before anything is staged, rather
+	// than stage a create PVE (or the step-4 guard) would then reject.
+	if want := op.effectiveWanted(); len(want) > 0 {
+		existing, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
+		if err != nil {
+			return fmt.Errorf("network bridge ensure: %s: pre-stage read: %w", op.Iface, err)
+		}
+		if exists {
+			got := ""
+			if raw, ok := existing["type"]; ok {
+				got, _ = kvjson.Scalar(raw)
+			}
+			if got != want["type"] {
+				return fmt.Errorf("network bridge ensure: %s: already exists as type %s, not %s; refusing to create it (nothing staged)", op.Iface, kvjson.QuoteValue(got), kvjson.QuoteValue(want["type"]))
+			}
+		}
 	}
 
 	// --- Step 2: stage -----------------------------------------------
@@ -567,9 +607,14 @@ func activeTruthy(s string) bool {
 // /nodes/{node}/network/{Iface}. Targets ONLY Iface — never
 // ManagementBridge.
 func (op *NetworkBridgeEnsure) stage(ctx context.Context) error {
-	if len(op.Wanted) > 0 {
+	if want := op.effectiveWanted(); len(want) > 0 {
+		// effectiveWanted carries the type=bridge default when the caller
+		// named no type: PVE's schema lists type as required on this
+		// create. UNVERIFIED against a live host: that PVE refuses the
+		// create without type — the nested harness
+		// (pveforge-nested-pve-test-harness) must check it.
 		params := url.Values{}
-		for field, value := range op.Wanted {
+		for field, value := range want {
 			params.Set(field, value)
 		}
 		params.Set("iface", op.Iface)
