@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,11 +72,11 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			passphrase, err := roster.ResolvePassphrase()
+			passphrase, err := roster.ResolvePassphraseContext(cmd.Context())
 			if err != nil {
 				return err
 			}
-			pvePassword, err := resolvePVEPassword()
+			pvePassword, err := resolvePVEPassword(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -127,7 +129,7 @@ func newBootstrapCmd() *cobra.Command {
 // the pubkey-install step: environment variable first, else an
 // interactive terminal prompt, else an error — never a CLI flag. Mirrors
 // roster.ResolvePassphrase's own env-var/interactive/error precedence.
-func resolvePVEPassword() (string, error) {
+func resolvePVEPassword(ctx context.Context) (string, error) {
 	if v, ok := os.LookupEnv(pvePasswordEnvVar); ok && v != "" {
 		return v, nil
 	}
@@ -136,9 +138,12 @@ func resolvePVEPassword() (string, error) {
 		return "", fmt.Errorf("no PVE password available: set %s or run interactively", pvePasswordEnvVar)
 	}
 	fmt.Fprint(os.Stderr, "PVE password: ")
-	b, err := term.ReadPassword(fd)
+	b, err := roster.ReadSecret(ctx, fd, "PVE password")
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
+		if errors.Is(err, roster.ErrPromptInterrupted) {
+			return "", err
+		}
 		return "", fmt.Errorf("read PVE password: %w", err)
 	}
 	if len(b) == 0 {

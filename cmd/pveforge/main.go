@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,10 +12,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
+	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
 func main() {
-	os.Exit(runRoot(newRootCmd(), os.Stderr))
+	os.Exit(realMain())
+}
+
+// realMain is main without the exit, so a test can re-execute the test
+// binary as pveforge itself. The root carries a context that the first
+// SIGINT/SIGTERM cancels (notifyInterrupt); cobra hands it to every
+// command as cmd.Context().
+func realMain() int {
+	root := newRootCmd()
+	root.SetContext(notifyInterrupt(context.Background()))
+	return runRoot(root, os.Stderr)
 }
 
 // runRoot executes root and returns the process exit code. It is the ONE
@@ -24,13 +38,37 @@ func main() {
 // 5xx body) can never forge a second line such as "warning: ...". An error
 // text that needs no quoting prints exactly as before. Commands' own
 // stderr lines (cmd.ErrOrStderr()) go to the same writer.
+//
+// When a signal interrupted the command (root's context was cancelled by
+// notifyInterrupt), it reports only what was observed:
+//
+//   - the command completed anyway: its outcome was observed, so exit 0;
+//   - it was waiting for an object lock (lock.ErrLockWaitInterrupted): that
+//     error already says so, and that the operation did not start under the
+//     lock — it is printed as it is;
+//   - it was at a secret prompt (roster.ErrPromptInterrupted): that error
+//     names the prompt, and is printed as it is;
+//   - anything else: the error, never replaced — an outcome-unknown or UPID
+//     text stays whole — between "interrupted (SIGINT): " and a note that a
+//     change already sent may or may not have been applied.
+//
+// An interrupted run exits 128+signum: 130 for SIGINT, 143 for SIGTERM.
 func runRoot(root *cobra.Command, stderr io.Writer) int {
 	root.SetErr(stderr)
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(stderr, kvjson.QuoteValue(err.Error()))
-		return 1
+	err := root.Execute()
+	if err == nil {
+		return 0
 	}
-	return 0
+	msg, code := err.Error(), 1
+	var ie interruptError
+	if ctx := root.Context(); ctx != nil && errors.As(context.Cause(ctx), &ie) {
+		code = ie.exitCode()
+		if !errors.Is(err, lock.ErrLockWaitInterrupted) && !errors.Is(err, roster.ErrPromptInterrupted) {
+			msg = fmt.Sprintf("interrupted (%s): %s; any change the command had already sent may or may not have been applied", ie, msg)
+		}
+	}
+	fmt.Fprintln(stderr, kvjson.QuoteValue(msg))
+	return code
 }
 
 func newRootCmd() *cobra.Command {

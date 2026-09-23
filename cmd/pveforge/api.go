@@ -236,9 +236,10 @@ acquiring that lock; --wait-timeout bounds the task wait done while holding
 it.
 
 A wait that times out (--wait-timeout, or the %[1]s ceiling) reports an
-outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C ends
-pveforge immediately, without any report, and the task may likewise still be
-running. Either way, follow it up with the UPID printed at dispatch:
+outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C (SIGINT)
+or SIGTERM stops the wait and reports it the same way, exiting 130 or 143;
+a second Ctrl-C ends pveforge at once, without a report. Either way, follow
+it up with the UPID printed at dispatch:
   pveforge api get /nodes/<node>/tasks/<upid>/status <target-id>
 
 --no-wait prints the UPID and exits without checking the task. On a path
