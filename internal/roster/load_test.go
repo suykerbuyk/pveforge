@@ -1,9 +1,12 @@
 package roster
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode"
 )
 
 const fixtureBasic = `# comment above the array
@@ -108,6 +111,67 @@ node = "qa-pve-01"
 	for i, doc := range cases {
 		if _, err := Decode([]byte(doc)); err == nil {
 			t.Fatalf("case %d: expected error for non-armored secret", i)
+		}
+	}
+}
+
+// lineUnsafeTargetIDs covers every trigger class kvjson.LineUnsafe has: a
+// C0 line break and other C0/DEL/C1 controls (U+0085 is NEL), U+2028,
+// leading or trailing whitespace (ASCII and not), and a leading quote.
+var lineUnsafeTargetIDs = []string{
+	"qa\nwarning: forged", "qa\r", "qa\x00", "qa\t", "qa\x7f", "qa\u0085", "qa\u2028",
+	" qa", "qa ", "\u00a0qa", `"qa`,
+}
+
+// lineSafeTargetIDs must stay accepted: the check refuses what could forge
+// a line, not every unusual id.
+var lineSafeTargetIDs = []string{"qa-pve-01", "qa pve", "qa=1", "null", `qa"x`}
+
+// tomlBasicString encodes s as a TOML basic string, escaping every
+// control character (which TOML forbids raw) as \uXXXX.
+func tomlBasicString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case unicode.IsControl(r) || r == '\u2028' || r == '\u2029':
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// A roster holding a target id that could forge an output line is refused
+// at load, naming the id quoted; the ids that are merely unusual load.
+func TestDecode_RejectsLineUnsafeTargetID(t *testing.T) {
+	withTestWorkFactor(t)
+	doc := func(id string) []byte {
+		return []byte("[[targets]]\nid = " + tomlBasicString(id) + "\nhost = \"h\"\nnode = \"n\"\n")
+	}
+	for _, id := range lineUnsafeTargetIDs {
+		_, err := Decode(doc(id))
+		if err == nil {
+			t.Errorf("id %q: Decode accepted a line-unsafe target id", id)
+			continue
+		}
+		if want := fmt.Sprintf("target #0: target id %q", id); !strings.Contains(err.Error(), want) {
+			t.Errorf("id %q: error = %q, want it to contain %q", id, err, want)
+		}
+	}
+	for _, id := range lineSafeTargetIDs {
+		r, err := Decode(doc(id))
+		if err != nil {
+			t.Errorf("id %q: Decode: %v", id, err)
+			continue
+		}
+		if r.Find(id) == nil {
+			t.Errorf("id %q: decoded, but Find does not return it", id)
 		}
 	}
 }

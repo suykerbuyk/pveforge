@@ -258,12 +258,18 @@ func TestNewVMSetCmd_PositionalPairs_Success(t *testing.T) {
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
 	cmd := newVMSetCmd()
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4", "name=web-01"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+	// A clean run re-reads successfully, so no "could not be re-read"
+	// warning may appear.
+	if errOut.Len() != 0 {
+		t.Errorf("expected no stderr output for a write whose re-read succeeded, got:\n%s", errOut.String())
 	}
 
 	if len(receivedFields) != 2 {
@@ -547,7 +553,9 @@ func TestNewVMSetCmd_AlreadySatisfiedField_NoOp(t *testing.T) {
 // from a no-op and with no error either. The fix (printAppliedFields)
 // reports from VMFieldsEnsure.Applied — populated by Apply itself as it
 // writes each field — never by diffing Before/After, so it's immune to
-// this fallback entirely.
+// this fallback entirely. (The failed re-read itself is now reported too,
+// as Result.AfterErr's stderr warning — pinned through runRoot by
+// TestVMSet_AfterErrWarning_ThroughRunRoot.)
 //
 // The fake server here deliberately drops "digest" from its THIRD GET
 // response only (Run's own post-Apply best-effort re-read; GET #1 is
@@ -598,8 +606,9 @@ func TestNewVMSetCmd_ReportsAppliedFieldEvenWhenFinalReReadFails(t *testing.T) {
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 
 	cmd := newVMSetCmd()
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
 
 	if err := cmd.Execute(); err != nil {
@@ -607,6 +616,127 @@ func TestNewVMSetCmd_ReportsAppliedFieldEvenWhenFinalReReadFails(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "qa-pve-01: cores=4") {
 		t.Errorf("expected a confirmation line for the real, successful write even though the final re-read failed, got:\n%s", out.String())
+	}
+	// A 2xx re-read that fails validation (no digest) is a failed re-read
+	// too, not only a 5xx: the warning must fire for it, once.
+	got := errOut.String()
+	if strings.Count(got, "\n") != 1 || !strings.HasPrefix(got, "warning: ") || !strings.Contains(got, "response carries no digest") {
+		t.Errorf("stderr = %q, want exactly one warning line carrying the re-read's cause (response carries no digest)", got)
+	}
+}
+
+// TestVMSet_AfterErrWarning_ThroughRunRoot pins, at the CLI's own entry
+// point, that a failed post-Apply re-read reaches the operator: Run's
+// Result.AfterErr must be consumed by vm set (not discarded), printed on
+// stderr as exactly one line with the cause quoted — the fake's 5xx body
+// carries a newline and a forged "warning:" line, which must stay inside
+// the quoted cause — while stdout still reports the applied field and
+// the exit status stays 0, since the write itself succeeded.
+func TestVMSet_AfterErrWarning_ThroughRunRoot(t *testing.T) {
+	var mu sync.Mutex
+	config := map[string]string{"digest": "d1"}
+	getCalls := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodGet {
+			getCalls++
+			if getCalls == 3 {
+				// Run's post-Apply re-read (GET #1 is Run's Read, GET #2
+				// Apply's digest re-fetch).
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte("boom\nwarning: forged"))
+				return
+			}
+			body, err := json.Marshal(config)
+			if err != nil {
+				t.Fatalf("marshal fake config: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":` + string(body) + `}`))
+			return
+		}
+
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		for k, v := range r.PostForm {
+			if k != "digest" {
+				config[k] = v[0]
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"vm", "set", "--roster", rosterPath, "qa-pve-01", "100", "cores=4"})
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	if code := runRoot(root, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, want 0 (the write succeeded); stderr:\n%s", code, stderr.String())
+	}
+
+	mu.Lock()
+	gets := getCalls
+	mu.Unlock()
+	if gets != 3 {
+		t.Fatalf("GET calls = %d, want 3: the failing re-read was never reached", gets)
+	}
+	if got := stdout.String(); got != "qa-pve-01: cores=4\n" {
+		t.Errorf("stdout = %q, want exactly the applied line", got)
+	}
+	got := stderr.String()
+	if strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") {
+		t.Fatalf("stderr must be exactly one line (a quoted cause cannot forge a second), got %q", got)
+	}
+	const prefix = "warning: qa-pve-01: vm 100: the write was applied but its result could not be re-read: \""
+	if !strings.HasPrefix(got, prefix) {
+		t.Errorf("stderr = %q, want prefix %q", got, prefix)
+	}
+	if !strings.Contains(got, `500`) || !strings.Contains(got, `boom\nwarning: forged`) {
+		t.Errorf("stderr = %q, want the quoted cause carrying the 5xx status and body", got)
+	}
+}
+
+// TestVMSet_LineUnsafeTargetID_RefusedThroughRunRoot: a roster whose
+// target id carries a line break (a valid TOML escape, so it parses) is
+// refused when vm set loads it — before any PVE request — so no output
+// line can ever begin with a forged id: exit 1, nothing on stdout, and the
+// error on one stderr line naming the id quoted. This is what makes the
+// target id safe to print bare in vm set's stdout lines and its warning.
+func TestVMSet_LineUnsafeTargetID_RefusedThroughRunRoot(t *testing.T) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	const id = "qa\nwarning: forged"
+	rosterPath := newTestRosterWithTLSTarget(t, srv, id, "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	root := newRootCmd()
+	root.SetArgs([]string{"vm", "set", "--roster", rosterPath, id, "100", "cores=4"})
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	if code := runRoot(root, &stderr); code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Errorf("PVE requests = %d, want 0: the id must be refused before any request", n)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	got := stderr.String()
+	if strings.Count(got, "\n") != 1 || !strings.Contains(got, `target id "qa\nwarning: forged"`) {
+		t.Errorf("stderr = %q, want one line naming the quoted id", got)
 	}
 }
 

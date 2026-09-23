@@ -176,6 +176,13 @@ func QuoteValue(v string) string {
 	return v
 }
 
+// LineUnsafe reports whether s, printed bare, could be misread as more or
+// other than one kv or text line: the trigger set QuoteKey and QuoteValue
+// share (below). A caller that must keep a string out of that set entirely
+// — a roster target id, printed unquoted at the start of output lines —
+// checks it here rather than keeping a second character list.
+func LineUnsafe(s string) bool { return needsQuote(s) }
+
 // needsQuote reports the triggers QuoteKey and QuoteValue share. The
 // control test is unicode.IsControl, i.e. the whole Cc category: C0
 // (U+0000-U+001F) and U+007F-U+009F, which includes U+0085 (NEL), a line

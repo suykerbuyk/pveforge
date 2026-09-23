@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,9 @@ func TestRun_NoOpWhenSatisfied(t *testing.T) {
 	if res.Before != "a;b" || res.After != "a;b" {
 		t.Errorf("Before/After = %q/%q, want a;b/a;b", res.Before, res.After)
 	}
+	if res.AfterErr != nil {
+		t.Errorf("AfterErr = %v, want nil: a no-op never re-reads", res.AfterErr)
+	}
 }
 
 func TestRun_AppliesWhenNotSatisfied(t *testing.T) {
@@ -102,6 +106,9 @@ func TestRun_AppliesWhenNotSatisfied(t *testing.T) {
 	}
 	if res.Before != "a" || res.After != "a;b" {
 		t.Errorf("Before/After = %q/%q, want a/a;b", res.Before, res.After)
+	}
+	if res.AfterErr != nil {
+		t.Errorf("AfterErr = %v, want nil: the final re-read succeeded", res.AfterErr)
 	}
 }
 
@@ -167,6 +174,66 @@ func TestRun_RetriesOnConflictThenSucceeds(t *testing.T) {
 	}
 	if op.readCalls != 3 {
 		t.Errorf("expected 3 Read calls (2 attempts + 1 final re-read), got %d", op.readCalls)
+	}
+	if res.After != "a;b" || res.AfterErr != nil {
+		t.Errorf("After/AfterErr = %q/%v, want a;b/nil: the retry's final re-read succeeded", res.After, res.AfterErr)
+	}
+}
+
+// TestRun_ReReadFailureSetsAfterErr: when Apply succeeds but the final
+// re-read fails, Run still succeeds (the mutation happened) but must not
+// pass Before off as re-observed state — AfterErr carries the read's own
+// cause, reachable with errors.Is, and After keeps Before's value.
+func TestRun_ReReadFailureSetsAfterErr(t *testing.T) {
+	cause := errors.New("re-read: connection reset")
+	op := &fakeOp{
+		readResults:   []string{"a"},
+		readErrs:      []error{nil, cause}, // attempt read ok, final re-read fails
+		satisfiedFunc: func(string) bool { return false },
+	}
+
+	res, err := Run(context.Background(), testRosterPath(t), testKey(), op, false)
+	if err != nil {
+		t.Fatalf("Run: %v (a failed re-read must not fail an applied mutation)", err)
+	}
+	if !res.Changed || op.applyCalls != 1 || op.readCalls != 2 {
+		t.Fatalf("Changed=%v applyCalls=%d readCalls=%d, want true/1/2", res.Changed, op.applyCalls, op.readCalls)
+	}
+	if !errors.Is(res.AfterErr, cause) {
+		t.Fatalf("AfterErr = %v, want it to wrap the re-read's cause", res.AfterErr)
+	}
+	if !strings.Contains(res.AfterErr.Error(), testKey().String()) {
+		t.Errorf("AfterErr = %q, want it to name the object key %s", res.AfterErr, testKey())
+	}
+	if res.Before != "a" || res.After != "a" {
+		t.Errorf("Before/After = %q/%q, want a/a (After falls back to Before)", res.Before, res.After)
+	}
+}
+
+// TestRun_ReReadFailureAfterConflictRetry: the AfterErr assignment
+// survives a conflict retry and describes the LATEST cycle — After is
+// attempt 2's Before, not attempt 1's.
+func TestRun_ReReadFailureAfterConflictRetry(t *testing.T) {
+	cause := errors.New("re-read: connection reset")
+	op := &fakeOp{
+		readResults:   []string{"a", "a2"}, // attempt1 read, attempt2 read; call 3 errors
+		readErrs:      []error{nil, nil, cause},
+		satisfiedFunc: func(string) bool { return false },
+		applyErrs:     []error{fmt.Errorf("wrap: %w", ErrConflict), nil},
+	}
+
+	res, err := Run(context.Background(), testRosterPath(t), testKey(), op, false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Changed || op.applyCalls != 2 || op.readCalls != 3 {
+		t.Fatalf("Changed=%v applyCalls=%d readCalls=%d, want true/2/3", res.Changed, op.applyCalls, op.readCalls)
+	}
+	if !errors.Is(res.AfterErr, cause) {
+		t.Fatalf("AfterErr = %v, want it to wrap the final re-read's cause", res.AfterErr)
+	}
+	if res.Before != "a2" || res.After != "a2" {
+		t.Errorf("Before/After = %q/%q, want a2/a2 (attempt 2's own Before)", res.Before, res.After)
 	}
 }
 

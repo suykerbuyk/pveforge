@@ -1,10 +1,13 @@
 package roster
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 // fixtureTwoTargets deliberately carries a leading comment, mixed spacing,
@@ -325,6 +328,33 @@ func TestQuoteTOMLBasicString_Escapes(t *testing.T) {
 	}
 }
 
+// Every string quoteTOMLBasicString renders must be a valid TOML basic
+// string that go-toml decodes back to the input: each control rune TOML
+// forbids raw (U+0000-U+001F, U+007F) — tab included, though it is legal
+// raw — alone and embedded, plus runes that are legal raw and must pass
+// through unchanged (C1 U+0085, U+2028, non-ASCII), quote and backslash.
+func TestQuoteTOMLBasicString_RoundTripsEveryControlRune(t *testing.T) {
+	withTestWorkFactor(t)
+	var inputs []string
+	for r := rune(0); r < 0x20; r++ {
+		inputs = append(inputs, string(r), "a"+string(r)+"b")
+	}
+	inputs = append(inputs, "\x7f", "a\x7fb", "\u0085", "\u2028", "\u2029", "é", "日本", `"`, `\`, `\u0041`, "mixed\x00\b\f\x1b[0m\x7f\u2028\"\\end")
+	for _, in := range inputs {
+		q := quoteTOMLBasicString(in)
+		var v struct {
+			V string `toml:"v"`
+		}
+		if err := toml.Unmarshal([]byte("v = "+q+"\n"), &v); err != nil {
+			t.Errorf("quoteTOMLBasicString(%q) = %q: not valid TOML: %v", in, q, err)
+			continue
+		}
+		if v.V != in {
+			t.Errorf("quoteTOMLBasicString(%q) = %q: decodes to %q", in, q, v.V)
+		}
+	}
+}
+
 func TestWriteSSHAuth_QuotesSpecialCharsInPublicKey(t *testing.T) {
 	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
@@ -599,6 +629,48 @@ func TestAppendTarget_DuplicateID(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for duplicate target id")
+	}
+}
+
+// AppendTarget refuses a line-unsafe id itself, before taking the roster
+// lock: the file is untouched, no lock file is ever created, and the error
+// names the id rather than surfacing as Decode's "safety check failed" on
+// the composed result. A line-safe id still appends and loads back.
+func TestAppendTarget_RejectsLineUnsafeTargetID(t *testing.T) {
+	withTestWorkFactor(t)
+	for _, id := range lineUnsafeTargetIDs {
+		path := writeTempRoster(t, fixtureTwoTargets)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = AppendTarget(path, Target{ID: id, Host: "h", Node: "n"})
+		if err == nil {
+			t.Errorf("id %q: AppendTarget accepted a line-unsafe target id", id)
+			continue
+		}
+		if want := fmt.Sprintf("append target: target id %q", id); !strings.Contains(err.Error(), want) {
+			t.Errorf("id %q: error = %q, want it to contain %q", id, err, want)
+		}
+		if _, statErr := os.Stat(path + ".lock"); !os.IsNotExist(statErr) {
+			t.Errorf("id %q: roster lock file exists (stat err %v): the id was checked after the lock, not before", id, statErr)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Errorf("id %q: roster changed", id)
+		}
+	}
+	for _, id := range lineSafeTargetIDs {
+		if id == "qa-pve-01" {
+			continue // already in fixtureTwoTargets
+		}
+		path := writeTempRoster(t, fixtureTwoTargets)
+		if err := AppendTarget(path, Target{ID: id, Host: "h", Node: "n"}); err != nil {
+			t.Errorf("id %q: AppendTarget: %v", id, err)
+			continue
+		}
+		if r, err := Load(path); err != nil || r.Find(id) == nil {
+			t.Errorf("id %q: appended but did not load back (err %v)", id, err)
+		}
 	}
 }
 

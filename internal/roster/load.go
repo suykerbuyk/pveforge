@@ -7,6 +7,8 @@ import (
 
 	"filippo.io/age/armor"
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/suykerbuyk/pveforge/internal/kvjson"
 )
 
 // Load reads and validates the roster file at path.
@@ -30,11 +32,29 @@ func Decode(data []byte) (*Roster, error) {
 	return &r, nil
 }
 
+// ValidateTargetID reports whether id is usable as a target id beyond
+// being non-empty: commands print a target id unquoted at the start of
+// output lines (vm set's "<target>: field=value"), so an id that kv output
+// would have to quote to keep on one line — a control character or line
+// break, U+2028/U+2029, leading or trailing whitespace, a leading double
+// quote (kvjson.LineUnsafe) — could forge a second line and is refused.
+// Applied when a roster is loaded and when a target is appended, so no
+// roster pveforge reads or writes can hold one.
+func ValidateTargetID(id string) error {
+	if kvjson.LineUnsafe(id) {
+		return fmt.Errorf("target id %q: must not contain a control character or line break, begin or end with whitespace, or begin with a double quote", id)
+	}
+	return nil
+}
+
 func validate(r *Roster) error {
 	seen := make(map[string]bool, len(r.Targets))
 	for i, t := range r.Targets {
 		if t.ID == "" {
 			return fmt.Errorf("target #%d: missing required field id", i)
+		}
+		if err := ValidateTargetID(t.ID); err != nil {
+			return fmt.Errorf("target #%d: %w", i, err)
 		}
 		if seen[t.ID] {
 			return fmt.Errorf("duplicate target id %q", t.ID)

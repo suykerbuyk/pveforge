@@ -52,7 +52,8 @@ type VMFieldsEnsure struct {
 	// reset at the start of every Apply call and populated as each write
 	// succeeds (never derived after the fact from Before/After diffing:
 	// idempotent.Run's own best-effort post-Apply re-read can fail while
-	// leaving Changed true and After==Before, which would make a diff-
+	// leaving Changed true and After==Before (with the cause only in
+	// Result.AfterErr), which would make a diff-
 	// based reconstruction silently report nothing for a real, successful
 	// write — see cmd/pveforge's own regression test for this). Exported
 	// so cmd/pveforge's RunE can report exactly what this Op wrote,

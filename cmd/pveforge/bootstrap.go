@@ -54,6 +54,11 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// And the target id: one the roster would refuse (see
+			// roster.ValidateTargetID) must not cost two prompts either.
+			if err := roster.ValidateTargetID(args[0]); err != nil {
+				return err
+			}
 			// And the owner, for the same reason: a userid pveforge cannot
 			// own a token with must not cost the operator two prompts.
 			if tokenOwner != "" {

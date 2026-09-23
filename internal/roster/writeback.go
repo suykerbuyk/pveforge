@@ -81,6 +81,11 @@ func AppendTarget(path string, t Target) error {
 	if t.ID == "" {
 		return fmt.Errorf("append target: id is required")
 	}
+	// Before the lock and the read: Decode would refuse the result anyway,
+	// but only after the write was composed, as a "safety check failed".
+	if err := ValidateTargetID(t.ID); err != nil {
+		return fmt.Errorf("append target: %w", err)
+	}
 	if t.Host == "" {
 		return fmt.Errorf("append target %q: host is required", t.ID)
 	}
@@ -417,6 +422,11 @@ func ensureTrailingNewline(s string) string {
 	return s + "\n"
 }
 
+// quoteTOMLBasicString renders s as a TOML basic string that decodes back
+// to s for every input. TOML forbids raw control characters in a basic
+// string (all of U+0000-U+001F except tab, and U+007F), so each one is
+// escaped: by its short form where TOML has one (\b \t \n \f \r), else as
+// \uXXXX. Anything else, including U+0080-U+009F and U+2028, is legal raw.
 func quoteTOMLBasicString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -426,13 +436,21 @@ func quoteTOMLBasicString(s string) string {
 			b.WriteString(`\\`)
 		case '"':
 			b.WriteString(`\"`)
-		case '\n':
-			b.WriteString(`\n`)
+		case '\b':
+			b.WriteString(`\b`)
 		case '\t':
 			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
 		case '\r':
 			b.WriteString(`\r`)
 		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04X`, r)
+				continue
+			}
 			b.WriteRune(r)
 		}
 	}
