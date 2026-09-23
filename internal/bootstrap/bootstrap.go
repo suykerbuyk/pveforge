@@ -20,11 +20,14 @@ package bootstrap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
+	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
@@ -840,7 +843,7 @@ func checkKeylessState(opts Options) error {
 	if err != nil || heldID == "" {
 		return err
 	}
-	return fmt.Errorf("%w: %s holds the token %s and no SSH auth; pass --no-ssh-key to keep this target keyless, or remove its [targets.token] block by hand to re-bootstrap it with an SSH key",
+	return fmt.Errorf("%w: %s holds the token %s and no SSH auth (it was bootstrapped keyless, or its token was imported); pass --no-ssh-key to keep this target keyless, or remove its [targets.token] block by hand to re-bootstrap it with an SSH key",
 		ErrKeylessTargetNeedsFlag, opts.TargetID, heldID)
 }
 
@@ -975,4 +978,222 @@ func grantAll(ctx context.Context, session SSHSession, fullTokenID string, want 
 		}
 	}
 	return nil
+}
+
+// secretRedacted replaces a secret in redactedError's text.
+const secretRedacted = "<redacted>"
+
+// redactedError is err with every occurrence of a secret removed from its
+// text. It unwraps to err, so errors.Is and errors.As see the cause
+// unchanged. Only the raw secret is replaced: a transformed copy of it
+// (URL-, base64- or JSON-escaped) is not recognised.
+type redactedError struct {
+	err    error
+	secret string
+}
+
+func (e redactedError) Error() string {
+	return strings.ReplaceAll(e.err.Error(), e.secret, secretRedacted)
+}
+func (e redactedError) Unwrap() error { return e.err }
+
+// redactSecret wraps err so its text never shows secret; an empty secret
+// leaves err as it is.
+func redactSecret(err error, secret string) error {
+	if secret == "" {
+		return err
+	}
+	return redactedError{err: err, secret: secret}
+}
+
+// ErrTokenAlreadyHeld: Import was asked to import a token into a target
+// whose roster entry already holds a different one, without Replace. Not a
+// verdict about anything; nothing was written.
+var ErrTokenAlreadyHeld = errors.New("the target already holds a different token")
+
+// ErrInvalidImportTokenID: Import's token id is not "<owner>!<name>" with an
+// owner CheckTokenOwner accepts and a PVE token name.
+var ErrInvalidImportTokenID = errors.New("invalid token id")
+
+// ErrInvalidTokenSecret: the imported secret is empty, too long, or holds
+// whitespace or a control character. Its text never includes the secret.
+var ErrInvalidTokenSecret = errors.New("invalid token secret")
+
+// tokenNameRE is PVE's token-name format (pve-tokenid's name part).
+var tokenNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.\-_]+$`)
+
+// MaxImportedSecretLen bounds an imported secret. A PVE token secret is a
+// UUID (36 bytes); anything near this bound is not one.
+const MaxImportedSecretLen = 4096
+
+// CheckImportTokenID reports whether id is a full token id Import accepts.
+func CheckImportTokenID(id string) error {
+	owner, name, found := strings.Cut(id, "!")
+	if !found {
+		return fmt.Errorf("%w: %s: want <user>@<realm>!<token name>", ErrInvalidImportTokenID, kvjson.QuoteValue(id))
+	}
+	if err := CheckTokenOwner(owner); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidImportTokenID, err)
+	}
+	if !tokenNameRE.MatchString(name) {
+		return fmt.Errorf("%w: %s: the token name must start with a letter and hold only letters, digits and . - _", ErrInvalidImportTokenID, kvjson.QuoteValue(name))
+	}
+	return nil
+}
+
+// CheckTokenSecret reports whether secret can be a token secret: non-empty,
+// at most MaxImportedSecretLen bytes, and free of whitespace and control
+// characters. The error never includes the secret.
+func CheckTokenSecret(secret string) error {
+	switch {
+	case secret == "":
+		return fmt.Errorf("%w: it is empty", ErrInvalidTokenSecret)
+	case len(secret) > MaxImportedSecretLen:
+		return fmt.Errorf("%w: it is longer than %d bytes", ErrInvalidTokenSecret, MaxImportedSecretLen)
+	case strings.ContainsFunc(secret, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }):
+		return fmt.Errorf("%w: it holds whitespace or a control character", ErrInvalidTokenSecret)
+	}
+	return nil
+}
+
+// ImportOptions configures one Import.
+type ImportOptions struct {
+	TargetID    string
+	Host        string // defaulted from an existing roster target
+	Node        string // defaulted from an existing roster target
+	APIPort     int
+	InsecureTLS bool
+	// TokenID is the full "<user>@<realm>!<name>" of the token minted
+	// outside pveforge.
+	TokenID string
+	// Secret is the token's secret, read by the caller from non-terminal
+	// stdin — never argv or the environment.
+	Secret string
+	// Grants is what the token must hold, exactly (ValidateTokenGrants).
+	Grants []Grant
+	// Replace lets Import overwrite a DIFFERENT token the roster holds for
+	// the target. The old token is never revoked: it is reported as
+	// orphaned (still live on PVE, held by no roster).
+	Replace    bool
+	RosterPath string
+	Passphrase string
+}
+
+// Import puts a token minted outside pveforge into the roster, but only
+// once PVE proves it holds exactly Grants — the same effective-permissions
+// validation bootstrap runs, with bootstrap's bounded retry for a freshly
+// minted token's propagation lag.
+//
+// An import creates nothing on PVE and so NEVER removes or revokes
+// anything, whatever the validation says: a verdict and a non-verdict alike
+// only mean the token is not written. It needs no SSH and no password: it
+// holds no transport at all, so bootstrap's remove path is out of its
+// reach. Its checks run as the token alone, so an ErrWrongScope may be the
+// token owner's own limit showing through (pve.ValidateTokenGrants, limit
+// 4); nothing is removed, so that is safe to report as it is.
+//
+// It holds bootstrap's per-target token lock for the whole run, so an
+// import and a bootstrap of the same target never interleave.
+func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Result, err error) {
+	// No error Import returns may carry the secret. PVE's (or a proxy's)
+	// error body can echo the request — "Authorization: PVEAPIToken=
+	// <id>=<secret>" — and runRoot prints the error. Redacted here, once,
+	// for every return path; errors.Is still reaches the cause.
+	defer func() {
+		if err != nil {
+			err = redactSecret(err, opts.Secret)
+		}
+	}()
+	if err := roster.ValidateTargetID(opts.TargetID); err != nil {
+		return nil, fmt.Errorf("import token: %w", err)
+	}
+	if err := CheckImportTokenID(opts.TokenID); err != nil {
+		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+	}
+	if err := CheckTokenSecret(opts.Secret); err != nil {
+		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+	}
+	want, err := normalizeGrants(opts.Grants)
+	if err != nil {
+		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+	}
+	bopts := Options{
+		TargetID: opts.TargetID, Host: opts.Host, Node: opts.Node, APIPort: opts.APIPort,
+		InsecureTLS: opts.InsecureTLS, RosterPath: opts.RosterPath, Passphrase: opts.Passphrase,
+	}
+	defaultHostNodeFromRoster(&bopts)
+	if bopts.Host == "" || bopts.Node == "" {
+		return nil, fmt.Errorf("import token %s: --host and --node are required for a target the roster does not have yet", opts.TargetID)
+	}
+	if bopts.APIPort == 0 {
+		bopts.APIPort = 8006
+	}
+
+	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
+	if err != nil {
+		return nil, fmt.Errorf("import token %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err)
+	}
+	defer func() { _ = unlock() }()
+
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return nil, fmt.Errorf("import token %s: load roster %s (create it first with `pveforge roster init`): %w", opts.TargetID, opts.RosterPath, err)
+	}
+	exists := r.Find(opts.TargetID) != nil
+	var held heldToken
+	if exists {
+		if held, err = loadHeldToken(bopts); err != nil {
+			return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+		}
+		// A held token that will not decrypt is refused outright, --replace
+		// included and before anything is validated: with a mistyped
+		// passphrase, "replace" would overwrite the only roster copy of a
+		// live token's secret. Bootstrap refuses the same state the same way.
+		if held.DecryptErr != nil {
+			return nil, fmt.Errorf("import token %s: %w: the roster holds %s; check the roster passphrase (%s) — nothing was validated or written, and --replace cannot override this", opts.TargetID, ErrTokenUndecryptable, kvjson.QuoteValue(held.ID), roster.PassphraseEnvVar)
+		}
+		if err := dryRunTokenWrite(opts.RosterPath, opts.TargetID); err != nil {
+			return nil, fmt.Errorf("import token %s: the roster would refuse the write, so nothing was validated or written: %w", opts.TargetID, err)
+		}
+	}
+	sameToken := held.ID == opts.TokenID && held.DecryptErr == nil && held.Secret == opts.Secret
+	if held.ID != "" && !sameToken && !opts.Replace {
+		return nil, fmt.Errorf("import token %s: %w: %s; pass --replace to replace the roster's copy (the held token is not revoked, and stays live on PVE)", opts.TargetID, ErrTokenAlreadyHeld, kvjson.QuoteValue(held.ID))
+	}
+
+	res := &Result{TokenID: opts.TokenID, TokenOutcome: OutcomeNotImported}
+	run := &runner{ctx: ctx, opts: bopts, api: api, fullID: opts.TokenID, want: want, res: res}
+	verdict, nonVerdict := run.validatePostMint(opts.Secret)
+	switch {
+	case verdict != nil:
+		res.Validation = ValidationFailed
+		return res, fmt.Errorf("import token %s: the token does not hold exactly the requested grants, so it was not imported (nothing on PVE was touched; if the owner is not root, its own privileges bound the token's): %w", opts.TargetID, verdict)
+	case nonVerdict != nil:
+		res.Validation = ValidationUnverified
+		return res, fmt.Errorf("import token %s: the token's grants could not be verified, so it was not imported (nothing on PVE was touched): %w", opts.TargetID, nonVerdict)
+	}
+	res.Validation = ValidationVerified
+	res.Grants = want
+
+	if sameToken {
+		res.TokenOutcome = OutcomeAlreadyHeld
+		return res, nil
+	}
+	if !exists {
+		if err := ensureTargetExists(bopts); err != nil {
+			return res, fmt.Errorf("import token %s: add the target to the roster: %w", opts.TargetID, err)
+		}
+	}
+	if err := writeTokenAuthFn(opts.RosterPath, opts.TargetID, roster.TokenWrite{TokenID: opts.TokenID, SecretPlaintext: []byte(opts.Secret)}, opts.Passphrase); err != nil {
+		return res, fmt.Errorf("import token %s: write the token to the roster: %w", opts.TargetID, err)
+	}
+	back, err := loadHeldToken(bopts)
+	if err != nil || back.ID != opts.TokenID || back.DecryptErr != nil || back.Secret != opts.Secret {
+		return res, fmt.Errorf("import token %s: the roster did not read back the token just written (check it with pveforge roster validate)", opts.TargetID)
+	}
+	res.TokenOutcome = OutcomeImported
+	if held.ID != "" && held.ID != opts.TokenID {
+		res.OrphanedToken = held.ID
+	}
+	return res, nil
 }

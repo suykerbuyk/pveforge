@@ -232,7 +232,7 @@ func renderBootstrapResult(out, errOut io.Writer, f kvjson.Format, target string
 			fmt.Fprintf(errOut, "warning: existing API token %s was revoked and NOT replaced; every copy of its secret, including this roster's, is dead\n", id)
 		}
 	}
-	if res.Validation == bootstrap.ValidationUnverified {
+	if res.Validation == bootstrap.ValidationUnverified && res.TokenOutcome != bootstrap.OutcomeNotImported {
 		fmt.Fprintf(errOut, "warning: token %s was persisted but its grants could not be verified\n", id)
 	}
 	if res.OrphanedToken != "" {

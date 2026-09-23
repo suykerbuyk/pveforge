@@ -31,6 +31,7 @@ func newRosterCmd() *cobra.Command {
 	cmd.PersistentFlags().String("roster", "", "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)")
 	cmd.AddCommand(newRosterInitCmd())
 	cmd.AddCommand(newRosterValidateCmd())
+	cmd.AddCommand(newRosterImportTokenCmd())
 	return cmd
 }
 

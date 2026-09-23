@@ -219,6 +219,7 @@ var lockingCommands = []string{
 	"pveforge network get",
 	"pveforge network set",
 	"pveforge node get",
+	"pveforge roster import-token",
 	"pveforge storage get",
 	"pveforge storage orphans",
 	"pveforge vm create",
