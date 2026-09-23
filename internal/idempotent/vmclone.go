@@ -79,6 +79,10 @@ type VMCloneClient interface {
 // the source's full disk footprint with no indication anything differed
 // from what was asked. Do not loosen this into a compatibility table
 // without confirming the real matrix against qa-pve-01/qa-pve-02 first.
+//
+// Not a PostApplier: its Read, like VMCreate's, reads an error as "absent",
+// so a post-Apply check could not tell a failed clone from an unreadable re-
+// read.
 type VMClone struct {
 	Client VMCloneClient
 	// SourceVMID is the VM being cloned FROM; it appears in the clone

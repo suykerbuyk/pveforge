@@ -76,6 +76,16 @@ type VMFieldsEnsure struct {
 	// kept apart from it so a removed key can
 	// never be reported as a field written with an empty value.
 	Deleted []string
+
+	// Pending and PendingDeletes are what PostApply found: the keys of
+	// Applied that PVE holds as a pending change, and the keys of Deleted
+	// whose removal is pending — stored in the VM's config but not yet
+	// adopted by the running guest, which takes them at its next cold boot.
+	// Only this Run's own changes are reported, in Applied's and Deleted's
+	// order; a pending change someone else left is not. Both are nil until
+	// PostApply has run.
+	Pending        []string
+	PendingDeletes []string
 }
 
 // Validate reports whether op is well-formed: VMID must be positive, at

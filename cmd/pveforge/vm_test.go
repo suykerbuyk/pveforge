@@ -23,6 +23,20 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
+// answerNothingPending answers vm set's post-apply read of
+// /nodes/{node}/qemu/{vmid}/pending with an empty list — nothing pending,
+// as for a stopped VM — so a fake written for the config endpoint neither
+// counts that read as a config GET nor turns it into a warning. It reports
+// whether it answered.
+func answerNothingPending(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/pending") {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"data":[]}`))
+	return true
+}
+
 // newVMConfigServer serves a stateful, minimal simulation of PVE's VM
 // config GET/PUT cycle — realistic enough for vm set's Read-then-write
 // flow (idempotent.VMFieldsEnsure) to observe its own writes on the
@@ -44,6 +58,9 @@ func newVMConfigServer(t *testing.T, failField string, failStatus int, failBody 
 	config := map[string]string{"digest": "d1"}
 	var mu sync.Mutex
 	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -436,6 +453,9 @@ func TestNewVMSetCmd_BlocksOnPendingMutation(t *testing.T) {
 	var mu sync.Mutex
 	config := map[string]string{"digest": "d1"}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		atomic.AddInt32(&hits, 1)
 		mu.Lock()
 		defer mu.Unlock()
@@ -515,6 +535,9 @@ func TestNewVMSetCmd_BlocksOnPendingMutation(t *testing.T) {
 func TestNewVMSetCmd_AlreadySatisfiedField_NoOp(t *testing.T) {
 	var writeAttempted int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":{"digest":"d1","cores":"4"}}`))
@@ -568,6 +591,9 @@ func TestNewVMSetCmd_ReportsAppliedFieldEvenWhenFinalReReadFails(t *testing.T) {
 	config := map[string]string{"digest": "d1"}
 	getCalls := 0
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -637,6 +663,9 @@ func TestVMSet_AfterErrWarning_ThroughRunRoot(t *testing.T) {
 	config := map[string]string{"digest": "d1"}
 	getCalls := 0
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -753,6 +782,9 @@ func TestVMSet_LineUnsafeTargetID_RefusedThroughRunRoot(t *testing.T) {
 func TestNewVMSetCmd_DuplicateFieldRejectedEvenWhenAlreadySatisfied(t *testing.T) {
 	var writeHit int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerNothingPending(w, r) {
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":{"digest":"d1","cores":"4"}}`))

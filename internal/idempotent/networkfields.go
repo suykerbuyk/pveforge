@@ -43,6 +43,10 @@ type NetworkFieldsClient interface {
 // canonicalHash) before this Op will commit — any difference in any
 // excluded interface aborts and reverts, same as 3a's own "no --force
 // bypass" discipline.
+//
+// Not a PostApplier: Apply verifies its own effect inside the
+// stage/guard/commit sequence (other-interface hashes and the kernel link
+// state), before and after the commit.
 type NetworkFieldsEnsure struct {
 	Client NetworkFieldsClient
 	Node   string

@@ -53,6 +53,10 @@ type VMCreateClient interface {
 // responsibility reflected in Params — this Op enforces nothing about it;
 // the one structural correctness issue this Op DOES own is netN/ipconfigN
 // pairing (see Validate).
+//
+// Not a PostApplier: its Read maps any GetVM error to "absent" (a pinned
+// contract), so a post-Apply check could not tell a failed create from an
+// unreadable re-read; that contract must change before it can opt in.
 type VMCreate struct {
 	Client VMCreateClient
 	VMID   int

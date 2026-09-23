@@ -86,6 +86,10 @@ type VMShutdownClient interface {
 // once real shutdown durations have been observed against a live host. See
 // pve.ShutdownVM's doc comment for why PVE's separate `forceStop`
 // parameter is out of scope permanently rather than merely deferred.
+//
+// Not a PostApplier yet: it has no CLI caller. Apply waits for the shutdown
+// task to end OK but does not re-check the VM's status afterwards — the
+// first candidate for PostApply once a command uses it.
 type VMShutdown struct {
 	Client VMShutdownClient
 	VMID   int

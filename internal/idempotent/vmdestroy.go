@@ -57,6 +57,9 @@ type VMDestroyClient interface {
 // Callers should use pve.IsTaskOutcomeUnknown (true for the timeout too)
 // to recognize these on the destroy step's WaitForTask call and avoid
 // blindly retrying, rather than treating them like any other Apply error.
+//
+// Not a PostApplier: Apply already verifies its own effect (step 3: the VM
+// is confirmed gone) before it returns.
 type VMDestroy struct {
 	Client VMDestroyClient
 	VMID   int

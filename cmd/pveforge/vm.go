@@ -294,7 +294,14 @@ status is still 0.
 
 Output: one line per field written, "<target>: <field>=<value>", then one
 per field deleted, "<target>: delete=<field>". A field already absent prints
-nothing, like a field already at its value.`,
+nothing, like a field already at its value.
+
+On a running VM, a change PVE cannot apply live is stored as pending and
+taken at the VM's next cold boot. After the batch, vm set asks PVE which of
+its own changes are pending and prints one stderr notice per such field
+("notice: <target>: vm N: <field> is pending: …", or "delete=<field> is
+pending"); stdout is unchanged and the exit status stays 0. If that check
+itself fails, one warning line says so instead.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kvArgs := args[2:]
@@ -393,6 +400,7 @@ nothing, like a field already at its value.`,
 			if res.AfterErr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: vm %d: the write was applied but its result could not be re-read: %s\n", args[0], vmid, kvjson.QuoteValue(res.AfterErr.Error()))
 			}
+			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.PostApplyErr)
 			return nil
 		},
 	}
@@ -403,6 +411,27 @@ nothing, like a field already at its value.`,
 	cmd.Flags().StringArrayVar(&deleteFlags, "delete", nil, "remove this config key entirely (PVE's delete parameter), rather than writing it empty; repeatable")
 	markMutating(cmd)
 	return cmd
+}
+
+// reportPending prints, on stderr, what VMFieldsEnsure.PostApply found:
+// one notice per change of this run that PVE holds as pending — stored in
+// the VM's config but taken by the running guest only at its next cold
+// boot — or, when that could not be checked, one warning quoting why. Every
+// line is advisory: the change was made, so the exit status stays 0 and
+// stdout (the lines a script parses) is untouched. Keys and the cause are
+// quoted like every other kv line; the target id is line-safe by the
+// roster's own validation.
+func reportPending(errOut io.Writer, targetID string, vmid int, op *idempotent.VMFieldsEnsure, postErr error) {
+	if postErr != nil {
+		fmt.Fprintf(errOut, "warning: %s: vm %d: the change was applied but whether it is pending could not be checked: %s\n", targetID, vmid, kvjson.QuoteValue(postErr.Error()))
+		return
+	}
+	for _, f := range op.Pending {
+		fmt.Fprintf(errOut, "notice: %s: vm %d: %s is pending: it takes effect at the VM's next cold boot\n", targetID, vmid, kvjson.QuoteKey(f))
+	}
+	for _, f := range op.PendingDeletes {
+		fmt.Fprintf(errOut, "notice: %s: vm %d: delete=%s is pending: it takes effect at the VM's next cold boot\n", targetID, vmid, kvjson.QuoteValue(f))
+	}
 }
 
 // printDeletedFields prints one "<target>: delete=<field>" line per key
