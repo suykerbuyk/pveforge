@@ -18,6 +18,19 @@ PREFIX  ?= $(HOME)/.local
 # recurse into all of them for no benefit).
 GO_DIRS := cmd internal
 
+# OFFLINE runs a go command read-only and without a module proxy: it can
+# neither fetch a module nor edit go.mod/go.sum, so an import that would
+# need a new module fails instead of being resolved silently, and a cold
+# module cache fails loudly ("run 'go mod download' once, online").
+# GOWORK=off: a developer's go.work must not redirect these checks — it
+# would resolve the fork to an unpinned local directory. OFFLINE also
+# overrides any GOFLAGS the developer has set, for these commands only.
+OFFLINE := GOFLAGS=-mod=readonly GOPROXY=off GOWORK=off
+
+# VULNDB, when set, is passed to govulncheck as its vulnerability database
+# (-db), e.g. file:///path/to/a/local/mirror for an offline run.
+VULNDB ?=
+
 ##@ General
 
 .PHONY: help
@@ -38,6 +51,9 @@ build: ## Build the pveforge binary into bin/
 test: ## Run unit tests (race detector + coverage — this project's standing verification bar)
 	go test ./... -race -cover -count=1 -timeout 20m
 
+.PHONY: check
+check: lint test ## Everything CI runs: lint (module hygiene, gofmt, vet) then the unit tests
+
 .PHONY: integration
 integration: ## Run integration-tagged tests (none exist yet — this project's live-host verification has so far been manual, ad-hoc SSH probes against a real PVE cluster, never wired into `go test`; kept as a placeholder so a future -tags=integration test file needs no Makefile change)
 	@if [ -z "$$(grep -rl --include='*.go' 'go:build integration\|+build integration' $(GO_DIRS) 2>/dev/null)" ]; then \
@@ -49,14 +65,30 @@ integration: ## Run integration-tagged tests (none exist yet — this project's 
 ##@ Lint
 
 .PHONY: lint
-lint: ## Check formatting (gofmt) and run static analysis (go vet) — read-only, fails on any issue
+lint: modcheck ## Check module hygiene (modcheck), formatting (gofmt) and static analysis (go vet) — read-only, fails on any issue
 	@fmtfiles="$$(gofmt -l $(GO_DIRS))"; \
 	if [ -n "$$fmtfiles" ]; then \
 		echo "gofmt: the following files need formatting (run 'make fmt'):"; \
 		echo "$$fmtfiles"; \
 		exit 1; \
 	fi
-	go vet ./...
+	$(OFFLINE) go vet ./...
+
+# The module-graph rules the go tool does not enforce (the go-proxmox fork
+# pinned to a vX.Y.Z-pveforge.N tag, no replace/exclude, the upstream
+# module absent) are a Go test, internal/sourceguard's
+# TestModuleGraph_ForkPinnedAndUpstreamAbsent, so `make test` runs them.
+.PHONY: modcheck
+modcheck: ## Module hygiene, offline and read-only: go.mod/go.sum tidy, go.sum matches the module cache, and everything builds without fetching
+	@echo "modcheck: go mod download (cache check)"; $(OFFLINE) go mod download || { echo "modcheck: the module cache is missing modules this module needs; run 'go mod download' once, online"; exit 1; }
+	@echo "modcheck: go mod tidy -diff"; $(OFFLINE) go mod tidy -diff || { echo "modcheck: go.mod/go.sum are not tidy (the diff above; run 'go mod tidy' and commit it)"; exit 1; }
+	@echo "modcheck: go mod verify"; $(OFFLINE) go mod verify
+	@echo "modcheck: offline build"; $(OFFLINE) go build ./...
+
+.PHONY: vuln
+vuln: ## Scan for known vulnerabilities with govulncheck (needs its database: online, or VULNDB=file:///mirror) — never part of lint/test
+	@command -v govulncheck >/dev/null 2>&1 || { echo "vuln: govulncheck is not installed: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0"; exit 1; }
+	govulncheck $(if $(VULNDB),-db $(VULNDB)) ./...
 
 .PHONY: fmt
 fmt: ## Reformat all Go source files in place (gofmt -w)

@@ -1,0 +1,43 @@
+# CI for pveforge. Inert until the operator pushes it to a remote with
+# GitHub Actions enabled: pushing, enabling Actions and every repository
+# setting are the operator's call, never an agent's.
+#
+# It runs exactly what a developer runs locally — `make check` (module
+# hygiene, gofmt, vet, then the unit tests with -race) and `make vuln` —
+# so CI adds no second definition of "passing". It never contacts a PVE
+# host: nothing here needs one.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Actions are pinned by commit SHA (a tag can be moved); the version
+      # each SHA was tagged as is noted beside it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout pushes; do not leave GITHUB_TOKEN in .git/config.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The only networked module step: it warms the module cache, so every
+      # gate after it runs offline (make modcheck uses GOPROXY=off).
+      - name: download modules
+        run: go mod download
+      - name: make check
+        run: make check
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - name: make vuln
+        run: make vuln
