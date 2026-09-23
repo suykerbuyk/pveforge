@@ -247,6 +247,7 @@ var stderrSites = map[string]int{
 	"main.go: main: runRoot(newRootCmd(), os.Stderr)":                        1,
 	"main.go: runRoot: fmt.Fprintln(stderr, kvjson.QuoteValue(err.Error()))": 1,
 	"main.go: runRoot: root.SetErr(stderr)":                                  1,
+	"vm.go: newVMSetCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"warning: %s: vm %d: the write was applied but its result could not be re-read: %s\\n\", kvjson.QuoteValue(args[0]), vmid, kvjson.QuoteValue(res.AfterErr.Error()))": 1,
 }
 
 // MS1c: every stderr site in this package is on stderrSites, exactly.

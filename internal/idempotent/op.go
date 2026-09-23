@@ -82,8 +82,14 @@ type Result struct {
 	// Before and After are Op.Read's string rendering of state at the
 	// start and end of the cycle — After equals Before on a no-op (or
 	// when Apply's own success can't be independently re-observed; see
-	// Run's own doc comment on the best-effort re-read).
+	// AfterErr and Run's own doc comment on the best-effort re-read).
 	Before, After string
+	// AfterErr is non-nil only when Apply succeeded but Run's final
+	// re-read failed: it wraps that read's cause, and After then holds
+	// Before's value rather than re-observed state. It never fails the
+	// Run — the mutation already happened — so a caller that reports
+	// current state decides for itself how to say it was not re-read.
+	AfterErr error
 }
 
 // Run acquires key's mutation lock (scoped to rosterPath, via
@@ -91,9 +97,10 @@ type Result struct {
 // under it: Read current state; if Satisfied and not force, return a
 // no-op Result without ever calling Apply; otherwise Apply, then
 // best-effort Read again to report the new state (a failure on this final
-// read does not undo or fail an otherwise-successful Apply — it only
-// means Result.After falls back to reporting the same value as
-// Result.Before, since the mutation itself already succeeded).
+// read does not undo or fail an otherwise-successful Apply — Result.After
+// falls back to reporting the same value as Result.Before, since the
+// mutation itself already succeeded, and Result.AfterErr carries the
+// read's cause).
 //
 // If Apply fails with an error wrapping ErrConflict, Run re-runs the
 // entire cycle from Read, up to maxConflictRetries times, before giving
@@ -132,6 +139,8 @@ func Run(ctx context.Context, rosterPath string, key lock.ObjectKey, op Op, forc
 		result.Changed = true
 		if after, readErr := op.Read(ctx); readErr == nil {
 			result.After = after
+		} else {
+			result.AfterErr = fmt.Errorf("idempotent: %s: re-read: %w", key, readErr)
 		}
 		return result, nil
 	}

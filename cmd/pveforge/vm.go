@@ -277,7 +277,10 @@ pveforge-managed mutation on this VM for its full duration
 same VM in flight at once. A field already at its wanted value is left
 untouched (no write attempted) and prints no confirmation line; output is
 a summary of only the fields that actually changed, printed once the
-whole batch resolves rather than streamed as each field applies.`,
+whole batch resolves rather than streamed as each field applies. If the
+writes succeed but the VM's config cannot be re-read afterwards, a
+one-line warning is printed on stderr, stdout is unchanged and the exit
+status is still 0.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kvArgs := args[2:]
@@ -348,10 +351,23 @@ whole batch resolves rather than streamed as each field applies.`,
 				return err
 			}
 
-			if _, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false); err != nil {
+			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
+			if err != nil {
 				return err
 			}
-			return printAppliedFields(cmd.OutOrStdout(), args[0], op.Applied, pairs)
+			if err := printAppliedFields(cmd.OutOrStdout(), args[0], op.Applied, pairs); err != nil {
+				return err
+			}
+			// The write succeeded, so this is advisory and the exit status
+			// stays 0 — failing it would push a caller into a needless
+			// retry. Stderr, not stdout, so the applied lines a script
+			// parses are unchanged; and quoted like runRoot's own error
+			// line, because the cause can carry server text (a 5xx body)
+			// that must not forge a second line.
+			if res.AfterErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: vm %d: the write was applied but its result could not be re-read: %s\n", kvjson.QuoteValue(args[0]), vmid, kvjson.QuoteValue(res.AfterErr.Error()))
+			}
+			return nil
 		},
 	}
 	addRosterFlag(cmd)
@@ -373,7 +389,8 @@ whole batch resolves rather than streamed as each field applies.`,
 // write — indistinguishable from a no-op, with no error either. Applied
 // is populated directly by the write that happened, not reconstructed
 // after the fact from two snapshots that might not disagree even when
-// something changed.
+// something changed. That failed re-read is no longer silent: Run
+// reports it as Result.AfterErr, which vm set prints as a stderr warning.
 //
 // applied is already in the order Apply wrote them (a subset of pairs,
 // in pairs' own relative order — see Apply), so no separate ordering step
