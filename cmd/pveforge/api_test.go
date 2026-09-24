@@ -231,7 +231,7 @@ func TestNewAPIMutatingCmd_UnsafeNoLockProceedsAndWarns(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"--roster", rosterPath, "--unsafe-no-lock", "/access/users", "qa-pve-01"})
+	cmd.SetArgs([]string{"--roster", rosterPath, "--unsafe-no-lock", "/cluster/options", "qa-pve-01"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -239,8 +239,38 @@ func TestNewAPIMutatingCmd_UnsafeNoLockProceedsAndWarns(t *testing.T) {
 	if !strings.Contains(errOut.String(), "warning") || !strings.Contains(errOut.String(), "--unsafe-no-lock") {
 		t.Errorf("expected a warning naming --unsafe-no-lock on stderr, got:\n%s", errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "/access/users") {
+	if !strings.Contains(errOut.String(), "/cluster/options") {
 		t.Errorf("expected the warning to name the unmatched path, got:\n%s", errOut.String())
+	}
+}
+
+// 6a, SR3: the raw passthrough cannot write /access with the roster's
+// token either, however the path is spelled: the refusal is in the
+// transport, and nothing reaches the server.
+func TestNewAPIMutatingCmd_RefusesAccessWrites(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		for _, p := range []string{"/access/users", "/nodes/../access/acl", "//access/password"} {
+			t.Run(method+p, func(t *testing.T) {
+				var hits atomic.Int64
+				srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					hits.Add(1)
+				}))
+				defer srv.Close()
+				rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+				t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+				cmd := newAPIVerbCmd(method, strings.ToLower(method))
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
+				cmd.SetOut(&bytes.Buffer{})
+				cmd.SetErr(&bytes.Buffer{})
+				cmd.SetArgs([]string{"--roster", rosterPath, "--unsafe-no-lock", p, "qa-pve-01"})
+				err := cmd.Execute()
+				if !errors.Is(err, pve.ErrAccessWriteRefused) || hits.Load() != 0 {
+					t.Fatalf("err = %v, server hits %d; want ErrAccessWriteRefused and none", err, hits.Load())
+				}
+			})
+		}
 	}
 }
 

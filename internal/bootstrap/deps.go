@@ -117,7 +117,8 @@ func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, 
 }
 
 // Grant is one requested ACL grant for the bootstrapped token, mirroring
-// pve.Grant (deps.go owns the pve import): Role on Path, with Propagate;
+// pve.Grant (deps.go owns the pve import for the token path; access.go
+// also imports it, for the /access types): Role on Path, with Propagate;
 // Privs, when non-nil, pins the privileges the grant must confer instead of
 // the role's live definition.
 type Grant struct {

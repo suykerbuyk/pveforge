@@ -1,0 +1,41 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-group-ensure - Create a PVE group, or set its comment
+
+
+.SH SYNOPSIS
+\fBpveforge group ensure <target-id> <groupid> [flags]\fP
+
+
+.SH DESCRIPTION
+Create a PVE group, or set its comment when --comment is given. Idempotent:
+a group already as asked is left alone, and root is never connected to. The
+write runs as root over SSH with pveum, as for user ensure. A group's members
+are set on its users (user ensure --group).
+
+
+.SH OPTIONS
+\fB--comment\fP=""
+	set the group's comment
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for ensure
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--no-ssh-key\fP[=false]
+	connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-group(1)\fP

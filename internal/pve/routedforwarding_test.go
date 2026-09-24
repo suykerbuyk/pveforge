@@ -976,6 +976,32 @@ func TestRoutedForwarding_RawRequest(t *testing.T) {
 		"DELETE /nodes/qa-pve-04/network/vmbr8?force=1")
 }
 
+// TestRoutedForwarding_AccessLists: the two /access list reads reach the
+// wire as GET /access/users?full=1 (full, so each user carries its groups)
+// and GET /access/groups, and come back parsed.
+func TestRoutedForwarding_AccessLists(t *testing.T) {
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/access/users", "/api2/json/access/users":
+			writeData(w, `[{"userid":"alice@pve","enable":1,"groups":"ops,dev"}]`)
+		case "/access/groups", "/api2/json/access/groups":
+			writeData(w, `[{"groupid":"ops","users":"alice@pve"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	rc := fwdClient(t, srv)
+	users, err := rc.ListUsers(context.Background())
+	if err != nil || len(users) != 1 || users[0].UserID != "alice@pve" || !slices.Equal(users[0].Groups, []string{"ops", "dev"}) {
+		t.Errorf("ListUsers = %+v, %v", users, err)
+	}
+	groups, err := rc.ListGroups(context.Background())
+	if err != nil || len(groups) != 1 || groups[0].GroupID != "ops" || !slices.Equal(groups[0].Users, []string{"alice@pve"}) {
+		t.Errorf("ListGroups = %+v, %v", groups, err)
+	}
+	assertRequests(t, rec.got(), "GET /access/users?full=1", "GET /access/groups")
+}
+
 // TestRoutedForwarding_LinkState pins the management-bridge canary. The
 // network Op reads it before and after a commit and compares the two reads.
 // A pass-through that ignored iface would read the same interface both times,
@@ -1690,6 +1716,8 @@ var routedClientSeam = map[string]seamEntry{
 	"VMNetMACs":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"APIDocTree":                 {tests: []string{"TestRoutedForwarding_APIDocTree"}},
 	"RawRequest":                 {tests: []string{"TestRoutedForwarding_RawRequest"}},
+	"ListUsers":                  {tests: []string{"TestRoutedForwarding_AccessLists"}},
+	"ListGroups":                 {tests: []string{"TestRoutedForwarding_AccessLists"}},
 	"SetVMConfigField":           {tests: []string{"TestRoutedForwarding_SetVMConfigField_REST", "TestRoutedForwarding_SetVMConfigField_SSHRootOnly", "TestRoutedForwarding_SetVMConfigField_SSHFallback", "TestRoutedForwarding_SetVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
 	"SetVMConfigFieldCAS":        {tests: []string{"TestRoutedForwarding_SetVMConfigFieldCAS", "TestRoutedForwarding_NodeBinding"}},
 	"UploadSnippet":              {tests: []string{"TestRoutedForwarding_UploadSnippet"}},

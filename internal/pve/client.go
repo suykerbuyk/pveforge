@@ -12,10 +12,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
@@ -84,16 +88,33 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		timeout = DefaultTimeout
 	}
 
+	// One *http.Client serves every request this Client makes: RawRequest,
+	// the direct writers (vmconfig.go, schema.go), and go-proxmox itself,
+	// which is handed it (WithHTTPClient). Its transport is the
+	// accessWriteGuard, so no request of any of them can write PVE's
+	// /access API with the roster's token.
+	httpClient := newHTTPClient(timeout, cfg.InsecureTLS)
 	opts := []proxmox.Option{
 		proxmox.WithAPIToken(cfg.TokenID, cfg.TokenSecret),
-		proxmox.WithTimeout(timeout),
-	}
-	if cfg.InsecureTLS {
-		opts = append(opts, proxmox.WithInsecureSkipVerify())
+		proxmox.WithHTTPClient(httpClient),
 	}
 
-	httpClient := &http.Client{Timeout: timeout}
-	if cfg.InsecureTLS {
+	return &Client{
+		pc:         proxmox.NewClient(baseURL, opts...),
+		baseURL:    baseURL,
+		authHeader: fmt.Sprintf("PVEAPIToken=%s=%s", cfg.TokenID, cfg.TokenSecret),
+		httpClient: httpClient,
+	}, nil
+}
+
+// newHTTPClient is the one constructor of an HTTP client in pveforge's
+// production code (cmd/pveforge's transport guard holds that): its
+// transport is always the accessWriteGuard, in front of
+// http.DefaultTransport resolved per request, or, with insecureTLS, a clone
+// of it that skips certificate verification.
+func newHTTPClient(timeout time.Duration, insecureTLS bool) *http.Client {
+	var next http.RoundTripper // nil: http.DefaultTransport, at request time
+	if insecureTLS {
 		// Clone http.DefaultTransport rather than starting from a bare
 		// &http.Transport{} literal: DefaultTransport carries
 		// Proxy: http.ProxyFromEnvironment (HTTP_PROXY/HTTPS_PROXY/
@@ -106,15 +127,80 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		// transport was ever affected.
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit opt-in via cfg.InsecureTLS, mirrors go-proxmox's own WithInsecureSkipVerify
-		httpClient.Transport = transport
+		next = transport
 	}
+	return &http.Client{Timeout: timeout, Transport: accessWriteGuard{next: next}}
+}
 
-	return &Client{
-		pc:         proxmox.NewClient(baseURL, opts...),
-		baseURL:    baseURL,
-		authHeader: fmt.Sprintf("PVEAPIToken=%s=%s", cfg.TokenID, cfg.TokenSecret),
-		httpClient: httpClient,
-	}, nil
+// ErrAccessWriteRefused: a request that would write PVE's /access API
+// (users, groups, tokens, ACLs, roles, realms, passwords) with the roster's
+// token. pveforge writes those only as root over SSH (6a); the token must
+// never be able to, whatever code path builds the request.
+var ErrAccessWriteRefused = errors.New("refusing to write PVE's /access API with the roster's token")
+
+// AccessWriteError is the refusal, naming the request. It matches
+// ErrAccessWriteRefused.
+type AccessWriteError struct {
+	Method, Path string
+}
+
+func (e *AccessWriteError) Error() string {
+	return fmt.Sprintf("%s %s: %s; principals and ACLs are written as root over SSH", e.Method, e.Path, ErrAccessWriteRefused)
+}
+
+func (e *AccessWriteError) Is(target error) bool { return target == ErrAccessWriteRefused }
+
+// accessWriteGuard is the RoundTripper every pveforge HTTP request passes
+// through. It refuses, before the request leaves the process, any method
+// other than GET or HEAD whose path is /access or below it. The static
+// guards cannot see every way to spell such a path or reach such a call
+// (concatenation, formatting, dot segments, doubled slashes, method values,
+// go-proxmox's own request methods); this sees the request itself.
+type accessWriteGuard struct {
+	next http.RoundTripper
+}
+
+func (g accessWriteGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	if isAccessWrite(req) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, &AccessWriteError{Method: req.Method, Path: req.URL.Path}
+	}
+	next := g.next
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	return next.RoundTrip(req)
+}
+
+// accessPathRE matches a cleaned path addressing /access: at the root, or
+// below an API format prefix (/api2/json/access, /api2/extjs/access, …),
+// wherever that prefix sits under a base path.
+var accessPathRE = regexp.MustCompile(`(^|/)api2/[^/]+/access(/|$)|^/access(/|$)`)
+
+// isAccessWrite reports whether req writes /access: a method other than
+// GET or HEAD, and a path that, unescaped (repeatedly, so an encoded
+// segment cannot hide) and cleaned of dot segments and doubled slashes,
+// addresses /access. Case is ignored, which only ever refuses more.
+func isAccessWrite(req *http.Request) bool {
+	if req.Method == http.MethodGet || req.Method == http.MethodHead {
+		return false
+	}
+	candidates := []string{req.URL.Path, req.URL.EscapedPath()}
+	for p := req.URL.EscapedPath(); ; {
+		u, err := url.PathUnescape(p)
+		if err != nil || u == p {
+			break
+		}
+		candidates, p = append(candidates, u), u
+	}
+	for _, p := range candidates {
+		if accessPathRE.MatchString(strings.ToLower(path.Clean("/" + p))) {
+			return true
+		}
+	}
+	return false
 }
 
 // ErrNotAuthorized is returned (wrapped) when PVE rejects a request as

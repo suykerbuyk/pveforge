@@ -168,9 +168,13 @@ func TestNewClient_InsecureTLS_PreservesProxyFromEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	transport, ok := c.httpClient.Transport.(*http.Transport)
+	guard, ok := c.httpClient.Transport.(accessWriteGuard)
 	if !ok {
-		t.Fatalf("expected httpClient.Transport to be *http.Transport, got %T", c.httpClient.Transport)
+		t.Fatalf("expected httpClient.Transport to be the accessWriteGuard, got %T", c.httpClient.Transport)
+	}
+	transport, ok := guard.next.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected the guard's next transport to be *http.Transport, got %T", guard.next)
 	}
 	if transport.Proxy == nil {
 		t.Fatal("expected the InsecureTLS transport to preserve a non-nil Proxy (http.ProxyFromEnvironment), got nil")

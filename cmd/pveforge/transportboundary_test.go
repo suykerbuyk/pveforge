@@ -164,7 +164,7 @@ var (
 	// RoundTripper, so http.DefaultTransport.RoundTrip(req) opens a
 	// connection while naming neither a Client nor a Transport — the Sel
 	// is "DefaultTransport", which tgtHTTPTransport above does not match.
-	// It witnesses itself at internal/pve/client.go:103, where the
+	// It witnesses itself at newHTTPClient (internal/pve/client.go), where the
 	// in-boundary code clones it.
 	tgtHTTPDefaultTransport = sourceguard.Target{ImportPath: "net/http", Name: "DefaultTransport"}
 
@@ -248,10 +248,10 @@ var transportWitnesses = []struct {
 	file   string
 	target sourceguard.Target
 }{
-	{"internal/pve/client.go", tgtHTTPClient},           // :57 field, :91 literal
-	{"internal/pve/client.go", tgtHTTPTransport},        // :103, the (*http.Transport) assertion
-	{"internal/pve/client.go", tgtHTTPDefaultTransport}, // :103, the global being cloned
-	{"internal/pve/client.go", tgtProxmoxNewClient},     // :109
+	{"internal/pve/client.go", tgtHTTPClient},           // the field, and newHTTPClient's literal
+	{"internal/pve/client.go", tgtHTTPTransport},        // newHTTPClient's (*http.Transport) assertion
+	{"internal/pve/client.go", tgtHTTPDefaultTransport}, // newHTTPClient's clone, and the guard's per-request default
+	{"internal/pve/client.go", tgtProxmoxNewClient},     // NewClient, handed newHTTPClient's client
 	{"internal/sshexec/client.go", tgtSSHNewClientConn}, // :119
 	{"internal/sshexec/client.go", tgtSSHNewClient},     // :124
 	{"internal/pve/routed.go", tgtSshexecDial},          // :528, inside an AllowDir

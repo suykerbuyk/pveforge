@@ -38,7 +38,7 @@ import (
 // allowed key, and one "exec" request per session, answered by the
 // configured handler. Every command it receives is recorded in order.
 //
-// Configure it (AllowKey, HandleExec) BEFORE Start, and never after: the
+// Configure it (AllowKey, AllowPassword, HandleExec) BEFORE Start, and never after: the
 // accept loop reads that configuration from other goroutines, so a write
 // after Start is a data race (the one internal/pve's own fake once had —
 // pveforge-fix-fake-ssh-server-test-races). Both setters panic once Start
@@ -49,8 +49,10 @@ type SSHServer struct {
 	addr       string
 
 	allowedPub ssh.PublicKey
-	handleExec func(cmd string) (stdout, stderr string, exitCode int)
-	started    bool
+	// allowedUser/allowedPassword, when set, also admit password auth.
+	allowedUser, allowedPassword string
+	handleExec                   func(cmd string) (stdout, stderr string, exitCode int)
+	started                      bool
 
 	mu   sync.Mutex
 	cmds []string
@@ -88,6 +90,13 @@ func NewSSHServer(t testing.TB) *SSHServer {
 func (s *SSHServer) AllowKey(pub ssh.PublicKey) {
 	s.mustNotBeStarted("AllowKey")
 	s.allowedPub = pub
+}
+
+// AllowPassword also admits password auth as user with password, for a
+// caller's keyless path. Panics after Start.
+func (s *SSHServer) AllowPassword(user, password string) {
+	s.mustNotBeStarted("AllowPassword")
+	s.allowedUser, s.allowedPassword = user, password
 }
 
 // HandleExec sets the handler that answers every exec request with its
@@ -147,6 +156,12 @@ func (s *SSHServer) handleConn(conn net.Conn) {
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if s.allowedPub != nil && string(key.Marshal()) == string(s.allowedPub.Marshal()) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("auth rejected")
+		},
+		PasswordCallback: func(m ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			if s.allowedPassword != "" && m.User() == s.allowedUser && string(pw) == s.allowedPassword {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("auth rejected")

@@ -4,15 +4,14 @@
 // TWO SEAMS, NOT ONE. pveforge reaches the network two ways, and one hook
 // cannot see both:
 //
-//   - HTTP, via http.DefaultTransport. Both of internal/pve's stacks resolve
-//     it: with InsecureTLS off, go-proxmox's own *http.Client carries a nil
-//     Transport (it never sets one — the only three sites that would are
-//     gated on WithProxy, WithRetry or WithHTTPClient, none of which
-//     internal/pve/client.go passes), so http.Client.send resolves the global
-//     at REQUEST time; with InsecureTLS on, both go-proxmox (via its
-//     ensureTransport) and internal/pve/client.go:103 Clone() the global at
-//     CONSTRUCTION time, and (*http.Transport).Clone copies DialContext, so
-//     the hook rides along into both clones. Install covers this seam.
+//   - HTTP, via http.DefaultTransport. internal/pve has one *http.Client,
+//     built by newHTTPClient (internal/pve/client.go) and handed to
+//     go-proxmox too (WithHTTPClient), so both of its stacks share it. Its
+//     transport is the accessWriteGuard: with InsecureTLS off the guard
+//     resolves the global at REQUEST time; with InsecureTLS on,
+//     newHTTPClient Clone()s the global at CONSTRUCTION time, and
+//     (*http.Transport).Clone copies DialContext, so the hook rides along
+//     into the clone. Install covers this seam.
 //
 //   - SSH, via internal/sshexec's own net.Dialer at client.go:60. That dial
 //     never touches http.DefaultTransport, so the HTTP seam is blind to it.
@@ -30,7 +29,7 @@
 // WHY AN *http.Transport CLONE AND NEVER A CUSTOM RoundTripper. Installing a
 // bare http.RoundTripper as http.DefaultTransport panics
 // pve.NewClient(ClientConfig{InsecureTLS: true}) on the unchecked type
-// assertion at internal/pve/client.go:103 ("interface conversion:
+// assertion at newHTTPClient (internal/pve/client.go) ("interface conversion:
 // http.RoundTripper is ..., not *http.Transport"), and go-proxmox's
 // ensureTransport carries the identical unguarded assertion. Cloning the real
 // transport and overriding one field keeps every other field — Proxy in

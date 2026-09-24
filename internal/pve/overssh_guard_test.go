@@ -56,9 +56,21 @@ func TestOverSSHFallbacks_OnlyAtTheRootOnlyRefusalSites(t *testing.T) {
 			"Only a caller handling PVE's root-only refusal of a CAS change may use one; a new site needs its own review.",
 			strings.Join(lines, "\n"))
 	}
-	for _, s := range overSSHSites {
-		if got := len(res.Allowed(s.file, s.tgt)); got != s.count {
-			t.Errorf("%s: %d call(s) of %s, want exactly %d", s.file, got, s.tgt, s.count)
+	// Every fallback, in every allowed file, has exactly its listed count (0
+	// when unlisted): AllowFiles admits a file for both targets, so checking
+	// only the listed pairs would let a DeleteVMConfigFieldOverSSH call into
+	// bridgeisolation.go, which is allowed only the Set.
+	for file := range seen {
+		for _, tgt := range []sourceguard.Target{tgtOverSSHSet, tgtOverSSHDelete} {
+			want := 0
+			for _, s := range overSSHSites {
+				if s.file == file && s.tgt == tgt {
+					want = s.count
+				}
+			}
+			if got := len(res.Allowed(file, tgt)); got != want {
+				t.Errorf("%s: %d call(s) of %s, want exactly %d", file, got, tgt, want)
+			}
 		}
 	}
 }

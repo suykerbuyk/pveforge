@@ -129,6 +129,17 @@ func (c *RoutedClient) GetStorage(ctx context.Context, node, name string) (*prox
 	return c.rest.GetStorage(ctx, node, name)
 }
 
+// ListUsers reads the users this target's token can see (Client.ListUsers).
+func (c *RoutedClient) ListUsers(ctx context.Context) ([]AccessUser, error) {
+	return c.rest.ListUsers(ctx)
+}
+
+// ListGroups reads the groups this target's token can see
+// (Client.ListGroups).
+func (c *RoutedClient) ListGroups(ctx context.Context) ([]AccessGroup, error) {
+	return c.rest.ListGroups(ctx)
+}
+
 func (c *RoutedClient) GetStorages(ctx context.Context, node string) (proxmox.Storages, error) {
 	return c.rest.GetStorages(ctx, node)
 }

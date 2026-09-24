@@ -43,6 +43,8 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `roster import-token` | Put an API token minted outside pveforge into the roster, once PVE proves its grants |
 | `bootstrap` | Turn a PAM login into a scoped API token held in the roster |
 | `exec <target> -- <command>` | Run a command with the target's API token in its environment |
+| `user ensure`, `group ensure` | Create a PVE user or group, or bring it to the state asked for (as root over SSH) |
+| `acl grant` | Grant a role on a path to a user, group or token (as root over SSH) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
 | `network set`, `network bridge create` / `destroy` | Change node-level network interfaces |
@@ -85,7 +87,7 @@ not.
 |---|---|
 | `PVEFORGE_ROSTER` | Roster path, when `--roster` is not given |
 | `PVEFORGE_ROSTER_PASSPHRASE` | The roster passphrase; without it, a terminal prompt (never for `roster import-token`, whose stdin is the token secret). Removed from `exec`'s command's environment |
-| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password; without it, a terminal prompt. Removed from `exec`'s command's environment |
+| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password, and root's password for `user ensure`, `group ensure` and `acl grant` with `--no-ssh-key`; without it, a terminal prompt. Removed from `exec`'s command's environment |
 | `PVEFORGE_PVE_AUTHORIZATION` | Set by `exec` in its command's environment, never read by pveforge: the `Authorization` header value `PVEAPIToken=<token id>=<secret>` |
 
 ## Bootstrap
@@ -161,6 +163,55 @@ else passes through. Its exit status is the command's own.
   `printenv`, `set`, a debug log). It prints the secret, into a terminal, a
   log or an agent's transcript.
 
+## Users, groups and ACL grants
+
+```sh
+pveforge group ensure qa-pve-01 ops --comment "Ops team"
+pveforge user ensure qa-pve-01 alice@pve --group ops --email alice@example.com
+pveforge acl grant qa-pve-01 --group ops --grant /pool/lab:PVEVMUser::1
+```
+
+These write as root over SSH with `pveum`, never with the roster's API token,
+which never holds `User.Modify` or `Permissions.Modify`. A target that holds no
+SSH key needs `--no-ssh-key`, which connects as root with the PVE password for
+that run, as `bootstrap --no-ssh-key` does.
+
+- `user ensure` and `group ensure` are idempotent. The read that decides
+  whether to write uses the token (root's `pveum` when the token may not read
+  users or groups), so a run with nothing to change never connects as root.
+  `--enable`/`--disable` set a user's state; with neither, an existing user
+  keeps its state. Group membership is only ever added. A `@pve` user is
+  created with no password; set one with `pveum passwd`. Disabling the user
+  that owns the roster's own token is refused.
+- Joining a group grants that group's ACLs, so `--group` is guarded like a
+  grant: the user owning the roster's own token may join no group (always),
+  and no user may join a group holding, anywhere, a role that confers an
+  escalating privilege (listed under `acl grant` below), unless
+  `--allow-escalating-role` is given, which prints a warning for every such
+  holding of every group joined. Both lists are read as root before the
+  write.
+- `acl grant` takes `--grant PATH:ROLE[:PRIVS[:PROPAGATE]]` as `bootstrap`
+  does: propagate is 0 unless given, and PRIVS must be exactly the role's. It
+  refuses a grant to the roster's own token, to its user, or to a group that
+  user is in, always; and a role conferring an escalating privilege —
+  `Permissions.Modify`, `User.Modify`, `Sys.Modify`, `Realm.Allocate`,
+  `Sys.Console`, `VM.Monitor`, `Realm.AllocateUser`, `Datastore.Allocate` or
+  `Mapping.Modify` — unless `--allow-escalating-role` is given, which prints a
+  warning. After granting,
+  it reads the ACL list back as root and requires each exact entry.
+- **The checks are of the state as read, not as it stays.** They see the
+  groups, ACLs and roles as read just before the write. A group granted an
+  escalating role, or a role widened with `pveum role modify`, after a user
+  joins it is not caught, and the user holds it unwarned; a grant to a group
+  reaches members who join later. Nothing serialises `user ensure` against
+  `acl grant`, or either against changes made outside pveforge. Review with
+  `pveum acl list` after changing a group's grants.
+- Nothing here deletes a user or group or revokes a grant: use `pveum`.
+- pveforge never writes PVE's `/access` API with the roster's token. Every
+  request it makes passes through one HTTP transport that refuses any method
+  but GET or HEAD on `/access` or below it, before the request is sent; that
+  includes `pveforge api post|put|delete /access/...`.
+
 ## Idempotence and locking
 
 `vm set` and the `network` commands read the object first and write only what
@@ -168,8 +219,8 @@ differs, so a repeat run changes nothing. `vm create` instead fails if the
 VMID is already taken, and never picks another. `api` is a raw passthrough and
 is not idempotent.
 
-Commands that touch a VM, node, storage or network object take a per-object
-lock (files under `<roster>.locks/`): a mutation takes it exclusively, and a
+Commands that touch a VM, node, storage or network object, or a user or
+group (`user ensure`, `group ensure`), take a per-object lock (files under `<roster>.locks/`): a mutation takes it exclusively, and a
 read shares it. So two pveforge processes never mutate the same object at once,
 and a read waits for a mutation in progress. `--lock-wait` bounds the wait for another
 process's lock: 0 means the 15m default, and the maximum is 1h.
@@ -247,6 +298,11 @@ owed to the nested PVE test harness:
 - `storage orphans`: how linked clones' volumes are identified. **Do not treat
   its output as safe to delete without checking.**
 - The exact error answers of network bridge and interface changes.
+- `user ensure`, `group ensure` and `acl grant`: the `pveum` flags they use,
+  the JSON the `/access` lists answer with (read from PVE's API schema), and
+  the ACL list's entry shape the grant's read-back requires. A shape that
+  differs is refused as unverifiable, and a read-back that cannot find the
+  grant fails the command after the grant was made.
 - Library code with no command yet: snapshot rules (the reserved names
   `current` and `pending`, leaf-only deletion, refusing to roll back on ZFS),
   full vs linked clones, VM destroy beyond PVE's documentation, and

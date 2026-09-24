@@ -271,17 +271,20 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 	}
 	walk(root, "")
 	want := []string{
+		"acl", "acl/grant",
 		"api", "api/delete", "api/get", "api/post", "api/put",
 		"bootstrap",
 		"completion", "completion/bash", "completion/fish", "completion/powershell", "completion/zsh",
 		"discover", "discover/device", "discover/network", "discover/node", "discover/storage", "discover/vm",
 		"exec",
+		"group", "group/ensure",
 		"help",
 		"network", "network/bridge", "network/bridge/create", "network/bridge/destroy", "network/get", "network/set",
 		"node", "node/get",
 		"roster", "roster/import-token", "roster/init", "roster/validate",
 		"schema",
 		"storage", "storage/get", "storage/orphans",
+		"user", "user/ensure",
 		"vm", "vm/create", "vm/get", "vm/set",
 	}
 	slices.Sort(paths)

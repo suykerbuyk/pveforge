@@ -186,7 +186,7 @@ func TestEverySeedCanActuallyFire(t *testing.T) {
 
 // TestPreInstallScan_CatchesTheCapturedTransportIdioms pins the three forms
 // that survived the dead-seed defect, including the one the Chair's break-test
-// found: the exact expression internal/pve/client.go:103 uses, which is the
+// found: the exact expression newHTTPClient (internal/pve/client.go) uses, which is the
 // line most likely to be copied into a package-level initialiser by someone
 // building a customised client.
 func TestPreInstallScan_CatchesTheCapturedTransportIdioms(t *testing.T) {
