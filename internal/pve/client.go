@@ -224,6 +224,9 @@ func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
 	if ns == nil {
 		return nil, fmt.Errorf("list nodes: %w: list payload was null", ErrUnverifiableRead)
 	}
+	if i := nullEntry(ns); i >= 0 {
+		return nil, fmt.Errorf("list nodes: %w: entry %d is null", ErrUnverifiableRead, i)
+	}
 	names := make([]string, 0, len(ns))
 	for _, n := range ns {
 		names = append(names, n.Node)

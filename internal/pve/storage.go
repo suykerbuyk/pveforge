@@ -47,6 +47,9 @@ func (c *Client) GetStorages(ctx context.Context, node string) (proxmox.Storages
 	if storages == nil {
 		return nil, fmt.Errorf("get storages on %q: %w: list payload was null", node, ErrUnverifiableRead)
 	}
+	if i := nullEntry(storages); i >= 0 {
+		return nil, fmt.Errorf("get storages on %q: %w: entry %d is null", node, ErrUnverifiableRead, i)
+	}
 	for _, s := range storages {
 		s.Node = node
 	}
@@ -93,6 +96,9 @@ func (c *Client) GetStorageVolumes(ctx context.Context, node, storage string) ([
 	}
 	if content == nil {
 		return nil, fmt.Errorf("get volumes on storage %q on %q: %w: list payload was null", storage, node, ErrUnverifiableRead)
+	}
+	if i := nullEntry(content); i >= 0 {
+		return nil, fmt.Errorf("get volumes on storage %q on %q: %w: entry %d is null", storage, node, ErrUnverifiableRead, i)
 	}
 	return content, nil
 }

@@ -53,6 +53,9 @@ func (c *Client) GetVMs(ctx context.Context, node string) (proxmox.VirtualMachin
 	if vms == nil {
 		return nil, fmt.Errorf("get vms on %q: %w: list payload was null", node, ErrUnverifiableRead)
 	}
+	if i := nullEntry(vms); i >= 0 {
+		return nil, fmt.Errorf("get vms on %q: %w: entry %d is null", node, ErrUnverifiableRead, i)
+	}
 	for _, v := range vms {
 		v.Node = node
 	}

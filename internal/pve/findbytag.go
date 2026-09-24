@@ -60,6 +60,9 @@ func (c *Client) FindByTag(ctx context.Context, tag string) (*proxmox.ClusterRes
 	if resources == nil {
 		return nil, fmt.Errorf("find by tag %q: %w: resource list payload was null", tag, ErrUnverifiableRead)
 	}
+	if i := nullEntry(resources); i >= 0 {
+		return nil, fmt.Errorf("find by tag %q: %w: resource list entry %d is null", tag, ErrUnverifiableRead, i)
+	}
 
 	var matches []*proxmox.ClusterResource
 	for _, r := range resources {
