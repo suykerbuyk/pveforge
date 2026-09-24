@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
 )
@@ -93,8 +95,8 @@ func setTaskTimings(interval, timeout time.Duration, inTestBinary bool) (restore
 }
 
 // TaskFailedError reports that a PVE task ran to completion and PVE
-// reported it unsuccessful: status "stopped" with an ExitStatus other than
-// "OK". It is the ONLY WaitForTask error that describes an observed
+// reported it unsuccessful: status "stopped" with an ExitStatus that
+// taskExitSucceeded does not accept. It is the ONLY WaitForTask error that describes an observed
 // outcome. Every other WaitForTask error means the outcome was never
 // observed at all; see IsTaskOutcomeUnknown. Whether a TaskFailedError is
 // safe to retry is still the caller's call, but it is the only class where
@@ -106,6 +108,44 @@ type TaskFailedError struct {
 
 func (e *TaskFailedError) Error() string {
 	return fmt.Sprintf("task %s failed: %s", e.UPID, e.ExitStatus)
+}
+
+// taskExitOK is the exit status of a task that completed cleanly.
+const taskExitOK = "OK"
+
+// taskExitWarnings matches the exit status of a task that completed but
+// logged warnings.
+var taskExitWarnings = regexp.MustCompile(`^WARNINGS: \d+$`)
+
+// taskExitSucceeded reports whether a stopped task's exit status is a
+// success, by Proxmox's own rule (PVE::UPID::status_is_error in
+// pve-common): "OK", or exactly "WARNINGS: <n>" for a task that completed
+// but logged warnings — PVE's worker exits 0 for both. Anything else is the
+// task's error message. It is the one place pveforge judges an exit status.
+//
+// Derived from pve-common's source; not yet verified against a live host
+// (see pveforge-nested-pve-test-harness's live-check list).
+func taskExitSucceeded(exitStatus string) bool {
+	return exitStatus == taskExitOK || taskExitWarnings.MatchString(exitStatus)
+}
+
+// TaskWarningsFunc is told about each task WaitForTask saw succeed with
+// warnings: its node, UPID and exit status ("WARNINGS: <n>").
+type TaskWarningsFunc func(node, upid, exitStatus string)
+
+type taskWarningsKey struct{}
+
+// WithTaskWarnings returns ctx carrying f, which WaitForTask calls for every
+// task under ctx that succeeds with warnings. cmd/pveforge installs one for
+// every command, so such a success always reaches the operator.
+func WithTaskWarnings(ctx context.Context, f TaskWarningsFunc) context.Context {
+	return context.WithValue(ctx, taskWarningsKey{}, f)
+}
+
+func reportTaskWarnings(ctx context.Context, node, upid, exitStatus string) {
+	if f, ok := ctx.Value(taskWarningsKey{}).(TaskWarningsFunc); ok && f != nil {
+		f(node, upid, exitStatus)
+	}
 }
 
 // taskOutcomeUnknownError marks every WaitForTask error that is not a
@@ -134,8 +174,9 @@ const maxConsecutiveTransientPolls = 3
 //
 // Every non-nil error is exactly one of two classes:
 //
-//   - *TaskFailedError: PVE reported the task stopped with a non-OK exit
-//     status. The task ran; this is its outcome.
+//   - *TaskFailedError: PVE reported the task stopped with an exit status
+//     that is not a success (taskExitSucceeded). The task ran; this is its
+//     outcome.
 //   - IsTaskOutcomeUnknown: everything else. The task was dispatched but
 //     its outcome was never observed: the deadline passed, ctx was
 //     canceled, a status poll failed, a poll's payload was outside PVE's
@@ -155,6 +196,8 @@ const maxConsecutiveTransientPolls = 3
 //
 //   - running: keep polling, and reset the transient count;
 //   - stopped with exit status "OK": success;
+//   - stopped with "WARNINGS: <n>": success, reported to ctx's
+//     TaskWarningsFunc (WithTaskWarnings) so it is never silent;
 //   - stopped with any other non-empty exit status: *TaskFailedError;
 //   - TRANSIENT, keep polling: a transport error (*url.Error), a
 //     *proxmox.StatusError 502/503/504/595-599, or a payload with no
@@ -236,7 +279,10 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 		case cause == nil && task.Status == proxmox.TaskRunning:
 			transient = 0
 		case cause == nil && task.Status == "stopped":
-			if task.ExitStatus == "OK" {
+			if taskExitSucceeded(task.ExitStatus) {
+				if task.ExitStatus != taskExitOK {
+					reportTaskWarnings(ctx, node, upid, task.ExitStatus)
+				}
 				return nil
 			}
 			if task.ExitStatus == "" {
@@ -272,24 +318,43 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 // before anything parses it. WaitForTask and UPIDNode both call it and
 // neither carries any shape logic of its own, so the two cannot drift.
 //
-// The rules: the "UPID:" prefix PVE always writes; at least 8
-// colon-separated fields (a real UPID has 9), which is what keeps a
-// 7-field string away from proxmox.NewTask's sp[7] panic described on
-// WaitForTask; and a non-empty node field, since an empty node can never
-// match the node a caller waits on and would otherwise reach NewTask as a
-// task with no node at all.
+// The rule is PVE's own UPID grammar, from PVE::UPID::decode in
+// pve-common (src/PVE/UPID.pm), which writes them as
+// "UPID:%s:%08X:%08X:%08X:%s:%s:%s:" and parses them with:
+//
+//		^UPID:<node>:<pid>:<pstart>:<starttime>:<type>:<id>:<user>:$
+//
+//	  - node: [a-zA-Z0-9], optionally [a-zA-Z0-9-]* then [a-zA-Z0-9];
+//	  - pid and starttime: exactly 8 hex digits; pstart: 8 or 9;
+//	  - type and user: one or more, and id: zero or more, of any character
+//	    but ':', '/' and whitespace.
+//
+// Perl's \s there covers Unicode whitespace (U+2028, U+0085, ...); Go's
+// regexp \s does not, so whitespace is refused here rune by rune
+// (unicode.IsSpace), and so is a control character, which no PVE writer
+// puts in a UPID. Anything else is refused as an unverifiable read before
+// any poll: a UPID outside this grammar is not one PVE issued, and it
+// would otherwise reach proxmox.NewTask (whose sp[7] panic WaitForTask
+// describes), a poll URL, and the stderr lines that print it.
+//
+// Derived from pve-common's source; not yet verified against a live host
+// (see pveforge-nested-pve-test-harness's live-check list).
 func validateUPIDShape(upid string) error {
-	if !strings.HasPrefix(upid, "UPID:") {
-		return fmt.Errorf("malformed upid %q: missing UPID: prefix", upid)
+	m := upidGrammar.FindStringSubmatch(upid)
+	if m == nil {
+		return fmt.Errorf("malformed upid %q: not PVE's UPID:<node>:<pid>:<pstart>:<starttime>:<type>:<id>:<user>: form: %w", upid, ErrUnverifiableRead)
 	}
-	if strings.Count(upid, ":") < 7 {
-		return fmt.Errorf("malformed upid %q: expected at least 8 colon-separated fields", upid)
-	}
-	if strings.SplitN(upid, ":", 3)[1] == "" {
-		return fmt.Errorf("malformed upid %q: empty node field", upid)
+	for i, field := range []string{"type", "id", "user"} {
+		if strings.ContainsFunc(m[i+1], func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+			return fmt.Errorf("malformed upid %q: its %s field holds whitespace or a control character: %w", upid, field, ErrUnverifiableRead)
+		}
 	}
 	return nil
 }
+
+// upidGrammar is PVE::UPID::decode's pattern, less its \s, which
+// validateUPIDShape applies rune by rune. Its groups are type, id and user.
+var upidGrammar = regexp.MustCompile(`^UPID:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8,9}:[0-9A-Fa-f]{8}:([^:/]+):([^:/]*):([^:/]+):$`)
 
 // UPIDNode returns the node a UPID names (its second field), after
 // validating its shape with validateUPIDShape. It never calls

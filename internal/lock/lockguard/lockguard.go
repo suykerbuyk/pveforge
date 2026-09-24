@@ -6,6 +6,12 @@
 // lock-taking functions, so it is derived here once rather than walked
 // twice.
 //
+// The same scan also holds every PVE task wait to account (Scan.TaskWaits):
+// each call of a WaitForTask method must be given its caller's own context,
+// by the same rule as a lock call outside the command package, because the
+// context carries what the wait reports to (pve.WithTaskWarnings). A wait
+// on context.Background() would succeed with its warnings unreported.
+//
 // It imports no pveforge package (sourceguard imports none either), so
 // internal/lock's own tests can use it without an import cycle.
 //
@@ -53,6 +59,10 @@ var TakerFiles = map[string]string{
 	"internal/bootstrap/bootstrap.go": "github.com/suykerbuyk/pveforge/internal/bootstrap",
 }
 
+// taskWaitTarget is every call of a method named WaitForTask: the pve
+// clients' and the idempotent package's interfaces over them.
+var taskWaitTarget = sourceguard.Target{AnyQualifier: true, Name: "WaitForTask"}
+
 // lockTargets are internal/lock's two lock-taking functions.
 var lockTargets = []sourceguard.Target{{ImportPath: LockPkg, Name: "Mutation"}, {ImportPath: LockPkg, Name: "Read"}}
 
@@ -79,6 +89,11 @@ type Scan struct {
 	// Calls are every call of a sink in CommandDir and TakerFiles, each
 	// with its context-argument verdict.
 	Calls []Call
+	// TaskWaits are every call of a WaitForTask method anywhere in the
+	// module's non-test source, each with its context-argument verdict: the
+	// enclosing function's own context.Context parameter, never re-bound,
+	// in the command package too.
+	TaskWaits []Call
 	// Parsed is the first walk's file list, for a caller's coverage floor.
 	Parsed []string
 	// Result is the first walk's own result, for a caller's anti-vacuity
@@ -163,6 +178,22 @@ func ScanModule(root string) (Scan, error) {
 		inCommands := strings.HasPrefix(file, CommandDir+"/")
 		for _, ref := range byFile[file] {
 			sc.Calls = append(sc.Calls, Call{Ref: ref, Problem: checkContextArg(fset, f, ref, inCommands)})
+		}
+	}
+
+	// Every task wait, module-wide: no allow-list, so every ref is one to check.
+	waits, err := sourceguard.NonTestReferences(sourceguard.Scope{Root: root}, []sourceguard.Target{taskWaitTarget})
+	if err != nil {
+		return sc, err
+	}
+	for _, file := range sortedKeys(waits.Refs) {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join(root, file), nil, 0)
+		if err != nil {
+			return sc, err
+		}
+		for _, ref := range waits.Refs[file] {
+			sc.TaskWaits = append(sc.TaskWaits, Call{Ref: ref, Problem: checkContextArg(fset, f, ref, false)})
 		}
 	}
 	return sc, nil
@@ -300,7 +331,9 @@ func findCall(fset *token.FileSet, f *ast.File, ref sourceguard.Ref) (*ast.CallE
 			return false
 		case *ast.CallExpr:
 			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == ref.Target.Name && fset.Position(sel.Sel.Pos()).Line == ref.Line {
-				if id, ok := sel.X.(*ast.Ident); ok && id.Name == ref.Qualifier {
+				// A method target's receiver can be any expression
+				// (op.Client.WaitForTask): its name and line locate it.
+				if id, ok := sel.X.(*ast.Ident); (ok && id.Name == ref.Qualifier) || ref.Target.AnyQualifier {
 					found, foundStack = x, append([]ast.Node(nil), stack...)
 					return false
 				}

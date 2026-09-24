@@ -193,6 +193,10 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
   its head and ends in `… [N bytes elided]`.
 - `vm set` on a running VM prints one stderr notice per change PVE holds as
   pending until the next cold boot. Its stdout and exit status are unchanged.
+- A PVE task that ends with exit status `WARNINGS: <n>` succeeded, as PVE
+  itself counts it: the command exits 0 and prints one stderr notice per such
+  task, naming it, so the warnings are never silent. Read them in the task's
+  log. Anything but `OK` or exactly `WARNINGS: <n>` is a failure.
   How PVE reports pending changes is itself not yet verified live (see below).
 
 ## Exit status
@@ -229,6 +233,13 @@ owed to the nested PVE test harness:
   10-minute wait ceiling is enough for a long task, and which node a
   cross-node task id names. If it names the proxying node, the wait refuses
   the task as outcome-unknown.
+- A task's exit status for success with warnings: pveforge accepts `OK` and
+  exactly `WARNINGS: <n>`, following PVE's own `PVE::UPID::status_is_error`.
+  A differently worded warnings status would be reported as a failure.
+- The task id (UPID) grammar pveforge accepts before it waits on a task,
+  taken from PVE's own `PVE::UPID::decode`. A UPID outside it is refused as an
+  unverifiable read, so a task PVE really started would be reported as
+  outcome-unknown.
 - `bootstrap`'s parsing of `pveum user token add --output-format json`. It
   accepts two shapes, and fails loudly on anything else.
 - The text iproute2's `ip` and `bridge` print for an interface that does not

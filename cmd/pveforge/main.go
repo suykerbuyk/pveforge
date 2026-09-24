@@ -14,6 +14,7 @@ import (
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
@@ -56,8 +57,20 @@ func realMain() int {
 //     change already sent may or may not have been applied.
 //
 // An interrupted run exits 128+signum: 130 for SIGINT, 143 for SIGTERM.
+//
+// It also gives every command a context that reports a PVE task which
+// succeeded with warnings (pve.WithTaskWarnings): pveforge counts such a
+// task as a success, as PVE does, and says so on stderr, one quoted line
+// per task, so the warnings are never silent. The exit status is unchanged.
+// The notice's values come from PVE (the UPID from a mutation's answer), so
+// each is bounded (boundErrText) and quoted like error text.
 func runRoot(root *cobra.Command, stderr io.Writer) int {
 	root.SetErr(stderr)
+	ctx := root.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	root.SetContext(pve.WithTaskWarnings(ctx, taskWarningsNotice(stderr)))
 	err := root.Execute()
 	if err == nil {
 		return 0
@@ -73,6 +86,17 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stderr, kvjson.QuoteValue(msg))
 	return code
+}
+
+// taskWarningsNotice is the reporter runRoot installs: one line on stderr
+// per PVE task that succeeded with warnings. Each value is bounded and
+// quoted like error text. WaitForTask already refuses a UPID outside PVE's
+// grammar, so none can hold a line break; the quoting stays regardless.
+func taskWarningsNotice(stderr io.Writer) pve.TaskWarningsFunc {
+	return func(node, upid, exitStatus string) {
+		fmt.Fprintf(stderr, "notice: PVE task %s on node %s succeeded with warnings (%s): its task log has them\n",
+			kvjson.QuoteValue(boundErrText(upid)), kvjson.QuoteValue(boundErrText(node)), kvjson.QuoteValue(boundErrText(exitStatus)))
+	}
 }
 
 // maxErrTextBytes bounds the error text boundErrText lets through: far
