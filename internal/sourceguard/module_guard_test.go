@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,19 @@ const (
 // v0.8.2-0.20260901000000-abcdef123456) and never a plain upstream tag.
 var forkTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+-pveforge\.[0-9]+$`)
 
+// noticesPlatforms are the GOOS/GOARCH pairs whose linked modules
+// THIRD-PARTY-NOTICES.md must cover: the union, so the guard answers the
+// same on any developer's machine, and a module linked on one platform only
+// (cobra's mousetrap, on Windows) is never left unattributed.
+var noticesPlatforms = []string{
+	"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64",
+	"windows/amd64", "windows/arm64", "freebsd/amd64", "freebsd/arm64",
+}
+
+// noticesRow is one row of THIRD-PARTY-NOTICES.md's module table:
+// | `<module>` | <version> | <license> |
+var noticesRow = regexp.MustCompile("^\\| `([^`]+)` \\| (v[^ |]+) \\| [^|]+\\|$")
+
 // goModJSON is the part of `go mod edit -json` these rules read.
 type goModJSON struct {
 	Require []struct {
@@ -46,9 +60,15 @@ type goModJSON struct {
 // workspace to an unpinned local tree. A cold module cache fails loudly.
 func offlineGo(t *testing.T, args ...string) string {
 	t.Helper()
+	return offlineGoEnv(t, nil, args...)
+}
+
+// offlineGoEnv is offlineGo with env added (e.g. GOOS and GOARCH).
+func offlineGoEnv(t *testing.T, env []string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("go", args...)
 	cmd.Dir = "../.."
-	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off")
+	cmd.Env = append(append(os.Environ(), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off"), env...)
 	out, err := cmd.Output()
 	if err != nil {
 		var stderr string
@@ -60,7 +80,7 @@ func offlineGo(t *testing.T, args ...string) string {
 	return string(out)
 }
 
-// TestModuleGraph_ForkPinnedAndUpstreamAbsent holds three rules over the
+// TestModuleGraph_ForkPinnedAndUpstreamAbsent holds four rules over the
 // module definition and graph (one subtest each, so a failure names its
 // rule):
 //
@@ -68,7 +88,13 @@ func offlineGo(t *testing.T, args ...string) string {
 //   - no-replace-exclude: go.mod has no replace and no exclude directive
 //     (a local-path replace would build against an unpinned tree);
 //   - upstream-absent: the upstream module is in no require, no go.sum
-//     line and nowhere in `go list -m all`.
+//     line and nowhere in `go list -m all`;
+//   - notices-versions: THIRD-PARTY-NOTICES.md lists exactly the modules
+//     linked into cmd/pveforge — every non-standard-library module of `go
+//     list -deps ./cmd/pveforge` on any of noticesPlatforms, and nothing
+//     else — each at the version go.mod requires. A missing row is a
+//     licence-attribution gap; a stale version misattributes whose code
+//     pveforge ships.
 //
 // Anti-vacuity: the fork is found in the requires, in go.sum and in the
 // module graph, so these rules are reading the real module. The graph is
@@ -142,6 +168,72 @@ func TestModuleGraph_ForkPinnedAndUpstreamAbsent(t *testing.T) {
 		}
 		if !inGraph || len(graph) < 10 {
 			t.Errorf("go list -m all gave %d modules, fork present: %v — not the real module graph", len(graph), inGraph)
+		}
+	})
+
+	t.Run("notices-versions", func(t *testing.T) {
+		notices, err := os.ReadFile(filepath.Join("..", "..", "THIRD-PARTY-NOTICES.md"))
+		if err != nil {
+			t.Fatalf("read THIRD-PARTY-NOTICES.md: %v", err)
+		}
+		required := map[string]string{}
+		for _, r := range mod.Require {
+			required[r.Path] = r.Version
+		}
+		listed := map[string]bool{}
+		for i, line := range strings.Split(string(notices), "\n") {
+			if !strings.HasPrefix(line, "| `") {
+				continue
+			}
+			m := noticesRow.FindStringSubmatch(line)
+			if m == nil {
+				t.Errorf("THIRD-PARTY-NOTICES.md:%d: a module row this guard cannot read (want | `<module>` | <version> | <license> |): %s", i+1, line)
+				continue
+			}
+			path, version := m[1], m[2]
+			if listed[path] {
+				t.Errorf("THIRD-PARTY-NOTICES.md:%d: %s is listed twice", i+1, path)
+			}
+			listed[path] = true
+			want, ok := required[path]
+			switch {
+			case !ok:
+				t.Errorf("THIRD-PARTY-NOTICES.md:%d: %s %s is not required by go.mod at all", i+1, path, version)
+			case version != want:
+				t.Errorf("THIRD-PARTY-NOTICES.md:%d: %s is listed at %s, but go.mod requires %s", i+1, path, version, want)
+			}
+		}
+		// Anti-vacuity: the table was read, the fork's row with it.
+		if !listed[forkModule] || len(listed) < 10 {
+			t.Errorf("read %d module rows, fork's among them: %v: the guard is not reading the real table", len(listed), listed[forkModule])
+		}
+
+		// Completeness: the modules linked into the binary, on every
+		// platform, are exactly the listed ones.
+		linked := map[string][]string{} // module -> the platforms linking it
+		for _, p := range noticesPlatforms {
+			goos, goarch, _ := strings.Cut(p, "/")
+			out := offlineGoEnv(t, []string{"GOOS=" + goos, "GOARCH=" + goarch},
+				"list", "-deps", "-f", "{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}", "./cmd/pveforge")
+			for _, m := range strings.Fields(out) {
+				if !slices.Contains(linked[m], p) {
+					linked[m] = append(linked[m], p)
+				}
+			}
+		}
+		for m, platforms := range linked {
+			if !listed[m] {
+				t.Errorf("%s is linked into cmd/pveforge (%s) but has no row in THIRD-PARTY-NOTICES.md: add it, with the licence from its own LICENSE file", m, strings.Join(platforms, ", "))
+			}
+		}
+		for m := range listed {
+			if _, ok := linked[m]; !ok {
+				t.Errorf("THIRD-PARTY-NOTICES.md lists %s, which no platform links into cmd/pveforge any more: remove its row", m)
+			}
+		}
+		// Anti-vacuity: the dependency walk saw the fork, on every platform.
+		if len(linked[forkModule]) != len(noticesPlatforms) || len(linked) < 10 {
+			t.Errorf("go list -deps saw %d modules, the fork on %d of %d platforms: not the real binary", len(linked), len(linked[forkModule]), len(noticesPlatforms))
 		}
 	})
 }
