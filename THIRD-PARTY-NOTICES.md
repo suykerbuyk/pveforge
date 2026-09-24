@@ -24,8 +24,11 @@ pveforge's own license is unchanged and is stated in [`LICENSE`](LICENSE):
 dual MIT or Apache-2.0, at your option. Nothing here narrows it.
 
 This file lists the modules linked into `cmd/pveforge`, as reported by
-`go list -deps ./cmd/pveforge`. It does not list build- or test-only
-dependencies, which are not distributed.
+`go list -deps ./cmd/pveforge` for linux, darwin, windows and freebsd on amd64
+and arm64 (one module is linked on Windows only, and says so). It does not
+list build- or test-only dependencies, which are not distributed. The module
+guard (`internal/sourceguard`) fails while this table and those modules, or
+their versions in `go.mod`, disagree.
 
 ## Modules linked into the binary
 
@@ -38,11 +41,12 @@ dependencies, which are not distributed.
 | `github.com/djherbis/times` | v1.6.0 | MIT |
 | `github.com/gofrs/flock` | v0.13.1 | BSD-3-Clause |
 | `github.com/gorilla/websocket` | v1.4.2 | BSD-2-Clause |
+| `github.com/inconshreveable/mousetrap` | v1.1.0 | Apache-2.0 (linked on Windows only) |
 | `github.com/jinzhu/copier` | v0.3.4 | MIT |
 | `github.com/pelletier/go-toml/v2` | v2.4.3 | MIT |
 | `github.com/spf13/cobra` | v1.10.2 | Apache-2.0 |
 | `github.com/spf13/pflag` | v1.0.9 | BSD-3-Clause |
-| `github.com/suykerbuyk/go-proxmox` | v0.8.2-pveforge.0 | Apache-2.0 |
+| `github.com/suykerbuyk/go-proxmox` | v0.8.2-pveforge.1 | Apache-2.0 |
 | `golang.org/x/crypto` | v0.55.0 | BSD-3-Clause |
 | `golang.org/x/sys` | v0.48.0 | BSD-3-Clause |
 | `golang.org/x/term` | v0.46.0 | BSD-3-Clause |
@@ -53,12 +57,14 @@ in the `LICENSE` file at its root (`LICENSE.txt` for `spf13/cobra`,
 
 ## Apache-2.0 attribution
 
-Two linked modules are Apache-2.0 licensed: `github.com/spf13/cobra` and
+Three linked modules are Apache-2.0 licensed: `github.com/spf13/cobra`,
+`github.com/inconshreveable/mousetrap` (Windows builds only) and
 `github.com/suykerbuyk/go-proxmox`. Section 4(d) requires that any `NOTICE`
 file they carry be reproduced in the derivative work's own notices, subject
 to the placement caveat above.
 
-`github.com/spf13/cobra` ships no `NOTICE` file.
+`github.com/spf13/cobra` and `github.com/inconshreveable/mousetrap` ship no
+`NOTICE` file.
 
 `github.com/suykerbuyk/go-proxmox` does, and it is reproduced verbatim below.
 Note that this module is pveforge's own fork of an upstream project: the
