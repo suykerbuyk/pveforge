@@ -397,7 +397,7 @@ func baseOptions(rosterPath string) Options {
 		// clears it explicitly.
 		Grants:     []Grant{{Path: "/", Role: "PVEVMAdmin", Propagate: true}},
 		RosterPath: rosterPath,
-		Passphrase: "roster-pass",
+		Passphrase: roster.NewPassphrase("roster-pass"),
 	}
 }
 
@@ -547,7 +547,7 @@ func TestRun_DefaultsHostNodeFromExistingRosterEntry(t *testing.T) {
 		PublicKey:           kp.AuthorizedKeyLine,
 		HostKeyFingerprint:  "SHA256:abc",
 		PrivateKeyPlaintext: kp.PrivateKeyPEM,
-	}, "roster-pass"); err != nil {
+	}, roster.NewPassphrase("roster-pass")); err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
 
@@ -598,7 +598,7 @@ func TestRun_DefaultsAPIPortInsecureTLSFromExistingRosterEntry(t *testing.T) {
 		PublicKey:           kp.AuthorizedKeyLine,
 		HostKeyFingerprint:  "SHA256:abc",
 		PrivateKeyPlaintext: kp.PrivateKeyPEM,
-	}, "roster-pass"); err != nil {
+	}, roster.NewPassphrase("roster-pass")); err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
 
@@ -1172,7 +1172,7 @@ func TestRun_FallsThroughWhenRequestedTokenIDDiffersFromPersisted(t *testing.T) 
 	if tg.Token.ID != "root@pam!pveforge-2" {
 		t.Fatalf("expected the persisted token id to be updated to root@pam!pveforge-2, got %q", tg.Token.ID)
 	}
-	plaintext, err := roster.DecryptString(tg.Token.SecretEnc, opts.Passphrase)
+	plaintext, err := roster.DecryptString(tg.Token.SecretEnc, "roster-pass")
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -1235,7 +1235,7 @@ func TestRun_ReplacesOnVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	plaintext, err := roster.DecryptString(r.Find(opts.TargetID).Token.SecretEnc, opts.Passphrase)
+	plaintext, err := roster.DecryptString(r.Find(opts.TargetID).Token.SecretEnc, "roster-pass")
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -1273,8 +1273,13 @@ func TestRun_FallsThroughWhenExistingTokenUndecryptable(t *testing.T) {
 	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
 		TokenID:         "root@pam!pveforge",
 		SecretPlaintext: []byte("irrelevant"),
-	}, "a-completely-different-passphrase"); err != nil {
+	}, opts.Passphrase); err != nil {
 		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+	if r, err := roster.Load(rosterPath); err != nil {
+		t.Fatal(err)
+	} else {
+		resealUnder(t, rosterPath, r.Find(opts.TargetID).Token.SecretEnc, []byte("irrelevant"), "a-completely-different-passphrase")
 	}
 
 	session := &fakeSession{byCmd: map[string]fakeRunResult{
@@ -1297,7 +1302,7 @@ func TestRun_FallsThroughWhenExistingTokenUndecryptable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	plaintext, err := roster.DecryptString(r.Find(opts.TargetID).Token.SecretEnc, opts.Passphrase)
+	plaintext, err := roster.DecryptString(r.Find(opts.TargetID).Token.SecretEnc, "roster-pass")
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -1571,7 +1576,7 @@ func TestLoadExistingSSHAuth_WrongPassphraseErrors(t *testing.T) {
 	}
 
 	wrongOpts := opts
-	wrongOpts.Passphrase = "not-the-right-passphrase"
+	wrongOpts.Passphrase = roster.NewPassphrase("not-the-right-passphrase")
 	if _, err := loadExistingSSHAuth(wrongOpts); err == nil {
 		t.Fatal("expected an error decrypting the persisted keypair with the wrong passphrase")
 	}
@@ -1613,8 +1618,13 @@ func TestLoadExistingSSHAuth_IgnoresUndecryptableTokenData(t *testing.T) {
 	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{
 		TokenID:         "root@pam!pveforge",
 		SecretPlaintext: []byte("irrelevant"),
-	}, "a-completely-different-passphrase"); err != nil {
+	}, opts.Passphrase); err != nil {
 		t.Fatalf("WriteTokenAuth: %v", err)
+	}
+	if r, err := roster.Load(rosterPath); err != nil {
+		t.Fatal(err)
+	} else {
+		resealUnder(t, rosterPath, r.Find(opts.TargetID).Token.SecretEnc, []byte("irrelevant"), "a-completely-different-passphrase")
 	}
 
 	got, err := loadExistingSSHAuth(opts)
@@ -1690,7 +1700,7 @@ func TestLoadHeldToken_UndecryptableIsReportedNotAnError(t *testing.T) {
 	}
 
 	wrongOpts := opts
-	wrongOpts.Passphrase = "wrong-passphrase"
+	wrongOpts.Passphrase = roster.NewPassphrase("wrong-passphrase")
 	got, err := loadHeldToken(wrongOpts)
 	if err != nil {
 		t.Fatalf("loadHeldToken: a decrypt failure must not be an error, got %v", err)
@@ -1727,8 +1737,13 @@ func TestLoadHeldToken_IgnoresUndecryptableSSHData(t *testing.T) {
 		PublicKey:           kp.AuthorizedKeyLine,
 		HostKeyFingerprint:  "SHA256:abc",
 		PrivateKeyPlaintext: kp.PrivateKeyPEM,
-	}, "a-completely-different-passphrase"); err != nil {
+	}, opts.Passphrase); err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
+	}
+	if r, err := roster.Load(rosterPath); err != nil {
+		t.Fatal(err)
+	} else {
+		resealUnder(t, rosterPath, r.Find(opts.TargetID).SSH.PrivateKeyEnc, kp.PrivateKeyPEM, "a-completely-different-passphrase")
 	}
 
 	got, err := loadHeldToken(opts)
@@ -1833,7 +1848,7 @@ func TestValidateOptions_RequiredFields(t *testing.T) {
 		PVEPassword: "p",
 		TokenID:     "tok",
 		RosterPath:  "r",
-		Passphrase:  "pp",
+		Passphrase:  roster.NewPassphrase("pp"),
 	}
 	if err := validateOptions(&full); err != nil {
 		t.Fatalf("fully populated options should validate: %v", err)
@@ -1846,7 +1861,7 @@ func TestValidateOptions_RequiredFields(t *testing.T) {
 		func(o *Options) { o.PVEPassword = "" },
 		func(o *Options) { o.TokenID = "" },
 		func(o *Options) { o.RosterPath = "" },
-		func(o *Options) { o.Passphrase = "" },
+		func(o *Options) { o.Passphrase = roster.Passphrase{} },
 	}
 	for i, zero := range fields {
 		o := full

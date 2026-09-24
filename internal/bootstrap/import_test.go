@@ -45,13 +45,13 @@ func importOpts(rosterPath, tokenID, secret string) ImportOptions {
 	return ImportOptions{
 		TargetID: "qa-imp", Host: "h.example", Node: "n1", TokenID: tokenID, Secret: secret,
 		Grants:     []Grant{{Path: "/vms/100", Role: "PVEVMUser", Propagate: true}},
-		RosterPath: rosterPath, Passphrase: importPass,
+		RosterPath: rosterPath, Passphrase: roster.NewPassphrase(importPass),
 	}
 }
 
 func heldFor(t *testing.T, rosterPath string) heldToken {
 	t.Helper()
-	h, err := loadHeldToken(Options{RosterPath: rosterPath, TargetID: "qa-imp", Passphrase: importPass})
+	h, err := loadHeldToken(Options{RosterPath: rosterPath, TargetID: "qa-imp", Passphrase: roster.NewPassphrase(importPass)})
 	if err != nil {
 		t.Fatalf("loadHeldToken: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestImport_FailureWritesNothing(t *testing.T) {
 func TestImport_ReadBackCatchesAWrongWrite(t *testing.T) {
 	rp := importRoster(t)
 	orig := writeTokenAuthFn
-	writeTokenAuthFn = func(path, target string, w roster.TokenWrite, pass string) error {
+	writeTokenAuthFn = func(path, target string, w roster.TokenWrite, pass roster.Passphrase) error {
 		w.SecretPlaintext = []byte("not-what-was-imported")
 		return orig(path, target, w, pass)
 	}
@@ -183,7 +183,7 @@ func TestImport_UndecryptableHeldTokenIsRefused(t *testing.T) {
 
 	for _, replace := range []bool{false, true} {
 		o := importOpts(rp, "ops@pve!ci2", "s3cr3t-0002")
-		o.Passphrase = "a-mistyped-passphrase"
+		o.Passphrase = roster.NewPassphrase("a-mistyped-passphrase")
 		o.Replace = replace
 		v := &importValidator{}
 		_, err := Import(context.Background(), o, v)

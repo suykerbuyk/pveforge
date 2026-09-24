@@ -71,7 +71,7 @@ func TestClearTokenAuth_UndoesAnAppendExactly(t *testing.T) {
 	withTestWorkFactor(t)
 	path := writeTempRoster(t, fixtureTwoTargets)
 	orig := readFile(t, path)
-	if err := WriteTokenAuth(path, "qa-pve-01", TokenWrite{TokenID: "root@pam!pveforge", SecretPlaintext: []byte("s")}, "p"); err != nil {
+	if err := WriteTokenAuth(path, "qa-pve-01", TokenWrite{TokenID: "root@pam!pveforge", SecretPlaintext: []byte("s")}, NewPassphrase("p")); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Equal(readFile(t, path), orig) {
@@ -195,7 +195,7 @@ func TestDryRunTokenWrite_RehearsalsMatchTheRealWriters(t *testing.T) {
 			}
 
 			alone := copyRoster(t, path)
-			if err := spliceSubtable(alone, "qa-pve-01", "token", dryRunPlaceholderFields()); err != nil {
+			if err := spliceSubtable(alone, "qa-pve-01", "token", dryRunPlaceholderFields(), NewPassphrase("p")); err != nil {
 				t.Fatalf("real write-alone: %v", err)
 			}
 			if got := readFile(t, alone); !bytes.Equal(got, composed["write-alone"]) {
@@ -206,7 +206,7 @@ func TestDryRunTokenWrite_RehearsalsMatchTheRealWriters(t *testing.T) {
 			if err := ClearTokenAuth(ctw, "qa-pve-01"); err != nil {
 				t.Fatalf("real clear: %v", err)
 			}
-			if err := spliceSubtable(ctw, "qa-pve-01", "token", dryRunPlaceholderFields()); err != nil {
+			if err := spliceSubtable(ctw, "qa-pve-01", "token", dryRunPlaceholderFields(), NewPassphrase("p")); err != nil {
 				t.Fatalf("real write after clear: %v", err)
 			}
 			if got := readFile(t, ctw); !bytes.Equal(got, composed["clear-then-write"]) {
@@ -216,7 +216,7 @@ func TestDryRunTokenWrite_RehearsalsMatchTheRealWriters(t *testing.T) {
 			// The real WriteTokenAuth alone, on an uncleared copy: identical
 			// to the write-alone rehearsal outside the secret_enc literal.
 			realAlone := copyRoster(t, path)
-			if err := WriteTokenAuth(realAlone, "qa-pve-01", TokenWrite{TokenID: dryRunPlaceholderTokenID, SecretPlaintext: []byte("s")}, "p"); err != nil {
+			if err := WriteTokenAuth(realAlone, "qa-pve-01", TokenWrite{TokenID: dryRunPlaceholderTokenID, SecretPlaintext: []byte("s")}, NewPassphrase("p")); err != nil {
 				t.Fatal(err)
 			}
 			aRealPre, aRealPost := splitAtSecretLiteral(t, string(readFile(t, realAlone)))
@@ -231,7 +231,7 @@ func TestDryRunTokenWrite_RehearsalsMatchTheRealWriters(t *testing.T) {
 			if err := ClearTokenAuth(realPath, "qa-pve-01"); err != nil {
 				t.Fatal(err)
 			}
-			if err := WriteTokenAuth(realPath, "qa-pve-01", TokenWrite{TokenID: dryRunPlaceholderTokenID, SecretPlaintext: []byte("s")}, "p"); err != nil {
+			if err := WriteTokenAuth(realPath, "qa-pve-01", TokenWrite{TokenID: dryRunPlaceholderTokenID, SecretPlaintext: []byte("s")}, NewPassphrase("p")); err != nil {
 				t.Fatal(err)
 			}
 			rp, rs := splitAtSecretLiteral(t, string(readFile(t, realPath)))

@@ -595,7 +595,7 @@ func loadHeldToken(opts Options) (heldToken, error) {
 	if tg.Token == nil {
 		return heldToken{}, nil
 	}
-	secret, err := roster.DecryptString(tg.Token.SecretEnc, opts.Passphrase)
+	secret, err := opts.Passphrase.Decrypt(tg.Token.SecretEnc)
 	if err != nil {
 		return heldToken{ID: tg.Token.ID, DecryptErr: err}, nil
 	}
