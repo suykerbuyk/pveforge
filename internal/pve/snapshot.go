@@ -23,6 +23,20 @@ import (
 // exclude it — see realSnapshots.
 const currentPseudoSnapshot = "current"
 
+// pendingReservedName is the other snapshot name PVE reserves: a VM's
+// config file keeps its pending changes in a section named [PENDING], so a
+// snapshot section of that name would collide with it. Unlike "current" it
+// is not a list entry — PVE never creates a snapshot by that name — so only
+// CreateSnapshot refuses it; the destructive paths (isPseudoEntryName) have
+// nothing named "pending" to meet.
+//
+// UNVERIFIED against a live host, owed to pveforge-nested-pve-test-harness
+// (from a reading of PVE's source, not observed): qemu-server's snapshot
+// create refuses lc($snapname) eq 'pending', i.e. in any case. Refusing it
+// here, before any request, is safe whether or not PVE does: the worst case
+// is refusing a name PVE would have allowed.
+const pendingReservedName = "pending"
+
 // isPseudoEntryName reports whether name, trimmed, is exactly the "current"
 // pseudo-entry. It is the reserved-name guard of the three DESTRUCTIVE-path
 // primitives — NewerSnapshots, Rollback and CascadeDeleteSnapshots — which
@@ -165,7 +179,11 @@ func (e *ErrSnapshotExists) Error() string {
 }
 
 // ErrReservedSnapshotName reports that a snapshot operation refused because
-// the name it was given is PVE's reserved "current" pseudo-entry — matched
+// the name it was given is reserved by PVE. CreateSnapshot also refuses
+// "pending" (pendingReservedName), in any case; everything below is about
+// "current", and the message names whichever of the two was met.
+//
+// "current" is PVE's pseudo-entry — matched
 // trimmed and case-insensitively by CreateSnapshot, which refuses to create
 // any spelling of it, and trimmed but EXACTLY by NewerSnapshots, Rollback
 // and CascadeDeleteSnapshots (isPseudoEntryName), which must still reach a
@@ -191,6 +209,9 @@ type ErrReservedSnapshotName struct {
 }
 
 func (e *ErrReservedSnapshotName) Error() string {
+	if strings.EqualFold(strings.TrimSpace(e.Name), pendingReservedName) {
+		return fmt.Sprintf("snapshot name %q is reserved on vm %d: PVE keeps a VM's pending changes in a config section of that name, so no snapshot can take it", e.Name, e.VMID)
+	}
 	return fmt.Sprintf("snapshot name %q is reserved on vm %d: %q is PVE's own pseudo-entry for the live running state, not a real snapshot", e.Name, e.VMID, currentPseudoSnapshot)
 }
 
@@ -267,6 +288,11 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name
 	// reported and sent untrimmed: this refuses padded variants, it does
 	// not silently rewrite what the caller asked for.
 	if strings.EqualFold(strings.TrimSpace(name), currentPseudoSnapshot) {
+		return &ErrReservedSnapshotName{VMID: vmid, Name: name}
+	}
+	// PVE's other reserved name, refused the same way: trimmed, in any case,
+	// before any request (see pendingReservedName, and its caveat).
+	if strings.EqualFold(strings.TrimSpace(name), pendingReservedName) {
 		return &ErrReservedSnapshotName{VMID: vmid, Name: name}
 	}
 
