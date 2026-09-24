@@ -15,6 +15,11 @@ a group already as asked is left alone, and root is never connected to. The
 write runs as root over SSH with pveum, as for user ensure. A group's members
 are set on its users (user ensure --group).
 
+.PP
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.
+
 
 .SH OPTIONS
 \fB--comment\fP=""

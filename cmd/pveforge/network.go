@@ -125,7 +125,11 @@ This command has NO --force override for the guard check: unlike a
 digest-based conflict a caller might reasonably force past, a management
 bridge whose staged config changed underneath this command means PVE
 staged something this command never asked for and knows nothing about —
-there is no safe way to force past that, so no bypass is offered.`,
+there is no safe way to force past that, so no bypass is offered.
+
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wanted, err := wantedFieldsFromKVArgs(args[2:])
@@ -185,6 +189,7 @@ there is no safe way to force past that, so no bypass is offered.`,
 				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: bridge %s created\n", args[0], args[1])
+			warnNotReread(cmd.ErrOrStderr(), args[0], "bridge", args[1], res.AfterErr)
 			return nil
 		},
 	}
@@ -216,7 +221,11 @@ for the full rationale, which applies identically here.
 
 Removing a live bridge can disconnect any VM currently attached to it —
 there is no compiler- or PVE-side check for that here, so confirm nothing
-depends on iface before running this.`,
+depends on iface before running this.
+
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := resolveRoutedClient(cmd, args[0])
@@ -264,6 +273,7 @@ depends on iface before running this.`,
 				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: bridge %s destroyed\n", args[0], args[1])
+			warnNotReread(cmd.ErrOrStderr(), args[0], "bridge", args[1], res.AfterErr)
 			return nil
 		},
 	}
@@ -303,7 +313,11 @@ the node, not one designated canary.
 This command has NO --force override for the guard check, for the same
 reason "network bridge create/destroy" doesn't: a mismatch means PVE staged
 changes this command never asked for and knows nothing about — there is no
-safe way to force past that.`,
+safe way to force past that.
+
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.`,
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pairs, err := kvjson.ParseKVArgs(args[2:])
@@ -339,10 +353,15 @@ safe way to force past that.`,
 				return err
 			}
 
-			if _, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false); err != nil {
+			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
+			if err != nil {
 				return err
 			}
-			return printAppliedFields(cmd.OutOrStdout(), args[0], op.Applied, pairs)
+			if err := printAppliedFields(cmd.OutOrStdout(), args[0], op.Applied, pairs); err != nil {
+				return err
+			}
+			warnNotReread(cmd.ErrOrStderr(), args[0], "interface", args[1], res.AfterErr)
+			return nil
 		},
 	}
 	addRosterFlag(cmd)

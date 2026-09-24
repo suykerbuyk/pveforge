@@ -26,6 +26,11 @@ Removing a live bridge can disconnect any VM currently attached to it —
 there is no compiler- or PVE-side check for that here, so confirm nothing
 depends on iface before running this.
 
+.PP
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.
+
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]

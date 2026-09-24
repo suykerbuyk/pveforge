@@ -90,9 +90,15 @@ func next(replies []string, n *int) string {
 	return replies[len(replies)-1]
 }
 
-// writeIface answers an interface GET with body, or with PVE's
-// missing-interface error for IfaceAbsent.
+// writeIface answers an interface GET with body, with PVE's
+// missing-interface error for IfaceAbsent, or with HTTP 500 and the given
+// body for IfaceServerError.
 func writeIface(w http.ResponseWriter, body string) {
+	if raw, ok := strings.CutPrefix(body, ifaceServerErrorMark); ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(raw))
+		return
+	}
 	if body == IfaceAbsent {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"errors":{"iface":"interface does not exist"},"data":null}`))
@@ -119,6 +125,17 @@ func taskStatusPrefix(node string) string {
 // the way PVE reports a missing interface: HTTP 400 with an "iface"
 // parameter error saying it does not exist.
 const IfaceAbsent = "\x00absent"
+
+// ifaceServerErrorMark prefixes an IfaceServerError entry.
+const ifaceServerErrorMark = "\x00server-error:"
+
+// IfaceServerError, as an entry of an IfaceResponses list, answers that GET
+// with HTTP 500 and body as it is: a read that fails with server text, such
+// as the final re-read after a network write
+// (pveforge-run-post-apply-read-error-signal).
+func IfaceServerError(body string) string {
+	return ifaceServerErrorMark + body
+}
 
 // BridgeREST scripts exactly the PVE calls NetworkBridgeEnsure issues:
 // GETs of the management bridge vmbr0 and of the target interface, the

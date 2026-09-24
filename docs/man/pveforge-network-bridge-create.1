@@ -36,6 +36,11 @@ bridge whose staged config changed underneath this command means PVE
 staged something this command never asked for and knows nothing about —
 there is no safe way to force past that, so no bypass is offered.
 
+.PP
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.
+
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]
