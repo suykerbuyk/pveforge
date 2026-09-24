@@ -39,9 +39,9 @@ import (
 // never a shortcut around it.
 //
 // Because this file lives outside package pve, it cannot reach pve's own
-// private test harness (routed_test.go's bootstrappedTarget/
-// newFakeSSHServer/testClient, all unexported). The fake SSH server and the
-// scripted REST server come from internal/pvefake, shared with
+// private test harness (routed_test.go's bootstrappedTarget/testClient,
+// both unexported). The fake SSH server and the scripted REST server come
+// from internal/pvefake, which pve's own tests now use too, shared with
 // cmd/pveforge's runRoot tests of the same commands; the rest is built from
 // pve's and sshexec's EXPORTED surface only:
 //   - the REST side is redirected via roster.Target's own ordinary

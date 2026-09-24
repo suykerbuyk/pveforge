@@ -4,15 +4,17 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 func TestLinkState_ExistsAndUp_Operstate(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return `[{"ifindex":2,"ifname":"vmbr0","flags":["BROADCAST","MULTICAST"],"operstate":"UP"}]` + "\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.LinkState(context.Background(), "vmbr0")
@@ -31,10 +33,10 @@ func TestLinkState_ExistsAndUp_Operstate(t *testing.T) {
 }
 
 func TestLinkState_ExistsAndUp_FlagsOnly(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return `[{"ifindex":2,"ifname":"vmbr0","flags":["BROADCAST","MULTICAST","UP"],"operstate":"UNKNOWN"}]` + "\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.LinkState(context.Background(), "vmbr0")
@@ -47,10 +49,10 @@ func TestLinkState_ExistsAndUp_FlagsOnly(t *testing.T) {
 }
 
 func TestLinkState_ExistsButDown(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return `[{"ifindex":3,"ifname":"vmbr1","flags":["BROADCAST","MULTICAST"],"operstate":"DOWN"}]` + "\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.LinkState(context.Background(), "vmbr1")
@@ -66,10 +68,10 @@ func TestLinkState_ExistsButDown(t *testing.T) {
 }
 
 func TestLinkState_DoesNotExist_NonZeroExit(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", `Device "vmbr9" does not exist.` + "\n", 1
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.LinkState(context.Background(), "vmbr9")
@@ -82,10 +84,10 @@ func TestLinkState_DoesNotExist_NonZeroExit(t *testing.T) {
 }
 
 func TestLinkState_DoesNotExist_EmptyArray(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "[]\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.LinkState(context.Background(), "vmbr9")
@@ -98,10 +100,10 @@ func TestLinkState_DoesNotExist_EmptyArray(t *testing.T) {
 }
 
 func TestLinkState_OtherFailureIsAnError(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", "ip: command not found\n", 127
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	_, err := client.LinkState(context.Background(), "vmbr0")

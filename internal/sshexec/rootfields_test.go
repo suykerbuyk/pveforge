@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 func TestRootOnlyFields_SeededWithOnlyArgs(t *testing.T) {
@@ -35,20 +37,20 @@ func TestIsRootOnlyWriteError(t *testing.T) {
 }
 
 func TestSetVMConfigField(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -63,17 +65,17 @@ func TestSetVMConfigField(t *testing.T) {
 }
 
 func TestSetVMConfigField_RemoteFailure(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.AllowKey(pub)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", "only root can set 'args' config\n", 1
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -89,14 +91,14 @@ func TestSetVMConfigField_RemoteFailure(t *testing.T) {
 }
 
 func TestSetVMConfigField_RejectsUnsafeFieldName(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.Start(t)
+	fs.AllowKey(pub)
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -113,20 +115,20 @@ func TestSetVMConfigField_RejectsUnsafeFieldName(t *testing.T) {
 // TestDeleteVMConfigField: a root-only field is removed with qm's own
 // --delete parameter, never by writing it empty.
 func TestDeleteVMConfigField(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -143,19 +145,19 @@ func TestDeleteVMConfigField(t *testing.T) {
 // TestDeleteVMConfigField_RejectsUnsafeFieldName: a field name outside the
 // safe identifier shape is refused before anything reaches the host.
 func TestDeleteVMConfigField_RejectsUnsafeFieldName(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 	var execs atomic.Int32
-	fs.handleExec = func(string) (string, string, int) {
+	fs.HandleExec(func(string) (string, string, int) {
 		execs.Add(1)
 		return "", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

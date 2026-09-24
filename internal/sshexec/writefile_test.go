@@ -7,25 +7,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 var base64ArgRe = regexp.MustCompile(`printf '%s' '([^']*)' \| base64 -d`)
 
 func TestWriteFile_Success(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -60,20 +62,20 @@ func TestWriteFile_Success(t *testing.T) {
 }
 
 func TestWriteFile_ContentWithSingleQuotesAndBackslashes(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -102,17 +104,17 @@ func TestWriteFile_ContentWithSingleQuotesAndBackslashes(t *testing.T) {
 }
 
 func TestWriteFile_RemoteScriptFailure(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.AllowKey(pub)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", "permission denied\n", 1
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

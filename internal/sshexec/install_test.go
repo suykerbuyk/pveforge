@@ -5,28 +5,30 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.allowPassword("correct-horse")
+	fs := pvefake.NewSSHServer(t)
+	fs.AllowPassword("root", "correct-horse")
 
 	var receivedCmd string
 	authorizedKeys := "" // simulates the remote file's current contents
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		if strings.Contains(authorizedKeys, "ssh-ed25519") {
 			return "present\n", "", 0
 		}
 		authorizedKeys += "ssh-ed25519 AAAAtest testkey\n"
 		return "added\n", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	res, err := InstallPubkeyViaPassword(ctx, fs.addr, "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
+	res, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
@@ -41,7 +43,7 @@ func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
 	}
 
 	// Second call: idempotent no-op.
-	res2, err := InstallPubkeyViaPassword(ctx, fs.addr, "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
+	res2, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword (second): %v", err)
 	}
@@ -54,31 +56,31 @@ func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
 }
 
 func TestInstallPubkeyViaPassword_WrongPasswordRejected(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.allowPassword("correct-horse")
-	fs.Start(t)
+	fs := pvefake.NewSSHServer(t)
+	fs.AllowPassword("root", "correct-horse")
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := InstallPubkeyViaPassword(ctx, fs.addr, "root", "wrong-password", "ssh-ed25519 AAAAtest testkey")
+	_, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "wrong-password", "ssh-ed25519 AAAAtest testkey")
 	if err == nil {
 		t.Fatal("expected error for wrong password")
 	}
 }
 
 func TestInstallPubkeyViaPassword_RemoteScriptFailure(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.allowPassword("correct-horse")
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.AllowPassword("root", "correct-horse")
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", "permission denied\n", 1
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := InstallPubkeyViaPassword(ctx, fs.addr, "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
+	_, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
 	if err == nil {
 		t.Fatal("expected error when the remote script exits non-zero")
 	}

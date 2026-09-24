@@ -7,7 +7,8 @@ import (
 	"io"
 	"os"
 	"testing"
-	"time"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 // stdinPayload is the caller-stdin fixture both tests below use.
@@ -33,13 +34,13 @@ func requirePayloadUsable(t *testing.T) {
 
 // requireComplete fails unless the drain reached EOF. A truncated record
 // may be short, so asserting "0 bytes" on one would be asserting that the
-// observer gave up — see stdinRecord.truncated.
-func requireComplete(t *testing.T, label string, r stdinRecord) {
+// observer gave up — see pvefake.StdinRecord.Truncated.
+func requireComplete(t *testing.T, label string, r pvefake.StdinRecord) {
 	t.Helper()
-	if r.truncated {
-		t.Fatalf("%s: the server's stdin drain hit drainJoinTimeout (%s) before EOF, "+
+	if r.Truncated {
+		t.Fatalf("%s: the server's stdin drain hit pvefake.DrainJoinTimeout (%s) before EOF, "+
 			"so this record is not evidence of anything; it holds %d byte(s) so far",
-			label, drainJoinTimeout, len(r.data))
+			label, pvefake.DrainJoinTimeout, len(r.Data))
 	}
 }
 
@@ -79,14 +80,15 @@ func replaceOSStdin(t *testing.T, payload []byte) *os.File {
 
 // dialFake dials fs as root over a freshly generated, server-allowed
 // keypair. It is the same entry point production uses.
-func dialFake(t *testing.T, fs *fakeServer) *Client {
+func dialFake(t *testing.T, fs *pvefake.SSHServer) *Client {
 	t.Helper()
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.Start(t)
+	fs.AllowKey(pub)
+	fs.RecordStdin()
+	fs.Start()
 
 	var captured CapturedHostKey
-	c, err := Dial(context.Background(), fs.addr, "root", kp.PrivateKeyPEM, CaptureHostKeyCallback(&captured))
+	c, err := Dial(context.Background(), fs.Addr(), "root", kp.PrivateKeyPEM, CaptureHostKeyCallback(&captured))
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -125,8 +127,8 @@ func TestRun_NeverForwardsCallerStdin(t *testing.T) {
 	requirePayloadUsable(t)
 	stdin := replaceOSStdin(t, stdinPayload)
 
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) { return "ok\n", "", 0 }
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) { return "ok\n", "", 0 })
 	c := dialFake(t, fs)
 
 	for i := range runs {
@@ -139,16 +141,16 @@ func TestRun_NeverForwardsCallerStdin(t *testing.T) {
 		}
 	}
 
-	records := fs.stdinRecords()
+	records := fs.StdinRecords()
 	if len(records) != runs {
 		t.Fatalf("server recorded %d sessions' stdin, want %d — a server that never reads stdin "+
 			"records nothing and would make this test vacuous", len(records), runs)
 	}
 	for i, got := range records {
 		requireComplete(t, fmt.Sprintf("Run #%d", i+1), got)
-		if len(got.data) != 0 {
+		if len(got.Data) != 0 {
 			t.Errorf("Run #%d forwarded %d bytes of the caller's stdin (%q), want 0 bytes",
-				i+1, len(got.data), got.data)
+				i+1, len(got.Data), got.Data)
 		}
 	}
 
@@ -161,114 +163,5 @@ func TestRun_NeverForwardsCallerStdin(t *testing.T) {
 	if !bytes.Equal(left, stdinPayload) {
 		t.Errorf("caller stdin after %d Run calls: got %d bytes (%q), want the original %d bytes (%q)",
 			runs, len(left), left, len(stdinPayload), stdinPayload)
-	}
-}
-
-// TestFakeServer_RecordsStdinWhenSent is the POSITIVE CONTROL for the test
-// above, and the reason that test is an assertion rather than decoration.
-//
-// "The server recorded 0 bytes" is only evidence that nothing was sent if
-// the server is capable of recording bytes that ARE sent. This test drives
-// the same fake server, over the same dial, through the same
-// conn.NewSession() call Run itself makes — differing from Run in exactly
-// one respect, that it sets session.Stdin. That single difference IS the
-// mutation `session.Stdin = os.Stdin`, expressed as a test rather than as
-// an edit, so the observer is proven live on every run of the suite and
-// not only when someone remembers to run a mutant.
-func TestFakeServer_RecordsStdinWhenSent(t *testing.T) {
-	requirePayloadUsable(t)
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) { return "", "", 0 }
-	c := dialFake(t, fs)
-
-	session, err := c.conn.NewSession()
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	session.Stdin = bytes.NewReader(stdinPayload)
-	var out bytes.Buffer
-	session.Stdout = &out
-	if err := session.Run("true"); err != nil {
-		t.Fatalf("session.Run: %v", err)
-	}
-
-	records := fs.stdinRecords()
-	if len(records) != 1 {
-		t.Fatalf("server recorded %d sessions' stdin, want 1", len(records))
-	}
-	requireComplete(t, "positive control", records[0])
-	if !bytes.Equal(records[0].data, stdinPayload) {
-		t.Fatalf("server recorded %d bytes (%q), want the %d bytes the session sent (%q) — "+
-			"the stdin observer is not working, which makes TestRun_NeverForwardsCallerStdin vacuous",
-			len(records[0].data), records[0].data, len(stdinPayload), stdinPayload)
-	}
-}
-
-// TestFakeServer_BoundedDrainRecordsTruncation is the companion for the
-// bound itself.
-//
-// The drain join has to be bounded, because an unbounded one turns "a
-// client that never closes stdin" into a HANG — the whole package sitting
-// until the Makefile's 20m timeout instead of failing. But a bound is only
-// safe if it is visible: a bound that silently recorded a short read would
-// convert that hang into a quiet "0 bytes received", and
-// TestRun_NeverForwardsCallerStdin would then pass because its observer
-// gave up rather than because nothing was sent. That is the failure this
-// test rules out.
-//
-// It drives a session that writes to stdin and never closes it, using
-// StdinPipe so the client side does not block on its own copy, and
-// requires the server to (a) come back rather than deadlock and (b) mark
-// the record truncated.
-func TestFakeServer_BoundedDrainRecordsTruncation(t *testing.T) {
-	orig := drainJoinTimeout
-	drainJoinTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { drainJoinTimeout = orig })
-
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) { return "", "", 0 }
-	c := dialFake(t, fs)
-
-	session, err := c.conn.NewSession()
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	// StdinPipe, not session.Stdin: with an explicit pipe x/crypto/ssh
-	// installs no stdin copy func, so the CLIENT never blocks waiting for
-	// a source that will not end. The server is the only side under test.
-	w, err := session.StdinPipe()
-	if err != nil {
-		t.Fatalf("StdinPipe: %v", err)
-	}
-	if err := session.Start("true"); err != nil {
-		t.Fatalf("session.Start: %v", err)
-	}
-	if _, err := w.Write([]byte("never-closed")); err != nil {
-		t.Fatalf("write to stdin pipe: %v", err)
-	}
-	// Deliberately no w.Close(): this session's stdin never reaches EOF.
-
-	done := make(chan error, 1)
-	go func() { done <- session.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the server never replied: the drain join is unbounded again, and a suite that " +
-			"hangs is worse than one that fails")
-	}
-
-	records := fs.stdinRecords()
-	if len(records) != 1 {
-		t.Fatalf("server recorded %d sessions' stdin, want 1", len(records))
-	}
-	if !records[0].truncated {
-		t.Fatalf("the drain reported a COMPLETE read of a stdin that was never closed "+
-			"(%d bytes, %q); a truncated read recorded as complete would let "+
-			"TestRun_NeverForwardsCallerStdin pass because the observer gave up",
-			len(records[0].data), records[0].data)
 	}
 }

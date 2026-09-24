@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 func TestTapDeviceName(t *testing.T) {
@@ -16,15 +18,15 @@ func TestTapDeviceName(t *testing.T) {
 	}
 }
 
-func dialForBridgeTest(t *testing.T, fs *fakeServer) *Client {
+func dialForBridgeTest(t *testing.T, fs *pvefake.SSHServer) *Client {
 	t.Helper()
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.Start(t)
+	fs.AllowKey(pub)
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -33,12 +35,12 @@ func dialForBridgeTest(t *testing.T, fs *fakeServer) *Client {
 }
 
 func TestTapLinkState_ExistsAndIsolated(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return `[{"ifindex":42,"ifname":"tap100i0","isolated":true}]` + "\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.TapLinkState(context.Background(), "tap100i0")
@@ -54,10 +56,10 @@ func TestTapLinkState_ExistsAndIsolated(t *testing.T) {
 }
 
 func TestTapLinkState_ExistsNotIsolated(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return `[{"ifindex":42,"ifname":"tap100i0","isolated":false}]` + "\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.TapLinkState(context.Background(), "tap100i0")
@@ -70,10 +72,10 @@ func TestTapLinkState_ExistsNotIsolated(t *testing.T) {
 }
 
 func TestTapLinkState_DoesNotExist_NonZeroExit(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", `Device "tap100i0" does not exist.` + "\n", 1
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.TapLinkState(context.Background(), "tap100i0")
@@ -86,10 +88,10 @@ func TestTapLinkState_DoesNotExist_NonZeroExit(t *testing.T) {
 }
 
 func TestTapLinkState_DoesNotExist_EmptyArray(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "[]\n", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	state, err := client.TapLinkState(context.Background(), "tap100i0")
@@ -102,10 +104,10 @@ func TestTapLinkState_DoesNotExist_EmptyArray(t *testing.T) {
 }
 
 func TestTapLinkState_OtherFailureIsAnError(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", "bridge: command not found\n", 127
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	_, err := client.TapLinkState(context.Background(), "tap100i0")
@@ -125,12 +127,12 @@ func TestTapLinkState_RequiresTapName(t *testing.T) {
 }
 
 func TestSetBridgePortIsolated_On(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	if err := client.SetBridgePortIsolated(context.Background(), "tap100i0", true); err != nil {
@@ -142,12 +144,12 @@ func TestSetBridgePortIsolated_On(t *testing.T) {
 }
 
 func TestSetBridgePortIsolated_Off(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	if err := client.SetBridgePortIsolated(context.Background(), "tap100i0", false); err != nil {
@@ -159,10 +161,10 @@ func TestSetBridgePortIsolated_Off(t *testing.T) {
 }
 
 func TestSetBridgePortIsolated_RemoteFailure(t *testing.T) {
-	fs := newFakeServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return "", `Device "tap100i0" does not exist.` + "\n", 1
-	}
+	})
 	client := dialForBridgeTest(t, fs)
 
 	err := client.SetBridgePortIsolated(context.Background(), "tap100i0", true)
