@@ -42,10 +42,11 @@ func TestSetVMConfigField_Success(t *testing.T) {
 }
 
 // TestSetVMConfigField_500SurfacesBodyVerbatim is the key regression test
-// for the whole raw-HTTP-bypass design: go-proxmox's own handleResponse
-// discards the response body entirely on 500/501
-// (`return errors.New(res.Status)`), which would make it impossible to
-// ever see PVE's actual rejection text. This asserts the real, verified
+// for the whole raw-HTTP-bypass design: go-proxmox's error for a 500/501
+// has only the HTTP status line as its text (through v0.8.2-pveforge.0
+// handleResponse's `return errors.New(res.Status)` discarded the body
+// outright), which would keep PVE's actual rejection text out of the
+// error. This asserts the real, verified
 // PVE error string survives byte-for-byte, and that
 // sshexec.IsRootOnlyWriteError recognizes the resulting error — proving
 // the cross-package wiring this task exists to build.

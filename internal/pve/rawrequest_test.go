@@ -151,7 +151,9 @@ func TestRawRequest_ExplicitDataNullIsNull(t *testing.T) {
 
 // TestRawRequest_NonOKStatusPreservesBodyVerbatim is the whole reason this
 // method bypasses go-proxmox: PVE's own diagnostic text on a 500/501 must
-// survive, not be discarded the way go-proxmox's handleResponse would.
+// reach the error's text, where go-proxmox's error text is only the HTTP
+// status line (and through v0.8.2-pveforge.0 its handleResponse discarded
+// the body outright).
 func TestRawRequest_NonOKStatusPreservesBodyVerbatim(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

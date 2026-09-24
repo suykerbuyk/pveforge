@@ -21,8 +21,10 @@ import (
 // the stop step never fails Apply.
 //
 // Goes through RawRequest, like CreateVM, so PVE's own diagnostic text on
-// a rejection reaches the caller verbatim rather than being lost to
-// go-proxmox's own body-discarding handling of HTTP 500/501.
+// a rejection reaches the caller verbatim: go-proxmox's error for a
+// non-2xx has only the HTTP status line as its text, whose reason phrase
+// HTTP/2 erases (through v0.8.2-pveforge.0 it discarded the body of a
+// 500/501 outright).
 //
 // Returns the UPID of the PVE task the stop call kicks off, for the caller
 // to hand to WaitForTask.
@@ -44,12 +46,12 @@ func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, err
 }
 
 // DestroyVM issues PVE's destroy-VM call — DELETE /nodes/{node}/qemu/{vmid}
-// — via RawRequest rather than go-proxmox's own VirtualMachine.Delete, for
-// the same reason CreateVM avoids VirtualMachine's typed create path:
-// go-proxmox's handleResponse discards the response body entirely on HTTP
-// 500/501 — the exact statuses PVE tends to use for a destroy-time
-// rejection — and this project's raw write path exists specifically so
-// that diagnostic text reaches the caller verbatim instead of being lost.
+// — via RawRequest rather than go-proxmox's own VirtualMachine.Delete, so
+// that PVE's diagnostic text on a destroy-time rejection (typically a 500)
+// reaches the caller verbatim: go-proxmox's error for a non-2xx, a
+// *proxmox.StatusError since v0.8.2-pveforge.1 (through .0 the body of a
+// 500/501 was discarded outright), has only the HTTP status line as its
+// text, whose reason phrase HTTP/2 erases.
 //
 // purge, when true, sends PVE's own "purge=1" parameter: beyond deleting
 // the VM's own config and disks, purge additionally strips the destroyed

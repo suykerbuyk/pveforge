@@ -24,14 +24,16 @@ import (
 // Deliberately builds its own http.Request from c.baseURL/c.httpClient/
 // c.authHeader rather than going through go-proxmox — the SAME reason
 // vmconfig.go's SetVMConfigFieldCAS bypasses it (see that method's own doc
-// comment): go-proxmox's handleResponse discards the response body
-// entirely on HTTP 500/501, and PVE uses exactly those statuses for many
-// of its own rejection errors (root-only fields, digest conflicts, bad
-// parameters). A raw escape hatch's entire value proposition is letting
-// the caller see PVE's own diagnostic text when something goes wrong —
-// losing it on precisely the statuses most likely to carry a useful error
-// would defeat the command's purpose. This also rules out go-proxmox's own
-// Post/Put (they JSON-encode the body; PVE's REST API expects form-encoded
+// comment). Through v0.8.2-pveforge.0 go-proxmox's handleResponse
+// discarded the response body on HTTP 500/501; since .1 it returns a
+// *proxmox.StatusError that keeps it. What still holds at .3: that error's
+// text is only the HTTP status line, whose reason phrase HTTP/2 erases,
+// while this method's *StatusError puts PVE's own body text in the message.
+// PVE uses 500 for many of its own rejection errors (root-only fields,
+// digest conflicts, bad parameters), and a raw escape hatch's entire value
+// proposition is letting the caller see PVE's own diagnostic text when
+// something goes wrong. This also rules out go-proxmox's own Post/Put
+// (they JSON-encode the body; PVE's REST API expects form-encoded
 // parameters, matching every other write path in this project).
 //
 // Returns the response body's "data" field unwrapped (see

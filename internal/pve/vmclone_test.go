@@ -152,10 +152,11 @@ func TestCloneVM_RequiresNode(t *testing.T) {
 }
 
 // TestCloneVM_ServerErrorBodyIsVisible is the regression test for hazard D
-// — go-proxmox's handleResponse (proxmox.go:446-449) discards the response
-// body entirely on HTTP 500/501, which is the whole reason CloneVM goes
-// through RawRequest rather than VirtualMachine.Clone. Checks the BODY
-// text reaches the caller, not just the status.
+// — go-proxmox's error for a 500/501 has only the HTTP status line as its
+// text (through v0.8.2-pveforge.0 handleResponse discarded the body
+// outright), one of the reasons CloneVM goes through RawRequest rather
+// than VirtualMachine.Clone. Checks the BODY text reaches the caller, not
+// just the status.
 func TestCloneVM_ServerErrorBodyIsVisible(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -111,9 +111,10 @@ func isMissingVMError(err error, vmid int) bool {
 
 // fetchVMConfig issues GET /nodes/{node}/qemu/{vmid}/config via RawRequest,
 // whose *pve.StatusError keeps PVE's status line and body, which
-// isMissingVMError reads. (Upstream go-proxmox once discarded the body on
-// HTTP 500/501, the status PVE uses for "no such VM"; the pinned fork keeps
-// it in its *proxmox.StatusError, which pve.NotFound also reads, so
+// isMissingVMError reads. (Through v0.8.2-pveforge.0, upstream's behaviour,
+// go-proxmox discarded the body on HTTP 500/501, the status PVE uses for
+// "no such VM"; since .1 the fork keeps it in its *proxmox.StatusError,
+// which pve.NotFound also reads, so
 // VMCreate.ReRead can classify GetVM's errors the same way. This Op reads
 // the raw config because Read returns its fields as the pre-destroy
 // snapshot, not to route around that.)
