@@ -23,6 +23,7 @@ func newVMCmd() *cobra.Command {
 	cmd.AddCommand(newVMCreateCmd())
 	cmd.AddCommand(newVMGetCmd())
 	cmd.AddCommand(newVMSetCmd())
+	cmd.AddCommand(newVMSnapshotCmd())
 	return cmd
 }
 

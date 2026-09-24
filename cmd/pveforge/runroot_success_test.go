@@ -286,6 +286,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 		"storage", "storage/get", "storage/orphans",
 		"user", "user/ensure",
 		"vm", "vm/create", "vm/get", "vm/set",
+		"vm/snapshot", "vm/snapshot/create", "vm/snapshot/delete", "vm/snapshot/list", "vm/snapshot/rollback",
 	}
 	slices.Sort(paths)
 	if !slices.Equal(paths, want) {

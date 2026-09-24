@@ -1,0 +1,46 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-vm-snapshot-create - Create a snapshot of a VM, with its RAM state
+
+
+.SH SYNOPSIS
+\fBpveforge vm snapshot create <target-id> <vmid> <name> [flags]\fP
+
+
+.SH DESCRIPTION
+Create a snapshot of a VM, with its RAM state (vmstate), and verify it is in
+the snapshot list afterwards. A name that already exists is refused, never
+adopted: the same name is not the same snapshot. The names "current" and
+"pending", in any case, are PVE's own and are refused before anything is sent.
+
+.PP
+Locking: the VM's pveforge lock is held for the whole command (a shared
+read lock for list). It serialises pveforge processes only: a change made
+at the same time from PVE's web UI or qm is not held off.
+
+
+.SH OPTIONS
+\fB--description\fP=""
+	the snapshot's description
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for create
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-vm-snapshot(1)\fP

@@ -227,6 +227,10 @@ var lockingCommands = []string{
 	"pveforge vm create",
 	"pveforge vm get",
 	"pveforge vm set",
+	"pveforge vm snapshot create",
+	"pveforge vm snapshot delete",
+	"pveforge vm snapshot list",
+	"pveforge vm snapshot rollback",
 }
 
 // lockSinks returns every function whose call takes an internal/lock lock,

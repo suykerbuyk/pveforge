@@ -1,0 +1,48 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-vm-snapshot-delete - Delete one or more of a VM's snapshots, newest first
+
+
+.SH SYNOPSIS
+\fBpveforge vm snapshot delete <target-id> <vmid> <name>\&... [flags]\fP
+
+
+.SH DESCRIPTION
+Delete one or more of a VM's snapshots. The names are deleted newest first,
+whatever order they are given in (read from the snapshot list under the
+VM's lock), one at a time, each confirmed gone afterwards. A name that is
+not a snapshot of the VM is reported as absent, not refused. If a delete
+fails, the command stops and says which were already deleted; running the
+same command again finishes the job.
+
+.PP
+To clear the way for a rollback, pass the snapshots vm snapshot rollback
+names as newer than its target.
+
+.PP
+Locking: the VM's pveforge lock is held for the whole command (a shared
+read lock for list). It serialises pveforge processes only: a change made
+at the same time from PVE's web UI or qm is not held off.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for delete
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-vm-snapshot(1)\fP
