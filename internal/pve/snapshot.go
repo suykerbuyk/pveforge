@@ -23,6 +23,34 @@ import (
 // exclude it — see realSnapshots.
 const currentPseudoSnapshot = "current"
 
+// isPseudoEntryName reports whether name, trimmed, is exactly the "current"
+// pseudo-entry. It is the reserved-name guard of the three DESTRUCTIVE-path
+// primitives — NewerSnapshots, Rollback and CascadeDeleteSnapshots — which
+// must refuse the pseudo-entry but must still reach every REAL snapshot,
+// including one named "Current": case-folding here made such a snapshot a
+// dead end (it counted as newer, via realSnapshots, and then could be
+// neither deleted nor rolled back to). Exact, like realSnapshots, because
+// PVE's own pseudo-entry is always exactly "current".
+//
+// Trimmed because no real snapshot name can carry whitespace, so refusing
+// a padded " current" loses nothing and keeps it off the network.
+//
+// CreateSnapshot deliberately does NOT use this: refusing to CREATE any
+// case variant of "current" is a conservative policy of its own (see its
+// guard), and the asymmetry is intended.
+//
+// UNVERIFIED against a live host, owed to pveforge-nested-pve-test-harness
+// (from a reading of PVE's source, not observed): PVE's snapshot names are
+// pve-configid, ^[a-z][a-z0-9_]{1,40}$ case-insensitively, so "Current" is a
+// legal name; qemu-server's snapshot create refuses only $snapname eq
+// 'current' (exact), so "Current" can be created through the web UI or qm.
+// If PVE in fact refuses "Current" too, nothing here is wrong: a "Current"
+// target is then simply not found after one list read, and nothing
+// destructive is sent.
+func isPseudoEntryName(name string) bool {
+	return strings.TrimSpace(name) == currentPseudoSnapshot
+}
+
 // ListSnapshots returns every entry PVE reports for vmid's snapshot list —
 // GET /nodes/{node}/qemu/{vmid}/snapshot — INCLUDING the synthetic
 // "current" pseudo-entry. The raw list is deliberately what this returns:
@@ -137,8 +165,11 @@ func (e *ErrSnapshotExists) Error() string {
 }
 
 // ErrReservedSnapshotName reports that a snapshot operation refused because
-// the name it was given is PVE's reserved "current" pseudo-entry (matched
-// trimmed and case-insensitively). Matchable with errors.As against
+// the name it was given is PVE's reserved "current" pseudo-entry — matched
+// trimmed and case-insensitively by CreateSnapshot, which refuses to create
+// any spelling of it, and trimmed but EXACTLY by NewerSnapshots, Rollback
+// and CascadeDeleteSnapshots (isPseudoEntryName), which must still reach a
+// real snapshot named "Current". Matchable with errors.As against
 // *ErrReservedSnapshotName. Raised by CreateSnapshot, NewerSnapshots,
 // Rollback and CascadeDeleteSnapshots — which is why its message says "not
 // a real snapshot" rather than naming any one operation.
@@ -225,6 +256,10 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name
 	//
 	// Trimmed AND case-folded, because this guard's job is to refuse, and
 	// a refusal should match the concept rather than one spelling of it.
+	// Deliberately broader than the destructive-path guard
+	// (isPseudoEntryName, exact): refusing to CREATE "Current" costs only a
+	// name, while refusing to delete or roll back to an existing "Current"
+	// would strand a real snapshot.
 	// " current", "current " and "\tcurrent" all reach PVE's create
 	// endpoint with the padding intact if only case is normalized — and
 	// "PVE will reject it anyway" is precisely the assumption this guard
@@ -444,7 +479,7 @@ func (c *Client) NewerSnapshots(ctx context.Context, node string, vmid int, targ
 	if strings.TrimSpace(target) == "" {
 		return nil, fmt.Errorf("newer snapshots of vm %d: snapshot name is required", vmid)
 	}
-	if strings.EqualFold(strings.TrimSpace(target), currentPseudoSnapshot) {
+	if isPseudoEntryName(target) {
 		return nil, fmt.Errorf("newer snapshots of vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: target})
 	}
 
@@ -540,7 +575,7 @@ func (c *Client) Rollback(ctx context.Context, node string, vmid int, name strin
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("rollback vm %d: snapshot name is required", vmid)
 	}
-	if strings.EqualFold(strings.TrimSpace(name), currentPseudoSnapshot) {
+	if isPseudoEntryName(name) {
 		return fmt.Errorf("rollback vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: name})
 	}
 
@@ -628,7 +663,7 @@ func (c *Client) CascadeDeleteSnapshots(ctx context.Context, node string, vmid i
 		if strings.TrimSpace(n) == "" {
 			return nil, fmt.Errorf("cascade delete snapshots of vm %d: snapshot name %d of %d is blank", vmid, i+1, len(names))
 		}
-		if strings.EqualFold(strings.TrimSpace(n), currentPseudoSnapshot) {
+		if isPseudoEntryName(n) {
 			return nil, fmt.Errorf("cascade delete snapshots of vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: n})
 		}
 	}
