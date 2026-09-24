@@ -108,14 +108,6 @@ func TestSeam_RestorePutsThePreviousGuardBack(t *testing.T) {
 	}
 }
 
-// TestNoParallelTests pins what netguard's ExpectViolation depends on: it
-// scopes a deliberate violation by wall-clock nesting rather than by
-// goroutine, so a parallel test could have its real violation excused by an
-// unrelated companion.
-func TestNoParallelTests(t *testing.T) {
-	netguard.AssertNoParallel(t)
-}
-
 // TestNoPreInstallDialer pins the other side of the ordering constraint the
 // package doc calls load-bearing. Install must precede m.Run; this requires
 // that nothing in this package builds a client before TestMain is entered at

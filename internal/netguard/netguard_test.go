@@ -351,11 +351,6 @@ func TestInstall_PreservesTheTransportFieldsPveDependsOn(t *testing.T) {
 	}
 }
 
-// TestNoParallelTests is this package's own use of the guard it exports.
-func TestNoParallelTests(t *testing.T) {
-	AssertNoParallel(t)
-}
-
 // TestNoPreInstallDialer is this package's own use of the guard it exports.
 func TestNoPreInstallDialer(t *testing.T) {
 	AssertNoPreInstallDialer(t)

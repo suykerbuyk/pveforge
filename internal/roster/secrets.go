@@ -112,8 +112,9 @@ var scryptWorkFactorOverride = 0
 // process-wide state with no locking, matching pve.SetSSHPortForIntegrationTests
 // (routed.go:29-49), whose caveat and shape this deliberately copies. Each
 // package's tests run in their own process, so the hazard is only ever
-// intra-package: TestNoParallelTests in this package and in internal/bootstrap
-// pins that neither uses t.Parallel.
+// intra-package: the module's no-parallel pin
+// (internal/sourceguard/noparallel_guard_test.go) holds that no package using
+// it calls t.Parallel.
 //
 // COST OF THE testing IMPORT, measured rather than asserted, because
 // "production code imports testing" is the kind of thing a later reader

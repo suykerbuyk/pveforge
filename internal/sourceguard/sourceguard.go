@@ -57,6 +57,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -375,4 +376,223 @@ func calleeName(fun ast.Expr) string {
 		return f.Sel.Name
 	}
 	return ""
+}
+
+// TestFileFacts is what TestFacts found in one package's test files.
+type TestFileFacts struct {
+	// Files is how many _test.go files were parsed; zero means the walk
+	// proved nothing.
+	Files int
+	// Parallel is "file:line" of every selection of a method named
+	// Parallel or RunParallel: a t.Parallel() or b.RunParallel(...) call,
+	// or a method value taken from one.
+	Parallel []string
+	// Globals is "file:line: what" of every place a test touches
+	// process-global state:
+	//   - an assignment, or ++/--, whose target's root — through fields,
+	//     indexes, derefs and parentheses — is a package-level var of this
+	//     package (declared in a non-test OR a test file) or a name from an
+	//     imported package: seam = f, counter++, registry["k"] = 1,
+	//     cfg.N = 1, os.Stdin = r, http.DefaultClient.Timeout = d;
+	//   - a call of a process-mutating function, matched through the file's
+	//     imports (processMutators): os.Setenv, os.Chdir, log.SetOutput …;
+	//   - a call of a function named *ForTests or *ForIntegrationTests;
+	//   - any use of package netguard, whose recorder is process-wide.
+	Globals []string
+}
+
+// processMutators are functions that change state every test in the
+// process shares, keyed by import path. A name ending in "*" matches every
+// function with that prefix. t.Setenv and t.Chdir are deliberately absent:
+// the testing package itself refuses them in a parallel test.
+var processMutators = map[string][]string{
+	"os":            {"Setenv", "Unsetenv", "Clearenv", "Chdir"},
+	"syscall":       {"Setenv", "Unsetenv", "Clearenv", "Chdir"},
+	"log":           {"Set*"},
+	"log/slog":      {"SetDefault", "SetLogLoggerLevel"},
+	"os/signal":     {"Notify", "Ignore", "Reset", "Stop"},
+	"runtime":       {"GOMAXPROCS"},
+	"runtime/debug": {"Set*"},
+	"net/http":      {"Handle", "HandleFunc"},
+	"flag":          {"Set"},
+}
+
+func mutates(path, name string) bool {
+	for _, m := range processMutators[path] {
+		if m == name || (strings.HasSuffix(m, "*") && strings.HasPrefix(name, strings.TrimSuffix(m, "*"))) {
+			return true
+		}
+	}
+	return false
+}
+
+// rootIdent strips fields, indexes, derefs and parentheses off an
+// assignment target down to the identifier it starts from.
+func rootIdent(e ast.Expr) *ast.Ident {
+	for {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		default:
+			return nil
+		}
+	}
+}
+
+// TestFacts walks the _test.go files of dir — one package, in-package and
+// external tests alike, build tags ignored — for the two facts the
+// module's no-parallel pin needs: where a test runs in parallel, and where
+// a test mutates state every test in the process shares. Like TestCallees
+// it reads test files only; unlike it, it follows nothing, since both facts
+// are about what a test file itself says.
+//
+// Matching is by name, deliberately over-approximate in the same safe
+// direction as ReachableTokens: any method named Parallel counts, and an
+// assignment counts as global whenever its target's root names a
+// package-level var, even if a local of that name shadows it. Either error
+// can only make a package look MORE in need of the pin, never less.
+func TestFacts(dir string) (TestFileFacts, error) {
+	var facts TestFileFacts
+	fset := token.NewFileSet()
+	pkgVars := map[string]bool{}
+	collectVars := func(file *ast.File) {
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				for _, name := range spec.(*ast.ValueSpec).Names {
+					if name.Name != "_" {
+						pkgVars[name.Name] = true
+					}
+				}
+			}
+		}
+	}
+	nonTest, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		return facts, fmt.Errorf("sourceguard: parse %s: %w", dir, err)
+	}
+	for _, pkg := range nonTest {
+		for _, file := range pkg.Files {
+			collectVars(file)
+		}
+	}
+
+	tests, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		return facts, fmt.Errorf("sourceguard: parse tests in %s: %w", dir, err)
+	}
+	var files []*ast.File
+	for _, pkg := range tests {
+		for _, file := range pkg.Files {
+			files = append(files, file)
+			collectVars(file) // a package-level var a test file declares is just as shared
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return fset.Position(files[i].Pos()).Filename < fset.Position(files[j].Pos()).Filename
+	})
+	at := func(n ast.Node) string {
+		p := fset.Position(n.Pos())
+		return fmt.Sprintf("%s:%d", filepath.Base(p.Filename), p.Line)
+	}
+	for _, file := range files {
+		facts.Files++
+		// imported: the name each import is used by in this file -> its path.
+		imported := map[string]string{}
+		for _, imp := range file.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			name := path[strings.LastIndex(path, "/")+1:]
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			imported[name] = path
+		}
+		target := func(lhs ast.Expr, op string) {
+			root := rootIdent(lhs)
+			if root == nil {
+				return
+			}
+			if _, isPkg := imported[root.Name]; isPkg || pkgVars[root.Name] {
+				facts.Globals = append(facts.Globals, at(lhs)+": "+targetText(lhs)+op)
+			}
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if x.Sel.Name == "Parallel" || x.Sel.Name == "RunParallel" {
+					facts.Parallel = append(facts.Parallel, at(x))
+				}
+				if id, ok := x.X.(*ast.Ident); ok && imported[id.Name] != "" && strings.HasSuffix(imported[id.Name], "/netguard") {
+					facts.Globals = append(facts.Globals, at(x)+": netguard."+x.Sel.Name)
+				}
+			case *ast.CallExpr:
+				name := calleeName(x.Fun)
+				if strings.HasSuffix(name, "ForTests") || strings.HasSuffix(name, "ForIntegrationTests") {
+					facts.Globals = append(facts.Globals, at(x)+": "+name)
+				}
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+					if id, ok := sel.X.(*ast.Ident); ok && mutates(imported[id.Name], sel.Sel.Name) {
+						facts.Globals = append(facts.Globals, at(x)+": "+id.Name+"."+sel.Sel.Name)
+					}
+				}
+			case *ast.AssignStmt:
+				if x.Tok == token.DEFINE {
+					return true // := declares locals
+				}
+				for _, lhs := range x.Lhs {
+					target(lhs, " "+x.Tok.String())
+				}
+			case *ast.IncDecStmt:
+				target(x.X, x.Tok.String())
+			}
+			return true
+		})
+	}
+	return facts, nil
+}
+
+// targetText renders an assignment target for a TestFileFacts entry.
+func targetText(e ast.Expr) string {
+	var b strings.Builder
+	var walk func(ast.Expr)
+	walk = func(e ast.Expr) {
+		switch x := e.(type) {
+		case *ast.Ident:
+			b.WriteString(x.Name)
+		case *ast.SelectorExpr:
+			walk(x.X)
+			b.WriteString("." + x.Sel.Name)
+		case *ast.IndexExpr:
+			walk(x.X)
+			b.WriteString("[…]")
+		case *ast.StarExpr:
+			b.WriteString("*")
+			walk(x.X)
+		case *ast.ParenExpr:
+			b.WriteString("(")
+			walk(x.X)
+			b.WriteString(")")
+		default:
+			b.WriteString("…")
+		}
+	}
+	walk(e)
+	return b.String()
 }
