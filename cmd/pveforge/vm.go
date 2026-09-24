@@ -398,7 +398,7 @@ itself fails, one warning line says so instead.`,
 			// refuses any id that would need quoting
 			// (roster.ValidateTargetID).
 			if res.AfterErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: vm %d: the write was applied but its result could not be re-read: %s\n", args[0], vmid, kvjson.QuoteValue(res.AfterErr.Error()))
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: vm %d: the write was applied but its result could not be re-read: %s\n", args[0], vmid, kvjson.QuoteValue(boundErrText(res.AfterErr.Error())))
 			}
 			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.PostApplyErr)
 			return nil
@@ -423,7 +423,7 @@ itself fails, one warning line says so instead.`,
 // roster's own validation.
 func reportPending(errOut io.Writer, targetID string, vmid int, op *idempotent.VMFieldsEnsure, postErr error) {
 	if postErr != nil {
-		fmt.Fprintf(errOut, "warning: %s: vm %d: the change was applied but whether it is pending could not be checked: %s\n", targetID, vmid, kvjson.QuoteValue(postErr.Error()))
+		fmt.Fprintf(errOut, "warning: %s: vm %d: the change was applied but whether it is pending could not be checked: %s\n", targetID, vmid, kvjson.QuoteValue(boundErrText(postErr.Error())))
 		return
 	}
 	for _, f := range op.Pending {

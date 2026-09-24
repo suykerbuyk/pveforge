@@ -248,11 +248,11 @@ var stderrSites = map[string]int{
 	"main.go: runRoot: fmt.Fprintln(stderr, kvjson.QuoteValue(msg))":                                                              1,
 	"main.go: runRoot: root.SetErr(stderr)":                                                                                       1,
 	"roster_import.go: newRosterImportTokenCmd: finishBootstrap(cmd.OutOrStdout(), cmd.ErrOrStderr(), format, args[0], res, err)": 1,
-	"vm.go: newVMSetCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"warning: %s: vm %d: the write was applied but its result could not be re-read: %s\\n\", args[0], vmid, kvjson.QuoteValue(res.AfterErr.Error()))": 1,
-	"vm.go: newVMSetCmd: reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.PostApplyErr)":                                                                                                            1,
-	"vm.go: reportPending: fmt.Fprintf(errOut, \"warning: %s: vm %d: the change was applied but whether it is pending could not be checked: %s\\n\", targetID, vmid, kvjson.QuoteValue(postErr.Error()))":  1,
-	"vm.go: reportPending: fmt.Fprintf(errOut, \"notice: %s: vm %d: %s is pending: it takes effect at the VM's next cold boot\\n\", targetID, vmid, kvjson.QuoteKey(f))":                                   1,
-	"vm.go: reportPending: fmt.Fprintf(errOut, \"notice: %s: vm %d: delete=%s is pending: it takes effect at the VM's next cold boot\\n\", targetID, vmid, kvjson.QuoteValue(f))":                          1,
+	"vm.go: newVMSetCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"warning: %s: vm %d: the write was applied but its result could not be re-read: %s\\n\", args[0], vmid, kvjson.QuoteValue(boundErrText(res.AfterErr.Error())))": 1,
+	"vm.go: newVMSetCmd: reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.PostApplyErr)":                                                                                                                          1,
+	"vm.go: reportPending: fmt.Fprintf(errOut, \"warning: %s: vm %d: the change was applied but whether it is pending could not be checked: %s\\n\", targetID, vmid, kvjson.QuoteValue(boundErrText(postErr.Error())))":  1,
+	"vm.go: reportPending: fmt.Fprintf(errOut, \"notice: %s: vm %d: %s is pending: it takes effect at the VM's next cold boot\\n\", targetID, vmid, kvjson.QuoteKey(f))":                                                 1,
+	"vm.go: reportPending: fmt.Fprintf(errOut, \"notice: %s: vm %d: delete=%s is pending: it takes effect at the VM's next cold boot\\n\", targetID, vmid, kvjson.QuoteValue(f))":                                        1,
 }
 
 // MS1c: every stderr site in this package is on stderrSites, exactly.
