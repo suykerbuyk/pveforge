@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,10 +83,7 @@ func (c *Client) RawRequest(ctx context.Context, method, path string, params url
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, &statusError{
-			code: res.StatusCode,
-			msg:  fmt.Sprintf("raw request: pve returned %s: %s", res.Status, strings.TrimSpace(string(respBody))),
-		}
+		return nil, newStatusError("raw request", res, respBody)
 	}
 
 	raw, err := unwrapDataEnvelope(respBody)
@@ -128,22 +126,60 @@ func unwrapDataEnvelope(body []byte) (json.RawMessage, error) {
 	return envelope.Data, nil
 }
 
-// statusError is RawRequest's non-2xx error. Its text is exactly the
-// "raw request: pve returned <status>: <body>" string callers have always
-// seen (idempotent/networkbridge.go parses it), and a 401 or 403 also
-// satisfies errors.Is(err, ErrNotAuthorized), so the grant validator can
-// tell a rejected credential from any other failure.
+// StatusError is PVE's non-2xx answer to one of this client's own HTTP
+// requests: RawRequest's, and the synchronous config PUT behind
+// SetVMConfigFieldCAS and DeleteVMConfigFieldCAS. Branch on Code, and read
+// Body, rather than on the error's text.
 //
+// Its text is exactly the "<what>: pve returned <Status>: <body>" string
+// callers have always seen — the body trimmed of surrounding whitespace —
+// because the substring classifiers (idempotent's isMissingVMError and
+// isMissingNetworkInterfaceError, IsDigestConflictError) still read it;
+// moving them onto Code and Body is pveforge-unify-notfound-classifiers.
+//
+// A 401 or 403 also satisfies errors.Is(err, ErrNotAuthorized), so the
+// grant validator can tell a rejected credential from any other failure.
 // It deliberately has no Unwrap and no As: it is not a
 // *proxmox.StatusError, so no existing errors.Is/errors.As classification
-// of a RawRequest error changes.
-type statusError struct {
-	code int
-	msg  string
+// of these errors changes.
+type StatusError struct {
+	// Code is the HTTP status code.
+	Code int
+	// Status is the status line as net/http reports it, e.g.
+	// "500 Internal Server Error". Its reason phrase is PVE's own over
+	// HTTP/1.1 but net/http's canonical text over HTTP/2, which carries
+	// none: never branch on it.
+	Status string
+	// Body is the response body exactly as received, untrimmed.
+	Body []byte
+
+	msg string
 }
 
-func (e *statusError) Error() string { return e.msg }
+// newStatusError is the StatusError for res, whose body was body, with
+// what (e.g. "raw request") leading its text.
+func newStatusError(what string, res *http.Response, body []byte) *StatusError {
+	return &StatusError{
+		Code:   res.StatusCode,
+		Status: res.Status,
+		Body:   body,
+		msg:    fmt.Sprintf("%s: pve returned %s: %s", what, res.Status, strings.TrimSpace(string(body))),
+	}
+}
 
-func (e *statusError) Is(target error) bool {
-	return target == ErrNotAuthorized && (e.code == http.StatusUnauthorized || e.code == http.StatusForbidden)
+func (e *StatusError) Error() string { return e.msg }
+
+func (e *StatusError) Is(target error) bool {
+	return target == ErrNotAuthorized && (e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden)
+}
+
+// HTTPStatus reports the HTTP status code of the StatusError in err's
+// chain, if there is one: false for nil, a transport failure, or any
+// error that did not come from a non-2xx answer.
+func HTTPStatus(err error) (code int, ok bool) {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code, true
+	}
+	return 0, false
 }
