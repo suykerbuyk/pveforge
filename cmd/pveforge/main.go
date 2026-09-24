@@ -3,11 +3,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
@@ -155,5 +158,70 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newACLCmd())
 	root.AddCommand(newAccessCmd())
 	root.AddCommand(newSchemaCmd())
+	// cobra adds these two only inside Execute; add them now so the walk
+	// below covers completion's group as well.
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd()
+	refuseUnknownSubcommands(root)
 	return root
+}
+
+// refuseUnknownSubcommands makes every command group in c's tree (a command
+// with subcommands and no Run of its own) fail when it is run as anything
+// but a request for its help. cobra runs a group by printing its help and
+// succeeding, before it looks at the group's arguments, so without this
+// `pveforge vm destroy` (there is no such verb) and `pveforge vm $VERB`
+// with an empty $VERB both exit 0 having done nothing. A script driving
+// destructive operations must see both fail.
+//
+// A group given an argument refuses it as an unknown command. A bare group
+// prints its help to stderr and fails as a usage error. Explicit help
+// (--help, -h, `pveforge help vm`) is unchanged: exit 0, help on stdout.
+func refuseUnknownSubcommands(c *cobra.Command) {
+	if c.HasSubCommands() && !c.Runnable() {
+		c.Args = unknownSubcommand
+		c.RunE = bareGroup
+	}
+	for _, s := range c.Commands() {
+		refuseUnknownSubcommands(s)
+	}
+}
+
+// unknownSubcommand is a group's Args: any argument is a subcommand that
+// does not exist, since a known one would have been run instead.
+func unknownSubcommand(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	// SuggestionsFor reads the command's own distance, which cobra defaults
+	// to 2 only on its own unknown-command path (findSuggestions): left at
+	// 0, only an exact name or a prefix would ever be suggested, never a
+	// typo. Set it the way cobra does, only when unset — idempotent, and
+	// the field is read by nothing else.
+	if cmd.SuggestionsMinimumDistance <= 0 {
+		cmd.SuggestionsMinimumDistance = 2
+	}
+	// No suggestion for an empty argument (anything is "near" it), nor one
+	// that is the argument itself (`pveforge -- vm`: vm is a real command,
+	// taken here as an argument after "--").
+	if s := cmd.SuggestionsFor(args[0]); args[0] != "" && len(s) > 0 && s[0] != args[0] {
+		msg += fmt.Sprintf("; did you mean %q?", s[0])
+	}
+	return errors.New(msg)
+}
+
+// bareGroup is a group's RunE, reached only with no arguments. It writes the
+// group's help to stderr as cobra's default help func renders it (Long, else
+// Short, right-trimmed, then UsageString; pveforge sets no help func or
+// template of its own), without cmd.SetOut, which would persist on the
+// command: a tree run again, as in a test, would then print an explicit
+// `--help` to stderr too.
+func bareGroup(cmd *cobra.Command, _ []string) error {
+	w := cmd.ErrOrStderr()
+	if usage := strings.TrimRightFunc(cmp.Or(cmd.Long, cmd.Short), unicode.IsSpace); usage != "" {
+		fmt.Fprintf(w, "%s\n\n", usage)
+	}
+	fmt.Fprint(w, cmd.UsageString())
+	return fmt.Errorf("%s: a subcommand is required", cmd.CommandPath())
 }

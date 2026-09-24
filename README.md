@@ -318,7 +318,7 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 | Status | Meaning |
 |---|---|
 | `0` | Success, including a command that completed with a printed warning, or completed although it was interrupted after its outcome was observed |
-| `1` | The command failed |
+| `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0 |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
 
