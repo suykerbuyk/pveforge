@@ -844,6 +844,9 @@ type vmCreateFake struct {
 	// create call itself, past both the pre-check and Read.
 	createRejects bool
 
+	// taskExit is the create task's exit status; "" means "OK".
+	taskExit string
+
 	createCalls  int32
 	nextIDChecks int32
 
@@ -997,7 +1000,11 @@ func newVMCreateServer(t *testing.T, node string, vmid int, f *vmCreateFake) *ht
 			_, _ = fmt.Fprintf(w, `{"data":%q}`, upid)
 
 		case strings.HasPrefix(r.URL.Path, fmt.Sprintf("%s/nodes/%s/tasks/", base, node)):
-			_, _ = fmt.Fprintf(w, `{"data":{"status":"stopped","exitstatus":"OK","upid":%q,"node":%q}}`, upid, node)
+			exit := f.taskExit
+			if exit == "" {
+				exit = "OK"
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"status":"stopped","exitstatus":%q,"upid":%q,"node":%q}}`, exit, upid, node)
 
 		default:
 			http.NotFound(w, r)

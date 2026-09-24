@@ -230,7 +230,9 @@ var apiMutationLong = apiLong + fmt.Sprintf(`
 
 Tasks: when PVE answers with a task id (a UPID — a bare string starting
 "UPID:"), this command WAITS for the task and reports its outcome: exit 0
-only if the task ends with exit status OK. The UPID is printed to stderr as
+only if the task ends with exit status OK, or with "WARNINGS: <n>", which PVE
+also counts as success (a stderr notice then says so; not yet verified on a
+live host). The UPID is printed to stderr as
 soon as the task is dispatched; stdout is printed only after the task
 succeeds. The wait can take up to %[1]s (lower it with --wait-timeout), and
 the object lock is held for the whole wait. --lock-wait bounds only
@@ -308,12 +310,16 @@ func waitForAPITask(ctx context.Context, client *pve.RoutedClient, rawPath, upid
 		// on a path that carries a node.
 		node, _ = pve.UPIDNode(upid)
 	}
-	if waitTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, waitTimeout)
-		defer cancel()
+	// The wait takes its own context parameter, never re-bound, so lockguard can
+	// see it is given the command's context (or one derived from it), which
+	// carries the task-warnings reporter.
+	wait := func(waitCtx context.Context) error { return client.WaitForTask(waitCtx, node, upid) }
+	if waitTimeout <= 0 {
+		return wait(ctx)
 	}
-	return client.WaitForTask(ctx, node, upid)
+	wctx, cancel := context.WithTimeout(ctx, waitTimeout)
+	defer cancel()
+	return wait(wctx)
 }
 
 // renderAPIResult renders an `api` response. kvjson.Render's kv mode is

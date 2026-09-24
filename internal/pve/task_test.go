@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -708,6 +709,27 @@ func TestIsTaskOutcomeUnknown(t *testing.T) {
 // to proxmox.NewTask would. The boundary rows are the ones each rule turns
 // on: 6 vs 7 colons for the field count, "XPID:" and "upid:" for the
 // prefix, and an empty second field for the node.
+// runeInUser is an otherwise valid UPID whose user field holds r.
+func runeInUser(r string) string {
+	return "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:root" + r + "pam:"
+}
+
+// TestValidateUPIDShape_RuneRowsAreOtherwiseValid: the rune rows of
+// TestUPIDNode_AgreesWithValidateUPIDShape are refused for their rune alone,
+// never for their shape: the same UPID with an ordinary character there, or
+// in the id or type fields, is accepted.
+func TestValidateUPIDShape_RuneRowsAreOtherwiseValid(t *testing.T) {
+	for _, upid := range []string{
+		runeInUser("@"),
+		"UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:1x0:root@pam:",
+		"UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmxstart:100:root@pam:",
+	} {
+		if err := validateUPIDShape(upid); err != nil {
+			t.Errorf("validateUPIDShape(%q) = %v, want nil", upid, err)
+		}
+	}
+}
+
 func TestUPIDNode_AgreesWithValidateUPIDShape(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -715,15 +737,39 @@ func TestUPIDNode_AgreesWithValidateUPIDShape(t *testing.T) {
 		wantNode string // "" means the shape must be refused
 	}{
 		{"real", wellFormedUPID("pve1"), "pve1"},
-		{"8 fields (7 colons)", "UPID:n:1:2:3:4:5:6", "n"},
+		{"real, captured shape", "UPID:qa-pve-02:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:root@pam:", "qa-pve-02"},
+		{"lowercase hex", "UPID:pve1:0003a1b2:0001c3d4:66f1a2b3:qmstart:100:root@pam:", "pve1"},
+		{"9-digit pstart (long uptime)", "UPID:pve1:0003A1B2:10001C3D4:66F1A2B3:qmstart:100:root@pam:", "pve1"},
+		{"10-digit pstart", "UPID:pve1:0003A1B2:110001C3D4:66F1A2B3:qmstart:100:root@pam:", ""},
+		{"short pid", "UPID:pve1:0001:0001C3D4:66F1A2B3:qmstart:100:root@pam:", ""},
+		{"non-hex starttime", "UPID:pve1:0003A1B2:0001C3D4:66F1A2BZ:qmstart:100:root@pam:", ""},
+		{"no trailing colon", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:root@pam", ""},
+		{"a field too many", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:root@pam:x:", ""},
+		{"8 fields (7 colons)", "UPID:n:1:2:3:4:5:6", ""},
 		{"7 fields (6 colons)", "UPID:n:1:2:3:4:5", ""},
+		{"node with a comma", "UPID:qa,pve:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:root@pam:", ""},
+		{"node ending in a hyphen", "UPID:pve-:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:root@pam:", ""},
+		{"slash in the id", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:1/0:root@pam:", ""},
+		{"empty type", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3::100:root@pam:", ""},
+		{"empty user", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:100::", ""},
+		// Each of these differs from an accepted UPID in the one rune only
+		// (TestValidateUPIDShape_RuneRowsAreOtherwiseValid).
+		{"U+2028 in the user", runeInUser("\u2028"), ""},
+		{"U+2029 in the user", runeInUser("\u2029"), ""},
+		{"newline in the user", runeInUser("\n"), ""},
+		{"space in the user", runeInUser(" "), ""},
+		{"U+00A0 in the user", runeInUser("\u00a0"), ""},
+		{"U+0085 in the id", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:1\u00850:root@pam:", ""},
+		{"tab in the type", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qm\tstart:100:root@pam:", ""},
+		{"escape character in the user", runeInUser("\x1b"), ""},
+		{"non-ASCII letter in the user", "UPID:pve1:0003A1B2:0001C3D4:66F1A2B3:qmstart:100:j\u00f6rg@pve:", "pve1"},
 		{"empty", "", ""},
 		{"no prefix", "XPID:pve1:00001234:0000ABCD:5F000000:qmstart:100:root@pam:", ""},
 		{"lowercase prefix", "upid:pve1:00001234:0000ABCD:5F000000:qmstart:100:root@pam:", ""},
 		{"empty node", "UPID::1:2:3:4:5:6:", ""},
 		// A real task with an EMPTY ID field (vzdump of all guests,
 		// startall, aptupdate). "::" alone is not an empty node.
-		{"empty id field", "UPID:pve1:0001:0002:5F000000:vzdump::root@pam:", "pve1"},
+		{"empty id field", "UPID:pve1:00000001:00000002:5F000000:vzdump::root@pam:", "pve1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			shapeErr := validateUPIDShape(c.upid)
@@ -735,8 +781,8 @@ func TestUPIDNode_AgreesWithValidateUPIDShape(t *testing.T) {
 				if nodeErr == nil {
 					t.Fatalf("UPIDNode(%q) = %q, want a shape error", c.upid, node)
 				}
-				if !strings.Contains(nodeErr.Error(), "malformed upid") {
-					t.Fatalf("UPIDNode(%q) error %q does not say malformed upid", c.upid, nodeErr)
+				if !strings.Contains(nodeErr.Error(), "malformed upid") || !errors.Is(nodeErr, ErrUnverifiableRead) {
+					t.Fatalf("UPIDNode(%q) error %q is not a malformed-upid unverifiable read", c.upid, nodeErr)
 				}
 				return
 			}
@@ -769,5 +815,77 @@ func TestWaitForTask_RefusesPrefixAndNodeShapeErrorsBeforePolling(t *testing.T) 
 				t.Fatalf("expected no status poll, got %d", got)
 			}
 		})
+	}
+}
+
+// TestWaitForTask_ExitStatusRule pins taskExitSucceeded, PVE's own rule
+// (PVE::UPID::status_is_error): "OK" and exactly "WARNINGS: <n>" are a
+// success, and a warnings success is reported to ctx's TaskWarningsFunc —
+// once, with the node, UPID and exit status — while a clean OK reports
+// nothing. Every near miss is the task's error.
+func TestWaitForTask_ExitStatusRule(t *testing.T) {
+	withTaskTimings(t, time.Millisecond, time.Second)
+	upid := wellFormedUPID("qa-pve-01")
+	cases := []struct {
+		exit     string
+		success  bool
+		reported bool
+	}{
+		{"OK", true, false},
+		{"WARNINGS: 1", true, true},
+		{"WARNINGS: 12", true, true},
+		{"WARNINGS: 12345", true, true},
+		{"WARNINGS: 0", true, true},
+		{"WARNINGS: ", false, false},
+		{"WARNINGS: 1x", false, false},
+		{"WARNINGS: -1", false, false},
+		{"WARNINGS: 1\n", false, false},
+		{"x WARNINGS: 1", false, false},
+		{"warnings: 1", false, false},
+		{"WARNING: 1", false, false},
+		{"OK ", false, false},
+		{"unable to lock config", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%q", tc.exit), func(t *testing.T) {
+			handler, _ := taskStatusHandler(t, upid, "qa-pve-01", 0, tc.exit)
+			c := testClient(t, newFakeAPIServer(t, handler))
+			var reports []string
+			ctx := WithTaskWarnings(context.Background(), func(node, u, exit string) {
+				reports = append(reports, node+" "+u+" "+exit)
+			})
+
+			err := c.WaitForTask(ctx, "qa-pve-01", upid)
+
+			if tc.success {
+				if err != nil {
+					t.Fatalf("WaitForTask = %v, want success", err)
+				}
+			} else {
+				var failed *TaskFailedError
+				if !errors.As(err, &failed) || failed.ExitStatus != tc.exit {
+					t.Fatalf("WaitForTask = %v, want *TaskFailedError carrying %q", err, tc.exit)
+				}
+			}
+			var want []string
+			if tc.reported {
+				want = []string{"qa-pve-01 " + upid + " " + tc.exit}
+			}
+			if !slices.Equal(reports, want) {
+				t.Errorf("warnings reports = %q, want %q", reports, want)
+			}
+		})
+	}
+}
+
+// TestWaitForTask_WarningsWithoutASink: a context carrying no
+// TaskWarningsFunc still gets the success, and nothing panics.
+func TestWaitForTask_WarningsWithoutASink(t *testing.T) {
+	withTaskTimings(t, time.Millisecond, time.Second)
+	upid := wellFormedUPID("qa-pve-01")
+	handler, _ := taskStatusHandler(t, upid, "qa-pve-01", 0, "WARNINGS: 3")
+	c := testClient(t, newFakeAPIServer(t, handler))
+	if err := c.WaitForTask(context.Background(), "qa-pve-01", upid); err != nil {
+		t.Fatalf("WaitForTask = %v, want success", err)
 	}
 }

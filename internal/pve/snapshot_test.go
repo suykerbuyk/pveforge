@@ -1809,17 +1809,24 @@ func TestReservedNameRefusal_CarriesVMIDAndName(t *testing.T) {
 // TestSnapshotMutations_EscapeNodeInPath: the node is path-escaped in both
 // new mutating paths, not only the snapshot name. The node "qa,pve" is not
 // a realistic PVE node name; it is chosen because url.PathEscape encodes
-// ',' in a path segment while leaving it valid in the unescaped UPID and
-// task paths, so the only thing this test can observe is the escaping.
-// Mutants killed: url.PathEscape(node) dropped from the rollback path and
-// from the delete path.
+// ',' in a path segment, so the escaping is observable. Mutants killed:
+// url.PathEscape(node) dropped from the rollback path and from the delete
+// path.
+//
+// No PVE node name holds a comma, so the fake's UPID for this node is outside
+// PVE's UPID grammar and the wait refuses it as an unverifiable read, before
+// any poll. The request path, which is what this test pins, was sent first.
 func TestSnapshotMutations_EscapeNodeInPath(t *testing.T) {
 	const node = "qa,pve"
+	refusedWait := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnverifiableRead) || !strings.Contains(err.Error(), "malformed upid") {
+			t.Fatalf("err = %v, want the wait's malformed-upid refusal", err)
+		}
+	}
 	t.Run("rollback", func(t *testing.T) {
 		f, c := newSnapshotFixture(t, node, rbVMID, chainABC)
-		if err := c.Rollback(context.Background(), node, rbVMID, "charlie"); err != nil {
-			t.Fatalf("Rollback: %v", err)
-		}
+		refusedWait(t, c.Rollback(context.Background(), node, rbVMID, "charlie"))
 		paths, _, _ := f.recorded()
 		if want := "/nodes/qa%2Cpve/qemu/4242/snapshot/charlie/rollback"; len(paths) != 1 || paths[0] != want {
 			t.Errorf("rollback paths = %q, want exactly [%q]", paths, want)
@@ -1827,9 +1834,8 @@ func TestSnapshotMutations_EscapeNodeInPath(t *testing.T) {
 	})
 	t.Run("delete", func(t *testing.T) {
 		f, c := newSnapshotFixture(t, node, rbVMID, chainABC, `{"data":[{"name":"current","snaptime":0}]}`)
-		if _, err := c.CascadeDeleteSnapshots(context.Background(), node, rbVMID, []string{"charlie"}); err != nil {
-			t.Fatalf("CascadeDeleteSnapshots: %v", err)
-		}
+		_, err := c.CascadeDeleteSnapshots(context.Background(), node, rbVMID, []string{"charlie"})
+		refusedWait(t, err)
 		_, paths, _ := f.recorded()
 		if want := "/nodes/qa%2Cpve/qemu/4242/snapshot/charlie"; len(paths) != 1 || paths[0] != want {
 			t.Errorf("delete paths = %q, want exactly [%q]", paths, want)
