@@ -52,5 +52,8 @@ func (c *Client) GetNodes(ctx context.Context) (proxmox.NodeStatuses, error) {
 	if ns == nil {
 		return nil, fmt.Errorf("get nodes: %w: list payload was null", ErrUnverifiableRead)
 	}
+	if i := nullEntry(ns); i >= 0 {
+		return nil, fmt.Errorf("get nodes: %w: entry %d is null", ErrUnverifiableRead, i)
+	}
 	return ns, nil
 }

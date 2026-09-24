@@ -119,6 +119,9 @@ func (c *Client) TagStillClaimed(ctx context.Context, tag string, excludeVMID in
 	if resources == nil {
 		return false, fmt.Errorf("tag still claimed %q: %w: resource list payload was null", tag, ErrUnverifiableRead)
 	}
+	if i := nullEntry(resources); i >= 0 {
+		return false, fmt.Errorf("tag still claimed %q: %w: resource list entry %d is null", tag, ErrUnverifiableRead, i)
+	}
 
 	exclude := uint64(excludeVMID)
 	for _, r := range resources {
