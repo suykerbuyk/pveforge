@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -64,24 +63,6 @@ type NetworkBridgeClient interface {
 	WaitForTask(ctx context.Context, node, upid string) error
 }
 
-// networkInterfaceMissingSubstring is the phrase this project EXPECTS PVE
-// to use when the target network interface doesn't exist. It is consulted
-// only inside the "iface" entry of a parameter-verification body (form 2 in
-// isMissingNetworkInterfaceError), matched case-insensitively; form 1's
-// pattern spells the same phrase inline, adjacent to the quoted name. It is
-// never matched against the error's full text: that would let any
-// unrelated "does not exist" read as a missing interface. Chosen by analogy
-// with this project's OWN established convention for exactly this class of
-// "does this thing exist" question: sshexec.LinkState's
-// linkDoesNotExistSubstring uses the identical phrase for iproute2's `ip`
-// command, and TapLinkState's own tapDoesNotExistSubstring follows the same
-// pattern. PVE's actual HTTP status/error body for a GET against an unknown
-// node network interface is NOT independently verified against a live host
-// in this implementation session (same empirical-verification-gap
-// discipline flagged throughout this project — see sshexec.LinkState,
-// sshexec.RootOnlyFields, the digest-conflict error text).
-const networkInterfaceMissingSubstring = "does not exist"
-
 // isMissingNetworkInterfaceError reports whether err is PVE saying that
 // iface ITSELF does not exist. It fails CLOSED: reading a missing interface
 // as "absent" satisfies a destroy, so a false positive turns the destroy
@@ -89,9 +70,10 @@ const networkInterfaceMissingSubstring = "does not exist"
 // loud error that surfaces on the first live run. Anything short of PVE
 // unambiguously naming iface as missing is therefore NOT a match.
 //
-// It must be an answer from PVE ("pve returned"), never a transport error,
-// whose text quotes the request URL and so always contains iface's name.
-// Then exactly one of two forms applies, form 2 checked first:
+// It must be PVE's typed answer (pve.NotFound), never a transport error,
+// whose text quotes the request URL and so always contains iface's name,
+// and never untyped text. Then exactly one of two forms applies, form 2
+// checked first (pve.Subject's Param/Name/Nouns rule):
 //
 //   - Form 2, structured. If the body carries PVE's parameter-verification
 //     map ({"errors":{...}}), ONLY its "iface" entry is consulted, and it must
@@ -119,62 +101,7 @@ const networkInterfaceMissingSubstring = "does not exist"
 // error instead of "absent", which is the safe direction for both create
 // and destroy.
 func isMissingNetworkInterfaceError(err error, iface string) bool {
-	if err == nil || iface == "" {
-		return false
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "pve returned") {
-		return false
-	}
-	if entries, structured := pveParameterErrors(msg); structured {
-		return ifaceEntryNamesTarget(entries["iface"], iface)
-	}
-	q := regexp.QuoteMeta(iface)
-	return regexp.MustCompile(`(?i:\b(?:iface|interface))\s+(?:'` + q + `'|"` + q + `")\s+(?i:does not exist)`).MatchString(msg)
-}
-
-// pveParameterErrors decodes the "errors" map of a PVE parameter-
-// verification body carried in msg. structured reports whether msg carries
-// such a body at all; a body that mentions "errors" but does not decode is
-// still reported as structured, with no usable entries, so that it can
-// never fall back to the unstructured form.
-func pveParameterErrors(msg string) (entries map[string]string, structured bool) {
-	i := strings.IndexByte(msg, '{')
-	if i < 0 {
-		return nil, false
-	}
-	var body struct {
-		Errors map[string]json.RawMessage `json:"errors"`
-	}
-	if err := json.NewDecoder(strings.NewReader(msg[i:])).Decode(&body); err != nil || body.Errors == nil {
-		return nil, strings.Contains(msg[i:], `"errors"`)
-	}
-	entries = make(map[string]string, len(body.Errors))
-	for k, raw := range body.Errors {
-		var text string
-		if json.Unmarshal(raw, &text) == nil {
-			entries[k] = text
-		}
-	}
-	return entries, true
-}
-
-var (
-	quotedInterfaceName     = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
-	genericInterfaceMissing = regexp.MustCompile(`(?i)^\s*(?:(?:iface|interface)\s+)?does not exist\.?\s*$`)
-)
-
-// ifaceEntryNamesTarget reports whether the "iface" parameter entry of a
-// PVE parameter-verification body says that iface does not exist.
-func ifaceEntryNamesTarget(entry, iface string) bool {
-	if !strings.Contains(strings.ToLower(entry), networkInterfaceMissingSubstring) {
-		return false
-	}
-	names := quotedInterfaceName.FindAllStringSubmatch(entry, -1)
-	if len(names) == 0 {
-		return genericInterfaceMissing.MatchString(entry)
-	}
-	return len(names) == 1 && names[0][1]+names[0][2] == iface
+	return pve.NotFound(err, pve.Subject{Param: "iface", Name: iface, Nouns: []string{"iface", "interface"}})
 }
 
 // NetworkBridgeEnsure is idempotent.Op for creating or destroying one PVE

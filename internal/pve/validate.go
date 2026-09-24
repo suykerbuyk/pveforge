@@ -164,9 +164,8 @@ func readFailure(what string, err error) error {
 		return err
 	}
 	code := 0
-	var se *statusError
-	if errors.As(err, &se) {
-		code = se.code
+	if c, ok := HTTPStatus(err); ok {
+		code = c
 	}
 	return fmt.Errorf("%s: %w (PVE answered HTTP %d)", what, ErrNotAuthorized, code)
 }

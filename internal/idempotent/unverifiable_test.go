@@ -354,7 +354,7 @@ func TestNetworkBridgeEnsure_Destroy_UnrelatedDoesNotExistIsNotAbsent(t *testing
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			client := newFakeNetworkBridgeClient("pve1")
-			client.getResponses["vmbr1"] = []getResponse{{err: errors.New(c.text)}}
+			client.getResponses["vmbr1"] = []getResponse{{err: fixtureErr(c.text)}}
 			op := uvNetOp(client, "vmbr1")
 			cur, err := op.Read(context.Background())
 			if err == nil {
@@ -369,7 +369,7 @@ func TestNetworkBridgeEnsure_Destroy_UnrelatedDoesNotExistIsNotAbsent(t *testing
 // different interface from "eth0".
 func TestNetworkBridgeEnsure_Destroy_AliasInterfaceIsNotTheParent(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
-	client.getResponses["eth0"] = []getResponse{{err: errors.New(`raw request: pve returned 500 Internal Server Error: iface 'eth0:1' does not exist`)}}
+	client.getResponses["eth0"] = []getResponse{{err: pveAnswer(`raw request: pve returned 500 Internal Server Error: iface 'eth0:1' does not exist`)}}
 	op := uvNetOp(client, "eth0")
 	if cur, err := op.Read(context.Background()); err == nil {
 		t.Fatalf("eth0 read as absent (satisfied=%v) from an error about eth0:1", op.Satisfied(cur))
@@ -414,7 +414,7 @@ func TestIsMissingNetworkInterfaceError(t *testing.T) {
 	}
 	for _, c := range notMissing {
 		t.Run("not/"+c.name, func(t *testing.T) {
-			if isMissingNetworkInterfaceError(errors.New(c.text), c.iface) {
+			if isMissingNetworkInterfaceError(fixtureErr(c.text), c.iface) {
 				t.Fatalf("classified %q as missing from: %s", c.iface, c.text)
 			}
 		})
@@ -432,7 +432,7 @@ func TestIsMissingNetworkInterfaceError(t *testing.T) {
 	}
 	for _, c := range missing {
 		t.Run("missing/"+c.name, func(t *testing.T) {
-			if !isMissingNetworkInterfaceError(errors.New(c.text), c.iface) {
+			if !isMissingNetworkInterfaceError(fixtureErr(c.text), c.iface) {
 				t.Fatalf("did not classify %q as missing from: %s", c.iface, c.text)
 			}
 		})
@@ -451,7 +451,7 @@ func TestNetworkBridgeEnsure_Destroy_GenuineMissingInterfaceIsAbsent(t *testing.
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			client := newFakeNetworkBridgeClient("pve1")
-			client.getResponses["vmbr1"] = []getResponse{{err: errors.New(c.text)}}
+			client.getResponses["vmbr1"] = []getResponse{{err: fixtureErr(c.text)}}
 			op := uvNetOp(client, "vmbr1")
 			cur, err := op.Read(context.Background())
 			if err != nil {

@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
+
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 // VMDestroyClient is the subset of *pve.RoutedClient a VM-destroy Op needs:
@@ -86,16 +87,6 @@ type VMDestroy struct {
 	TagRecheckErr error
 }
 
-// vmConfigMissingSubstring, combined with a vmid-specific path fragment in
-// isMissingVMError, is the text this project EXPECTS PVE's real "no such
-// VM" response to contain — asserted from source review and PVE's
-// documented config-file-backed VM model, NOT independently confirmed
-// against a live host in this implementation session (same
-// empirical-verification gap this project already tracks for
-// pve.IsDigestConflictError's own substring and
-// isMissingNetworkInterfaceError's — see resume.md's Open Threads).
-const vmConfigMissingSubstring = "does not exist"
-
 // isMissingVMError reports whether err looks like PVE's own "no such VM"
 // response for vmid specifically — anchored on the vmid-specific config
 // path fragment PVE's real message names
@@ -108,13 +99,14 @@ const vmConfigMissingSubstring = "does not exist"
 // phrase also guards the other direction: an unrelated error that merely
 // happens to name this vmid's config path (e.g. a permissions error) isn't
 // misclassified as "gone" either.
+//
+// The match itself is pve.NotFound's Fragment rule, on PVE's typed answer
+// only: the phrase is what PVE is EXPECTED to say for a missing VM config,
+// from source review and PVE's documented config-file-backed VM model, NOT
+// confirmed against a live host (see pve.NotFound's own caveat on where
+// PVE puts the message).
 func isMissingVMError(err error, vmid int) bool {
-	if err == nil {
-		return false
-	}
-	needle := fmt.Sprintf("qemu-server/%d.conf", vmid)
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, needle) && strings.Contains(msg, vmConfigMissingSubstring)
+	return pve.NotFound(err, pve.Subject{Fragment: fmt.Sprintf("qemu-server/%d.conf", vmid)})
 }
 
 // fetchVMConfig issues GET /nodes/{node}/qemu/{vmid}/config via RawRequest

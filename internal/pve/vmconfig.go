@@ -156,7 +156,7 @@ func (c *Client) putVMConfig(ctx context.Context, node string, vmid int, form ur
 	if res.StatusCode >= 200 && res.StatusCode < 300 {
 		return nil
 	}
-	return fmt.Errorf("%s: pve returned %s: %s", what, res.Status, strings.TrimSpace(string(body)))
+	return newStatusError(what, res, body)
 }
 
 // digestConflictErrorSubstring is the text this project EXPECTS a PVE
