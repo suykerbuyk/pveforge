@@ -1,0 +1,86 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-api-post - Raw PVE REST POST against <path>
+
+
+.SH SYNOPSIS
+\fBpveforge api post <path> <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Raw PVE REST passthrough for a path with no dedicated pveforge command yet.
+
+.PP
+Output: -o json prints PVE's "data" payload as-is. -o kv prints a JSON
+object's top-level fields as key=value lines, and any other payload (a
+string, a number, null, a list) as ONE line, data=<value>, keyed by PVE's
+own envelope name. A key or string value that could be misread (a control
+character or line break, leading/trailing space, a leading '"', a key with
+\&'=', or a value that is the string "null") is written as one JSON string
+starting with '"'; everything else is written as-is. kv does not preserve
+JSON types: use -o json for exact data.
+
+.PP
+Tasks: when PVE answers with a task id (a UPID — a bare string starting
+"UPID:"), this command WAITS for the task and reports its outcome: exit 0
+only if the task ends with exit status OK. The UPID is printed to stderr as
+soon as the task is dispatched; stdout is printed only after the task
+succeeds. The wait can take up to 10m0s (lower it with --wait-timeout), and
+the object lock is held for the whole wait. --lock-wait bounds only
+acquiring that lock; --wait-timeout bounds the task wait done while holding
+it.
+
+.PP
+A wait that times out (--wait-timeout, or the 10m0s ceiling) reports an
+outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C (SIGINT)
+or SIGTERM stops the wait and reports it the same way, exiting 130 or 143;
+a second Ctrl-C ends pveforge at once, without a report. Either way, follow
+it up with the UPID printed at dispatch:
+  pveforge api get /nodes/<node>/tasks/<upid>/status <target-id>
+
+.PP
+--no-wait prints the UPID and exits without checking the task. On a path
+pveforge locks, that releases the lock before the task finishes.
+
+.PP
+A task id nested inside an object (rather than returned as the bare
+payload) is not recognized and is not waited on.
+
+
+.SH OPTIONS
+\fB--data\fP=[]
+	a key=value request parameter (repeatable)
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for post
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time. A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given
+
+.PP
+\fB--no-wait\fP[=false]
+	if PVE returns a task id (UPID), print it and exit without waiting for the task; the object lock is released before the task finishes
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--unsafe-no-lock\fP[=false]
+	proceed without internal/lock protection when <path> doesn't match a known pveforge-managed object type
+
+.PP
+\fB--wait-timeout\fP=0s
+	give up waiting for a returned task after this long (0 = the 10m0s ceiling; may not exceed it)
+
+
+.SH SEE ALSO
+\fBpveforge-api(1)\fP

@@ -1,0 +1,43 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-completion-fish - Generate the autocompletion script for fish
+
+
+.SH SYNOPSIS
+\fBpveforge completion fish [flags]\fP
+
+
+.SH DESCRIPTION
+Generate the autocompletion script for the fish shell.
+
+.PP
+To load completions in your current shell session:
+
+.EX
+pveforge completion fish | source
+.EE
+
+.PP
+To load completions for every new session, execute once:
+
+.EX
+pveforge completion fish > ~/.config/fish/completions/pveforge.fish
+.EE
+
+.PP
+You will need to start a new shell for this setup to take effect.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for fish
+
+.PP
+\fB--no-descriptions\fP[=false]
+	disable completion descriptions
+
+
+.SH SEE ALSO
+\fBpveforge-completion(1)\fP

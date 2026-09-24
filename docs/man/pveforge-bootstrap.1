@@ -1,0 +1,74 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-bootstrap - Bootstrap a target from PAM/realm username+password to a fully token-authenticated roster entry
+
+
+.SH SYNOPSIS
+\fBpveforge bootstrap <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Bootstrap a target from PAM/realm username+password to a fully token-authenticated roster entry
+
+
+.SH OPTIONS
+\fB--api-port\fP=0
+	PVE API port (default 8006)
+
+.PP
+\fB--grant\fP=[]
+	an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for bootstrap
+
+.PP
+\fB--host\fP=""
+	target host/IP (required unless the target already exists in the roster)
+
+.PP
+\fB--insecure-tls\fP[=false]
+	skip TLS certificate verification for the API
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--no-ssh-key\fP[=false]
+	authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster. The host key is trusted on first use on EVERY such run, and the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair
+
+.PP
+\fB--node\fP=""
+	PVE node name (required unless the target already exists in the roster)
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--pve-user\fP="root@pam"
+	PAM/realm username to bootstrap with: the SSH LOGIN (must be an @pam user); the token's owner is --token-owner. In keyless mode this login's password is used on every run
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--ssh-port\fP=22
+	SSH port on the target host
+
+.PP
+\fB--token-id\fP="pveforge"
+	name of the scoped API token to create
+
+.PP
+\fB--token-owner\fP=""
+	PVE principal that will own the token, as name@realm (default: --pve-user). It is not the SSH login and needs no SSH account. A non-root owner must itself hold the whole role at each granted path, or bootstrap refuses before touching anything. Changing it deliberately leaves the previous token live on PVE, held by nobody (orphaned_token), never revoked; omitting it when the roster holds another owner's token is refused
+
+
+.SH SEE ALSO
+\fBpveforge(1)\fP

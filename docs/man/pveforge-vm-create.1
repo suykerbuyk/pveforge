@@ -1,0 +1,56 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-vm-create - Create a VM at an explicitly requested VMID, refusing a collision
+
+
+.SH SYNOPSIS
+\fBpveforge vm create <target-id> <vmid> [field=value ...] [flags]\fP
+
+
+.SH DESCRIPTION
+Create a VM at the VMID you name, from raw PVE create parameters.
+
+.PP
+The VMID is explicit and required — this command never picks one for you.
+If that VMID is already taken, the command FAILS and names the id; it
+never quietly substitutes a different one. A caller that asked to create
+one VM must never discover it created one at an id it never saw.
+
+.PP
+pveforge does NOT inspect whether the existing VM's configuration
+resembles what you asked to create. "Something already answers to this
+VMID" is the entire collision test.
+
+.PP
+Create parameters are raw PVE fields (cores, memory, net0, ipconfig0,
+scsi0, agent, tags, ...), given exactly like `vm set`: as
+field=value arguments, or via --json / --json-file. Tags are not special
+— pass tags=... as a create parameter and PVE applies them atomically as
+part of the create itself, so the VM is never briefly untagged.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for create
+
+.PP
+\fB--json\fP=""
+	JSON object of create parameters (values must be JSON strings)
+
+.PP
+\fB--json-file\fP=""
+	path to a JSON file of create parameters (values must be JSON strings)
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-vm(1)\fP

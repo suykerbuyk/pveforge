@@ -1,0 +1,52 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-api-get - Raw PVE REST GET against <path>
+
+
+.SH SYNOPSIS
+\fBpveforge api get <path> <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Raw PVE REST passthrough for a path with no dedicated pveforge command yet.
+
+.PP
+Output: -o json prints PVE's "data" payload as-is. -o kv prints a JSON
+object's top-level fields as key=value lines, and any other payload (a
+string, a number, null, a list) as ONE line, data=<value>, keyed by PVE's
+own envelope name. A key or string value that could be misread (a control
+character or line break, leading/trailing space, a leading '"', a key with
+\&'=', or a value that is the string "null") is written as one JSON string
+starting with '"'; everything else is written as-is. kv does not preserve
+JSON types: use -o json for exact data.
+
+
+.SH OPTIONS
+\fB--data\fP=[]
+	a key=value request parameter (repeatable)
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for get
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time. A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--unsafe-no-lock\fP[=false]
+	proceed without internal/lock protection when <path> doesn't match a known pveforge-managed object type
+
+
+.SH SEE ALSO
+\fBpveforge-api(1)\fP

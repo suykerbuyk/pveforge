@@ -27,8 +27,13 @@ Requires Go 1.27.1 or later (`go.mod`) and GNU `install` (Linux).
 
 ```sh
 make build                 # bin/pveforge
-make install               # $(PREFIX)/bin/pveforge, PREFIX defaults to ~/.local
+make install               # $(PREFIX)/bin/pveforge, PREFIX defaults to ~/.local,
+                           # and the man pages to $(PREFIX)/share/man/man1
 ```
+
+There is one man page per command (`man pveforge`, `man pveforge-vm-set`),
+generated from the command tree into `docs/man`. `make man` regenerates them;
+`make test` fails while they are out of date.
 
 ## Commands
 

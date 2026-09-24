@@ -1,0 +1,84 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-roster-import-token - Put an API token minted outside pveforge into the roster, once PVE proves its grants
+
+
+.SH SYNOPSIS
+\fBpveforge roster import-token <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Import an API token minted outside pveforge into the roster.
+
+.PP
+The secret is read from stdin, which must NOT be a terminal: pipe it from
+wherever the token was minted. There is no flag or environment variable for
+it. The roster passphrase therefore cannot be prompted for either: set
+PVEFORGE_ROSTER_PASSPHRASE.
+
+.PP
+Before anything is written, PVE is asked, as the token, what it can do, and
+that must be exactly the --grant scopes (the validation bootstrap runs). A
+token that fails is not written, and nothing on PVE is ever touched: an import
+creates nothing there, so it never revokes anything.
+
+.PP
+A target that already holds a DIFFERENT token is refused unless --replace is
+given; the replaced token is not revoked and stays live on PVE. Importing the
+token the target already holds is a no-op (already_held).
+
+.PP
+An imported target holds a token but no SSH key, so a later plain
+"pveforge bootstrap" of it is refused: pass --no-ssh-key to keep it keyless.
+
+
+.SH OPTIONS
+\fB--api-port\fP=0
+	the target's API port (default 8006)
+
+.PP
+\fB--grant\fP=[]
+	a scope the token must hold, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable, at least one; the token must hold exactly these)
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for import-token
+
+.PP
+\fB--host\fP=""
+	the target's API host (defaults to the roster's, required for a new target)
+
+.PP
+\fB--insecure-tls\fP[=false]
+	skip TLS verification for a new target's API
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--node\fP=""
+	the target's node name (defaults to the roster's, required for a new target)
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--replace\fP[=false]
+	replace a different token the target already holds (the old token is not revoked)
+
+.PP
+\fB--token-id\fP=""
+	the full token id, <user>@<realm>!<token name> (required)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-roster(1)\fP

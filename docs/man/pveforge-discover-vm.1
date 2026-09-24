@@ -1,0 +1,34 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-discover-vm - Describe a VM's config or status schema, per PVE's own API-doc tree
+
+
+.SH SYNOPSIS
+\fBpveforge discover vm <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Describe a VM's config or status schema, per PVE's own API-doc tree
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for vm
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--verb\fP="config"
+	which VM sub-resource to describe: "config" or "status"
+
+
+.SH SEE ALSO
+\fBpveforge-discover(1)\fP
