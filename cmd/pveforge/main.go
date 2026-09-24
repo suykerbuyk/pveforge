@@ -52,6 +52,10 @@ func realMain() int {
 //     lock — it is printed as it is;
 //   - it was at a secret prompt (roster.ErrPromptInterrupted): that error
 //     names the prompt, and is printed as it is;
+//   - vm snapshot rollback's rollback completed and its witness was then
+//     interrupted (errRollbackCompletedWitnessInterrupted): that error says
+//     so, and is printed as it is — the generic note below would contradict
+//     "completed";
 //   - anything else: the error, never replaced — an outcome-unknown or UPID
 //     text keeps at least its head (boundErrText) — between "interrupted (SIGINT): " and a note that a
 //     change already sent may or may not have been applied.
@@ -80,7 +84,7 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	var ie interruptError
 	if ctx := root.Context(); ctx != nil && errors.As(context.Cause(ctx), &ie) {
 		code = ie.exitCode()
-		if !errors.Is(err, lock.ErrLockWaitInterrupted) && !errors.Is(err, roster.ErrPromptInterrupted) {
+		if !errors.Is(err, lock.ErrLockWaitInterrupted) && !errors.Is(err, roster.ErrPromptInterrupted) && !errors.Is(err, errRollbackCompletedWitnessInterrupted) {
 			msg = fmt.Sprintf("interrupted (%s): %s; any change the command had already sent may or may not have been applied", ie, msg)
 		}
 	}

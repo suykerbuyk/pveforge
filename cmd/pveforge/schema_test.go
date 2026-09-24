@@ -73,6 +73,21 @@ func TestNewSchemaCmd_KnownCommandMutationLevels(t *testing.T) {
 		t.Errorf("vm set mutation = %q, want %q", vmSet.Mutation, mutationMutating)
 	}
 
+	// vm snapshot (pveforge-vm-snapshot-cli): list reads, create adds,
+	// delete and rollback destroy state that cannot be recovered.
+	for leaf, want := range map[string]string{
+		"list": mutationSafe, "create": mutationMutating,
+		"delete": mutationDestructive, "rollback": mutationDestructive,
+	} {
+		c, ok := findRootPath(t, schema, "vm", "snapshot", leaf)
+		if !ok {
+			t.Fatalf("vm snapshot %s not found in schema", leaf)
+		}
+		if c.Mutation != want {
+			t.Errorf("vm snapshot %s mutation = %q, want %q", leaf, c.Mutation, want)
+		}
+	}
+
 	bootstrapCmd, ok := findSubcommand(schema, "bootstrap")
 	if !ok {
 		t.Fatal("bootstrap not found in schema")

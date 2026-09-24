@@ -1,0 +1,73 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-vm-snapshot-rollback - Roll a VM back to its newest snapshot, then prove the guest is running
+
+
+.SH SYNOPSIS
+\fBpveforge vm snapshot rollback <target-id> <vmid> <name> [flags]\fP
+
+
+.SH DESCRIPTION
+Roll a VM back to a snapshot, then prove the rolled-back guest is running.
+
+.PP
+Only the NEWEST snapshot can be rolled back to: if newer snapshots exist,
+the rollback is refused before anything is sent, and the refusal names them
+and the vm snapshot delete command that would discard them. Rollback never
+deletes a snapshot itself.
+
+.PP
+After the rollback, a witness command is run in the guest through the QEMU
+guest agent: by default /bin/echo with a fresh random marker, which assumes
+a POSIX guest. --witness-command (repeatable: one argument each) and
+--witness-marker replace it, for example for a Windows guest. The witness
+waits up to --witness-timeout for the agent. --no-witness skips it.
+
+.PP
+Output: target, vmid, snapshot, rollback=completed and witness=verified (or
+witness=skipped). If the witness fails, the command exits 1 and says that
+the rollback itself completed but could not be proven.
+
+.PP
+Locking: the VM's pveforge lock is held for the whole command (a shared
+read lock for list). It serialises pveforge processes only: a change made
+at the same time from PVE's web UI or qm is not held off.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for rollback
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--no-witness\fP[=false]
+	do not run the witness command after the rollback
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--witness-command\fP=[]
+	the witness command to run in the guest, one argument per flag (needs --witness-marker)
+
+.PP
+\fB--witness-marker\fP=""
+	text the witness command's output must contain
+
+.PP
+\fB--witness-timeout\fP=2m0s
+	how long the witness may wait for the guest agent (at most 30m0s)
+
+
+.SH SEE ALSO
+\fBpveforge-vm-snapshot(1)\fP

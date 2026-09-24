@@ -46,6 +46,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `user ensure`, `group ensure` | Create a PVE user or group, or bring it to the state asked for (as root over SSH) |
 | `acl grant` | Grant a role on a path to a user, group or token (as root over SSH) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
+| `vm snapshot list` / `create` / `delete` / `rollback` | List, create and delete a VM's snapshots; roll back to the newest one and prove the guest came back |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
 | `network set`, `network bridge create` / `destroy` | Change node-level network interfaces |
 | `storage orphans` | Diff claimed against actual storage volumes |
@@ -303,10 +304,17 @@ owed to the nested PVE test harness:
   the ACL list's entry shape the grant's read-back requires. A shape that
   differs is refused as unverifiable, and a read-back that cannot find the
   grant fails the command after the grant was made.
-- Library code with no command yet: snapshot rules (the reserved names
-  `current` and `pending`, leaf-only deletion, refusing to roll back on ZFS),
-  full vs linked clones, VM destroy beyond PVE's documentation, and
-  guest-agent command timing and encoding.
+- `vm snapshot`: whether PVE's REST rollback itself refuses a snapshot that
+  is not the newest (pveforge refuses it first, under the VM's lock, but a
+  change from the web UI is not held off), leaf-only deletion, the snapshot
+  list's shape, how long a snapshot, delete or rollback takes against the
+  10-minute task wait, whether a VM is left running after a rollback to a
+  snapshot with RAM state, and how soon the guest agent answers the
+  rollback's witness (`--witness-timeout`, default 2m). The default witness
+  runs `/bin/echo` in the guest, which assumes a POSIX guest.
+- Library code with no command yet: full vs linked clones, VM destroy beyond
+  PVE's documentation, and guest-agent command timing and encoding outside
+  the rollback witness.
 - The text PVE uses for a config digest conflict, and which config fields
   beyond `args` are root-only.
 
