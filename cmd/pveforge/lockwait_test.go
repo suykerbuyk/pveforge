@@ -419,7 +419,9 @@ func TestAddLockWaitFlag_ChainsAnEarlierPreRunE(t *testing.T) {
 }
 
 // TestLockWait_APIUsageSaysWhenItIsInert: on the api verbs, --lock-wait's
-// help says it does nothing where no lock is taken.
+// help says it does nothing where no lock is taken — and says truly where
+// that is: a matched path is always locked, --unsafe-no-lock or not
+// (newAPIVerbCmd); only an unmatched path is unlocked.
 func TestLockWait_APIUsageSaysWhenItIsInert(t *testing.T) {
 	for _, verb := range []string{"get", "post", "put", "delete"} {
 		root := newRootCmd()
@@ -437,8 +439,18 @@ func TestLockWait_APIUsageSaysWhenItIsInert(t *testing.T) {
 		if f == nil {
 			t.Fatalf("api %s: has no --lock-wait flag", verb)
 		}
-		if u := f.Usage; !strings.Contains(u, "no lock is taken and this flag has no effect") || !strings.Contains(u, "--unsafe-no-lock") {
-			t.Errorf("api %s: --lock-wait usage %q does not say when it has no effect", verb, u)
+		u := f.Usage
+		for _, want := range []string{
+			"A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock",
+			"On any other path no lock is taken and this flag has no effect",
+			"post, put and delete are refused unless --unsafe-no-lock is given",
+		} {
+			if !strings.Contains(u, want) {
+				t.Errorf("api %s: --lock-wait usage %q does not say %q", verb, u, want)
+			}
+		}
+		if strings.Contains(u, "or with --unsafe-no-lock, no lock is taken") {
+			t.Errorf("api %s: --lock-wait usage %q claims --unsafe-no-lock skips the lock on a matched path; it does not", verb, u)
 		}
 	}
 	f := newVMSetCmd().Flags().Lookup("lock-wait")

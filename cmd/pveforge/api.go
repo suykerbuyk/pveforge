@@ -207,10 +207,12 @@ func parseDataParams(dataPairs []string) (url.Values, error) {
 	return params, nil
 }
 
-// apiLockWaitNote ends --lock-wait's help on the api verbs: only a path
-// that maps to a pveforge object key is locked (apiObjectKey), so on any
-// other path, or with --unsafe-no-lock, the flag has nothing to bound.
-const apiLockWaitNote = ". On a path with no pveforge object key, or with --unsafe-no-lock, no lock is taken and this flag has no effect"
+// apiLockWaitNote ends --lock-wait's help on the api verbs: a path that
+// maps to a pveforge object key (apiObjectKey) is always locked, and
+// --unsafe-no-lock does not change that; on any other path no lock is taken,
+// so the flag has nothing to bound — and there post/put/delete are refused
+// unless --unsafe-no-lock is given (newAPIVerbCmd).
+const apiLockWaitNote = ". A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given"
 
 // apiLong is `api get`'s help body; apiMutationLong is post/put/delete's.
 const apiLong = `Raw PVE REST passthrough for a path with no dedicated pveforge command yet.
