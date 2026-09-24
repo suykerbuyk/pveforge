@@ -522,7 +522,10 @@ rather than that a change was applied.`,
 			// Advisory (warnNotReread): the exit status stays 0, and stdout
 			// is unchanged.
 			warnNotReread(cmd.ErrOrStderr(), args[0], "vm", strconv.Itoa(vmid), res.AfterErr)
-			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.Changed, res.PostApplyErr)
+			// Worded by whether this Run wrote anything, not by Changed alone:
+			// a conflict retry can end on the no-op path after an earlier
+			// attempt's writes, which stdout reports above.
+			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.Changed || op.Wrote(), res.PostApplyErr)
 			return nil
 		},
 	}

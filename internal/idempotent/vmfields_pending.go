@@ -45,7 +45,7 @@ var _ PostApplier = (*VMFieldsEnsure)(nil)
 // keys never trigger the cloud-init read.
 func (op *VMFieldsEnsure) PostApply(ctx context.Context) error {
 	op.resetFindings()
-	if len(op.Applied) == 0 && len(op.Deleted) == 0 {
+	if !op.Wrote() {
 		return nil
 	}
 	pending, deleting, err := op.readChanges(ctx, "pending", "read pending changes")
@@ -77,7 +77,17 @@ var _ NoopChecker = (*VMFieldsEnsure)(nil)
 // NOT verified against a live host, owed to pveforge-nested-pve-test-
 // harness: the /pending answer for a key re-requested while it is still
 // pending (see PostApply for the rest of /pending's shape).
+//
+// A no-op Run can still have written: an attempt that wrote some keys and
+// then hit a digest conflict is superseded, and the retry can find the rest
+// already as requested (an outside writer set them). Then Wrote is true,
+// and PostNoop is PostApply — this Run's own writes are reported as P1's
+// pending changes, and only the requested keys it never touched as
+// already set — never "already set" for a key this Run wrote.
 func (op *VMFieldsEnsure) PostNoop(ctx context.Context) error {
+	if op.Wrote() {
+		return op.PostApply(ctx)
+	}
 	op.resetFindings()
 	fields := op.requestedFields()
 	if len(fields) == 0 && len(op.Deletes) == 0 {
@@ -90,6 +100,14 @@ func (op *VMFieldsEnsure) PostNoop(ctx context.Context) error {
 	op.AlreadyPending, op.AlreadyPendingDeletes = pick(fields, pending), pick(op.Deletes, deleting)
 	op.AlreadyCloudInitStale, op.AlreadyCloudInitStaleDeletes, err = op.checkCloudInit(ctx, fields, op.Deletes, op.AlreadyPending, op.AlreadyPendingDeletes)
 	return err
+}
+
+// Wrote reports whether this Run wrote or deleted anything, on any attempt:
+// Applied and Deleted accumulate across a conflict retry, so this holds even
+// when the Run ended on the no-op path (Result.Changed false) after an
+// earlier attempt's writes. It is the fact a caller words its report by.
+func (op *VMFieldsEnsure) Wrote() bool {
+	return len(op.Applied) > 0 || len(op.Deleted) > 0
 }
 
 // resetFindings clears what an earlier PostApply or PostNoop found.

@@ -576,3 +576,62 @@ func TestVMFieldsEnsure_PostNoop_NothingRequestedNoRead(t *testing.T) {
 		t.Errorf("PostNoop with nothing requested made requests: %q", client.rawCalls)
 	}
 }
+
+// CN1 (P3 send-back): a conflict retry that ends on the no-op path after an
+// earlier attempt wrote. Attempt 1 writes a, then b's write hits a digest
+// conflict; an outside writer set b, so attempt 2 finds everything as
+// requested and Run takes the no-op path (Changed false). This Run still
+// wrote a: Wrote is true, and PostNoop reports a as P1's pending change —
+// never as "already set" — and only b and c, which this Run never wrote, as
+// already set but pending. One /pending read, as PostApply makes.
+func TestVMFieldsEnsure_ConflictThenNoop_ReportsThisRunsWrites(t *testing.T) {
+	client := &fakeClient{
+		node: "qa-pve-01",
+		rawRequestResults: []json.RawMessage{
+			json.RawMessage(`{"digest":"d1","c":"3"}`),                 // Run's Read, attempt 1
+			json.RawMessage(`{"digest":"d1","c":"3"}`),                 // fresh digest for a
+			json.RawMessage(`{"digest":"d2","a":"1","c":"3"}`),         // fresh digest for b: conflicts
+			json.RawMessage(`{"digest":"d3","a":"1","b":"2","c":"3"}`), // Run's Read, attempt 2: all as requested
+		},
+		setFieldErrs:   []error{nil, errors.New("update rejected: digest mismatch")},
+		pendingResults: []json.RawMessage{json.RawMessage(`[{"key":"a","pending":"1"},{"key":"b","pending":"2"},{"key":"c","pending":"3"},{"key":"z","pending":"9"}]`)},
+	}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Pairs: pairs("a", "1", "b", "2", "c", "3")}
+	res, err := Run(context.Background(), testRosterPath(t), testKey(), op, false)
+	if err != nil || res.Changed || res.PostApplyErr != nil {
+		t.Fatalf("Run = %+v, %v; want a clean no-op", res, err)
+	}
+	if !op.Wrote() || !slices.Equal(op.Applied, []string{"a"}) {
+		t.Fatalf("Wrote %t, Applied %q; want a, written on the superseded attempt", op.Wrote(), op.Applied)
+	}
+	if !slices.Equal(op.Pending, []string{"a"}) || !slices.Equal(op.AlreadyPending, []string{"b", "c"}) {
+		t.Errorf("Pending %q, AlreadyPending %q; want [a] (this Run's write) and [b c] (never written by it)", op.Pending, op.AlreadyPending)
+	}
+	if client.pendingCalls != 1 || client.cloudInitCalls != 0 {
+		t.Errorf("pending reads %d, cloud-init reads %d; want 1 and 0", client.pendingCalls, client.cloudInitCalls)
+	}
+}
+
+// CN1, deletes: a removed on the superseded attempt, b removed by an outside
+// writer before the retry.
+func TestVMFieldsEnsure_ConflictThenNoop_ReportsThisRunsDeletes(t *testing.T) {
+	client := &fakeClient{
+		node: "qa-pve-01",
+		rawRequestResults: []json.RawMessage{
+			json.RawMessage(`{"digest":"d1","a":"x","b":"y"}`), // Run's Read, attempt 1
+			json.RawMessage(`{"digest":"d1","a":"x","b":"y"}`), // fresh digest for a
+			json.RawMessage(`{"digest":"d2","b":"y"}`),         // fresh digest for b: conflicts
+			json.RawMessage(`{"digest":"d3"}`),                 // Run's Read, attempt 2: both gone
+		},
+		deleteCASErrs:  []error{nil, errors.New("update rejected: digest mismatch")},
+		pendingResults: []json.RawMessage{json.RawMessage(`[{"key":"a","delete":1},{"key":"b","delete":1}]`)},
+	}
+	op := &VMFieldsEnsure{Client: client, VMID: 100, Deletes: []string{"a", "b"}}
+	res, err := Run(context.Background(), testRosterPath(t), testKey(), op, false)
+	if err != nil || res.Changed || res.PostApplyErr != nil {
+		t.Fatalf("Run = %+v, %v; want a clean no-op", res, err)
+	}
+	if !op.Wrote() || !slices.Equal(op.PendingDeletes, []string{"a"}) || !slices.Equal(op.AlreadyPendingDeletes, []string{"b"}) {
+		t.Errorf("Wrote %t, PendingDeletes %q, AlreadyPendingDeletes %q; want true, [a], [b]", op.Wrote(), op.PendingDeletes, op.AlreadyPendingDeletes)
+	}
+}

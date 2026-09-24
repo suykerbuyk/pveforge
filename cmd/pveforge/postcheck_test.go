@@ -311,3 +311,44 @@ func TestReportPending_AlreadyNoticesQuoteTheKey(t *testing.T) {
 		t.Errorf("a key forged a line: %q", out.String())
 	}
 }
+
+// VS6 (P3 send-back): a conflict retry that ends as a no-op after an earlier
+// attempt wrote. cores is written; memory's write loses a race to an outside
+// writer who set the same value, so the retry finds everything as requested
+// (Changed false). stdout reports cores as applied, so stderr must agree:
+// cores is this Run's pending change, in P1's words, and only memory —
+// which this Run never wrote — is "already set". A failed check then says
+// the change was applied, never that nothing needed changing.
+func TestVMSet_ConflictThenNoop_StderrAgreesWithStdout(t *testing.T) {
+	f, code, stdout, stderr := runVMSetPending(t, func(f *deleteFakePVE) {
+		f.conflictOn = "memory"
+		f.pendingBody = `[{"key":"cores","value":2,"pending":4},{"key":"memory","value":2048,"pending":4096}]`
+	}, "cores=4", "memory=4096")
+	if !f.conflicted {
+		t.Fatal("the conflict never fired: the test is not testing a retry")
+	}
+	if code != 0 || stdout != "qa-pve-01: cores=4\n" {
+		t.Fatalf("exit %d, stdout %q, stderr %q; want 0 and cores reported as applied", code, stdout, stderr)
+	}
+	want := "notice: qa-pve-01: vm 100: cores is pending: it takes effect at the VM's next cold boot\n" +
+		"notice: qa-pve-01: vm 100: memory" + alreadyPendingSuffix
+	if stderr != want {
+		t.Errorf("stderr:\n got:  %q\n want: %q", stderr, want)
+	}
+	if f.pendingReads != 1 {
+		t.Errorf("pending reads = %d, want 1", f.pendingReads)
+	}
+
+	f, code, stdout, stderr = runVMSetPending(t, func(f *deleteFakePVE) {
+		f.conflictOn = "memory"
+		f.pendingStatus = http.StatusInternalServerError
+		f.pendingBody = "boom"
+	}, "cores=4", "memory=4096")
+	const prefix = "warning: qa-pve-01: vm 100: the change was applied but whether it is pending could not be checked: "
+	if !f.conflicted || code != 0 || stdout != "qa-pve-01: cores=4\n" || strings.Count(stderr, "\n") != 1 || !strings.HasPrefix(stderr, prefix) {
+		t.Errorf("failed check: conflicted %t, exit %d, stdout %q, stderr %q; want one line starting %q", f.conflicted, code, stdout, stderr, prefix)
+	}
+	if strings.Contains(stderr, "nothing needed changing") {
+		t.Errorf("stderr = %q: this Run wrote cores", stderr)
+	}
+}

@@ -89,8 +89,10 @@ type ReReader interface {
 // nothing needed changing. Run calls PostNoop at most once per Run: only on
 // the no-op path (Satisfied, and not force), still under the object's lock,
 // and never when Apply ran — PostApply is that path's check. Its error is
-// advisory and goes to Result.PostApplyErr, so a caller that reports it
-// words it by Result.Changed: on a no-op nothing was applied.
+// advisory and goes to Result.PostApplyErr. A caller that reports it words
+// it by whether the Run wrote anything: usually Result.Changed, but a no-op
+// can follow a conflicted attempt that wrote before it was superseded, and
+// only the Op knows its own writes (VMFieldsEnsure.Wrote).
 //
 // VMFieldsEnsure is the case: its Read sees a value PVE holds as pending as
 // already set, so a re-run of a change that is still only pending is a
@@ -139,9 +141,11 @@ type Result struct {
 	// PostApplyErr is the post-check's error: non-nil only when the Op is
 	// a PostApplier, Apply succeeded, and PostApply then failed; or when
 	// the Op is a NoopChecker, the Run was a no-op, and PostNoop failed. It
-	// wraps that check's cause. Changed says which: a caller must not word
-	// a no-op's failed check as a change that was applied. Like AfterErr it
-	// never fails the Run, and the caller decides how to report it.
+	// wraps that check's cause. A caller must not word a failed check as a
+	// change that was applied when this Run wrote nothing — Changed false,
+	// and (see NoopChecker) no write on a superseded attempt either. Like
+	// AfterErr it never fails the Run, and the caller decides how to report
+	// it.
 	PostApplyErr error
 }
 
