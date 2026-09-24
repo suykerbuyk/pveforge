@@ -58,6 +58,16 @@ for those, vm set asks PVE which of its own changes are not yet on the
 drive and prints one stderr notice each. If a check itself fails, one
 warning line says so.
 
+.PP
+A field that already reads as set may only be pending: PVE's config read
+shows a pending value as applied. So a requested field left untouched
+because it already matched, or a --delete of a key already absent, is also
+checked: one stderr notice per such field PVE still holds pending ("… is
+already set but still pending", "delete=<field> is already done but still
+pending") and, when nothing needed changing, per cloud-init field not yet on
+the drive. When nothing needed changing, a failed check's warning says so
+rather than that a change was applied.
+
 
 .SH OPTIONS
 \fB--delete\fP=[]

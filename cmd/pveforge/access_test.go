@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
@@ -88,11 +89,52 @@ func accessSetupExec(t *testing.T, routes map[string]string, exec func(cmd strin
 	return path, fs, rf
 }
 
-func TestUserEnsure_CreatesAsRoot(t *testing.T) {
-	path, fs, rf := accessSetup(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, map[string]string{
-		"pveum role list": cliRoleList,
-		"pveum acl list":  `[{"path":"/vms/100","roleid":"PVEVMUser","type":"group","ugid":"ops","propagate":0}]`,
+// isPveumWrite reports whether root's command is a pveum user or group
+// write (add or modify).
+func isPveumWrite(cmd string) bool {
+	for _, p := range []string{"pveum user add ", "pveum user modify ", "pveum group add ", "pveum group modify "} {
+		if strings.HasPrefix(cmd, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// accessSetupWrites is accessSetup with a REST fake that reflects root's
+// writes: each route answers from before until root has run a pveum user or
+// group write, then from after where after has the route. Without it the
+// post-write re-read sees the old list, and user/group ensure's read-back
+// check (PostApply) rightly reports a mismatch.
+func accessSetupWrites(t *testing.T, before, after, answers map[string]string) (string, *pvefake.SSHServer, *routeFake) {
+	t.Helper()
+	var written atomic.Bool
+	answer := pveumFake(answers)
+	srv, rf := newRouteFakeFunc(t, func(key string) (string, bool) {
+		if body, ok := after[key]; ok && written.Load() {
+			return body, true
+		}
+		body, ok := before[key]
+		return body, ok
 	})
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
+		if isPveumWrite(cmd) {
+			written.Store(true)
+		}
+		return answer(cmd)
+	})
+	path := newTestRosterWithSSHTarget(t, srv, fs)
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+	rootAt(t, fs)
+	return path, fs, rf
+}
+
+func TestUserEnsure_CreatesAsRoot(t *testing.T) {
+	path, fs, rf := accessSetupWrites(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice},
+		map[string]string{"GET /api2/json/access/users": `{"data":[{"userid":"root@pam","enable":1},{"userid":"alice@pve","enable":1,"comment":"Ops","groups":"ops"}]}`}, map[string]string{
+			"pveum role list": cliRoleList,
+			"pveum acl list":  `[{"path":"/vms/100","roleid":"PVEVMUser","type":"group","ugid":"ops","propagate":0}]`,
+		})
 	code, stdout, stderr := runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", "alice@pve", "--group", "ops", "--comment", "Ops")
 	if code != 0 || stdout != "qa-pve-01: user alice@pve created\n" {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
@@ -127,7 +169,20 @@ func TestUserEnsure_TokenRefusedReadsAsRoot(t *testing.T) {
 	}))
 	t.Cleanup(forbidden.Close)
 	fs := pvefake.NewSSHServer(t)
-	fs.HandleExec(pveumFake(map[string]string{"pveum user list": `[{"userid":"alice@pve","enable":1}]`}))
+	// Root's list reflects root's own modify, as PVE's would.
+	var modified atomic.Bool
+	fs.HandleExec(func(cmd string) (string, string, int) {
+		if isPveumWrite(cmd) {
+			modified.Store(true)
+		}
+		if strings.HasPrefix(cmd, "pveum user list") {
+			if modified.Load() {
+				return `[{"userid":"alice@pve","enable":0}]`, "", 0
+			}
+			return `[{"userid":"alice@pve","enable":1}]`, "", 0
+		}
+		return "", "", 0
+	})
 	path := newTestRosterWithSSHTarget(t, forbidden, fs)
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 	rootAt(t, fs)
@@ -174,7 +229,8 @@ func TestUserEnsure_BadInputRefusedBeforeAnything(t *testing.T) {
 }
 
 func TestGroupEnsure_CreatesAsRoot(t *testing.T) {
-	path, fs, _ := accessSetup(t, map[string]string{"GET /api2/json/access/groups": `{"data":[{"groupid":"dev"}]}`}, nil)
+	path, fs, _ := accessSetupWrites(t, map[string]string{"GET /api2/json/access/groups": `{"data":[{"groupid":"dev"}]}`},
+		map[string]string{"GET /api2/json/access/groups": `{"data":[{"groupid":"dev"},{"groupid":"ops","comment":"Ops team"}]}`}, nil)
 	code, stdout, stderr := runRootArgs("group", "ensure", "--roster", path, "qa-pve-01", "ops", "--comment", "Ops team")
 	if code != 0 || stdout != "qa-pve-01: group ops created\n" || stderr != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
@@ -354,7 +410,8 @@ func TestUserEnsure_EveryEscalatingJoinIsWarned(t *testing.T) {
 		}
 	}
 
-	path, _, _ = accessSetup(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, answers)
+	path, _, _ = accessSetupWrites(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice},
+		map[string]string{"GET /api2/json/access/users": `{"data":[{"userid":"root@pam","enable":1},{"userid":"alice@pve","enable":1,"groups":"admins,ops"}]}`}, answers)
 	code, _, stderr = runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", "alice@pve", "--group", "admins", "--group", "ops", "--allow-escalating-role")
 	if code != 0 {
 		t.Fatalf("allowed: exit %d, stderr %q", code, stderr)

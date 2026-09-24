@@ -12,8 +12,8 @@ import (
 
 // VMDestroyClient is the subset of *pve.RoutedClient a VM-destroy Op needs:
 // the raw REST passthrough (VMDestroy uses this for its existence check —
-// see fetchVMConfig's own doc comment on why the typed GetVM getter can't
-// be used for that), Node, the stop/destroy calls themselves, WaitForTask,
+// see fetchVMConfig's own doc comment on why it reads the raw config
+// rather than the typed GetVM getter), Node, the stop/destroy calls themselves, WaitForTask,
 // and the post-destroy tag recheck. *pve.RoutedClient satisfies this
 // interface structurally (see compat_test.go).
 type VMDestroyClient interface {
@@ -109,12 +109,14 @@ func isMissingVMError(err error, vmid int) bool {
 	return pve.NotFound(err, pve.Subject{Fragment: fmt.Sprintf("qemu-server/%d.conf", vmid)})
 }
 
-// fetchVMConfig issues GET /nodes/{node}/qemu/{vmid}/config via RawRequest
-// — never the typed GetVM getter, because go-proxmox's own transport
-// (which GetVM goes through) discards the response body entirely on HTTP
-// 500/501, the exact status PVE uses for "no such VM," so no classifier
-// could ever be built on top of it. RawRequest preserves the body
-// unconditionally, which is what makes isMissingVMError possible at all.
+// fetchVMConfig issues GET /nodes/{node}/qemu/{vmid}/config via RawRequest,
+// whose *pve.StatusError keeps PVE's status line and body, which
+// isMissingVMError reads. (Upstream go-proxmox once discarded the body on
+// HTTP 500/501, the status PVE uses for "no such VM"; the pinned fork keeps
+// it in its *proxmox.StatusError, which pve.NotFound also reads, so
+// VMCreate.ReRead can classify GetVM's errors the same way. This Op reads
+// the raw config because Read returns its fields as the pre-destroy
+// snapshot, not to route around that.)
 //
 // A RawRequest error matching isMissingVMError is treated as "doesn't
 // exist" (exists == false, err == nil); every other error propagates as a

@@ -73,6 +73,34 @@ type PostApplier interface {
 	PostApply(ctx context.Context) error
 }
 
+// ReReader is implemented by an Op whose re-read after a successful Apply
+// must be stricter than its Read. Run calls ReRead in place of Read for
+// that one re-read and nowhere else: never before Apply, never on a retry.
+// VMCreate is the case: its Read maps any read error to "absent", which is
+// safe before the create (the create call itself refuses a taken vmid) but
+// after it would throw away the one signal that the result could not be
+// re-read. ReRead's error becomes Result.AfterErr, exactly as a failed Read
+// there would.
+type ReReader interface {
+	ReRead(ctx context.Context) (current string, err error)
+}
+
+// NoopChecker is implemented by an Op that has something to check even when
+// nothing needed changing. Run calls PostNoop at most once per Run: only on
+// the no-op path (Satisfied, and not force), still under the object's lock,
+// and never when Apply ran — PostApply is that path's check. Its error is
+// advisory and goes to Result.PostApplyErr. A caller that reports it words
+// it by whether the Run wrote anything: usually Result.Changed, but a no-op
+// can follow a conflicted attempt that wrote before it was superseded, and
+// only the Op knows its own writes (VMFieldsEnsure.Wrote).
+//
+// VMFieldsEnsure is the case: its Read sees a value PVE holds as pending as
+// already set, so a re-run of a change that is still only pending is a
+// no-op, and without this check would tell the operator nothing.
+type NoopChecker interface {
+	PostNoop(ctx context.Context) error
+}
+
 // ErrConflict, when an Op's Apply returns an error wrapping this (via
 // %w), tells Run the failure was a detected concurrent-modification
 // conflict rather than a terminal one — Run responds by re-running the
@@ -110,10 +138,14 @@ type Result struct {
 	// Run — the mutation already happened — so a caller that reports
 	// current state decides for itself how to say it was not re-read.
 	AfterErr error
-	// PostApplyErr is non-nil only when the Op is a PostApplier, Apply
-	// succeeded, and PostApply then failed: it wraps that check's cause.
-	// Like AfterErr it never fails the Run — the mutation already
-	// happened — and the caller decides how to report it.
+	// PostApplyErr is the post-check's error: non-nil only when the Op is
+	// a PostApplier, Apply succeeded, and PostApply then failed; or when
+	// the Op is a NoopChecker, the Run was a no-op, and PostNoop failed. It
+	// wraps that check's cause. A caller must not word a failed check as a
+	// change that was applied when this Run wrote nothing — Changed false,
+	// and (see NoopChecker) no write on a superseded attempt either. Like
+	// AfterErr it never fails the Run, and the caller decides how to report
+	// it.
 	PostApplyErr error
 }
 
@@ -125,8 +157,11 @@ type Result struct {
 // read does not undo or fail an otherwise-successful Apply — Result.After
 // falls back to reporting the same value as Result.Before, since the
 // mutation itself already succeeded, and Result.AfterErr carries the
-// read's cause). If op is a PostApplier, its PostApply then runs once,
-// still under the lock; its failure is Result.PostApplyErr, advisory.
+// read's cause). If op is a ReReader, that re-read is its ReRead rather
+// than its Read. If op is a PostApplier, its PostApply then runs once,
+// still under the lock; its failure is Result.PostApplyErr, advisory. On
+// the no-op path, a NoopChecker's PostNoop runs once instead, under the
+// same rules.
 //
 // If Apply fails with an error wrapping ErrConflict, Run re-runs the
 // entire cycle from Read, up to maxConflictRetries times, before giving
@@ -152,6 +187,12 @@ func Run(ctx context.Context, rosterPath string, key lock.ObjectKey, op Op, forc
 
 		if !force && op.Satisfied(current) {
 			result.Changed = false
+			// Still under the lock, and only on this no-op path.
+			if nc, ok := op.(NoopChecker); ok {
+				if err := nc.PostNoop(ctx); err != nil {
+					result.PostApplyErr = fmt.Errorf("idempotent: %s: no-op check: %w", key, err)
+				}
+			}
 			return result, nil
 		}
 
@@ -163,7 +204,11 @@ func Run(ctx context.Context, rosterPath string, key lock.ObjectKey, op Op, forc
 		}
 
 		result.Changed = true
-		if after, readErr := op.Read(ctx); readErr == nil {
+		reread := op.Read
+		if rr, ok := op.(ReReader); ok {
+			reread = rr.ReRead
+		}
+		if after, readErr := reread(ctx); readErr == nil {
 			result.After = after
 		} else {
 			result.AfterErr = fmt.Errorf("idempotent: %s: re-read: %w", key, readErr)

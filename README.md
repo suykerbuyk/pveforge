@@ -306,7 +306,13 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 - A command's error is printed as one line. Error text longer than 4 KiB keeps
   its head and ends in `… [N bytes elided]`.
 - `vm set` on a running VM prints one stderr notice per change PVE holds as
-  pending until the next cold boot. Its stdout and exit status are unchanged.
+  pending until the next cold boot, and per requested field it left untouched
+  because it already read as set but which PVE still holds pending. Its stdout
+  and exit status are unchanged.
+- `vm create`, `user ensure` and `group ensure` read their result back after
+  the change. A read that fails, a VM PVE then reports does not exist, or a
+  user or group without every requested value is one stderr warning; stdout
+  and the exit status are unchanged.
 - A PVE task that ends with exit status `WARNINGS: <n>` succeeded, as PVE
   itself counts it: the command exits 0 and prints one stderr notice per such
   task, naming it, so the warnings are never silent. Read them in the task's
@@ -339,7 +345,13 @@ owed to the nested PVE test harness:
   stopped VM reports nothing pending, and that hot-pluggable changes are not
   left pending.
 - Where PVE puts a "does not exist" message (the HTTP reason phrase or the
-  body). If it is missed, the result is a loud error, never a silent no-op.
+  body). If it is missed, the result is a loud error, never a silent no-op;
+  after `vm create`, a warning that the result could not be re-read.
+- That a VM whose create task reported OK is readable at once, so `vm create`'s
+  "does not exist" warning is never a false alarm.
+- `vm set`'s `/pending` answer for a field re-requested while it is still
+  pending.
+- That `pveum`'s flags produce the values `user ensure` reads back.
 - `vm set --delete` on a running VM: whether a key that cannot be hot-unplugged
   goes pending, and what PVE answers for deleting a key that is already
   absent. pveforge skips an absent key rather than depend on the answer.

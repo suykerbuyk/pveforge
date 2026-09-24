@@ -72,6 +72,8 @@ type fakeClient struct {
 	// config answers never hands PostApply a config object to reject.
 	pendingResults []json.RawMessage
 	pendingCalls   int
+	// pendingErr fails the /pending read only (P3's no-op check).
+	pendingErr error
 
 	// cloudInitResults and cloudInitErr answer PostApply's GET .../cloudinit
 	// (P2′) the same way, apart from both queues: unscripted it is "[]" —
@@ -192,6 +194,9 @@ func (f *fakeClient) RawRequest(_ context.Context, method, path string, params u
 		f.pendingCalls++
 		if f.rawRequestErr != nil {
 			return nil, f.rawRequestErr
+		}
+		if f.pendingErr != nil {
+			return nil, f.pendingErr
 		}
 		if len(f.pendingResults) == 0 {
 			return json.RawMessage(`[]`), nil

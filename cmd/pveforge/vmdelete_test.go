@@ -43,6 +43,12 @@ type deleteFakePVE struct {
 	cloudInitStatus int
 	cloudInitBody   string
 	cloudInitReads  int
+
+	// conflictOn, when set, makes the first PUT that writes that key lose a
+	// race (P3's conflict-then-no-op): an outside writer applies the same
+	// value first, and PVE refuses this write for its stale digest.
+	conflictOn string
+	conflicted bool
 }
 
 func newDeleteFakePVE(t *testing.T, config map[string]string) (*deleteFakePVE, *httptest.Server) {
@@ -110,6 +116,14 @@ func (f *deleteFakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		form, err := url.ParseQuery(string(raw))
 		if err != nil {
 			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+		if v, ok := form[f.conflictOn]; ok && f.conflictOn != "" && !f.conflicted {
+			f.conflicted = true
+			f.config[f.conflictOn] = v[0]
+			f.digestN++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"data":null,"errors":{"digest":"detected modified configuration - file changed by other user? Try again."}}`))
 			return
 		}
 		f.writes = append(f.writes, form.Encode())

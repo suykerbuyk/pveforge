@@ -82,7 +82,9 @@ type VMCloneClient interface {
 //
 // Not a PostApplier: its Read, like VMCreate's, reads an error as "absent",
 // so a post-Apply check could not tell a failed clone from an unreadable re-
-// read.
+// read. Not yet: no CLI caller. When one lands, it opts in the way VMCreate
+// did — a strict ReRead (ReReader) plus a PostApply for "cloned but not
+// found" — rather than by changing Read.
 type VMClone struct {
 	Client VMCloneClient
 	// SourceVMID is the VM being cloned FROM; it appears in the clone

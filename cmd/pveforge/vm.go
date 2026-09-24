@@ -111,7 +111,12 @@ both succeed. Its limits:
     A signal (Ctrl-C) during that wait exits 130 (143 for SIGTERM) with an
     error saying the VM WAS created and the wait was interrupted before it
     was listed: the tag's lock was released early.
-Without --unique-tag, two creates with the same tags both succeed.`,
+Without --unique-tag, two creates with the same tags both succeed.
+
+After the create, the VM is read back. If that read fails, one stderr warning
+says the result could not be re-read; if PVE answers that the VM just created
+does not exist, one stderr warning says so. Either way stdout is unchanged and
+the exit status is still 0: the create task succeeded.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			params, err := vmCreateParams(args[2:], jsonBody, jsonFile)
@@ -297,6 +302,11 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: vm %d created\n", args[0], resolved)
+			// Advisory: exit 0 and stdout unchanged. The re-read's failure
+			// first, then the post-create check (PVE answered that the VM
+			// just created does not exist), then the tag's visibility.
+			warnNotReread(cmd.ErrOrStderr(), args[0], "vm", strconv.Itoa(resolved), res.AfterErr)
+			warnPostCheck(cmd.ErrOrStderr(), args[0], "vm", strconv.Itoa(resolved), res.Changed, "PVE then reported it does not exist", res.PostApplyErr)
 			if tagGuard {
 				visible, err := waitTagVisible(cmd.Context(), root, uniqueTag, resolved)
 				if err != nil {
@@ -413,7 +423,16 @@ setting (ciuser, sshkeys, ipconfigN, …) is saved at once but reaches the
 guest only when the VM's cloud-init drive is regenerated at its next start:
 for those, vm set asks PVE which of its own changes are not yet on the
 drive and prints one stderr notice each. If a check itself fails, one
-warning line says so.`,
+warning line says so.
+
+A field that already reads as set may only be pending: PVE's config read
+shows a pending value as applied. So a requested field left untouched
+because it already matched, or a --delete of a key already absent, is also
+checked: one stderr notice per such field PVE still holds pending ("… is
+already set but still pending", "delete=<field> is already done but still
+pending") and, when nothing needed changing, per cloud-init field not yet on
+the drive. When nothing needed changing, a failed check's warning says so
+rather than that a change was applied.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kvArgs := args[2:]
@@ -503,7 +522,10 @@ warning line says so.`,
 			// Advisory (warnNotReread): the exit status stays 0, and stdout
 			// is unchanged.
 			warnNotReread(cmd.ErrOrStderr(), args[0], "vm", strconv.Itoa(vmid), res.AfterErr)
-			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.PostApplyErr)
+			// Worded by whether this Run wrote anything, not by Changed alone:
+			// a conflict retry can end on the no-op path after an earlier
+			// attempt's writes, which stdout reports above.
+			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.Changed || op.Wrote(), res.PostApplyErr)
 			return nil
 		},
 	}
@@ -516,19 +538,22 @@ warning line says so.`,
 	return cmd
 }
 
-// reportPending prints, on stderr, what VMFieldsEnsure.PostApply found:
-// one notice per change of this run that PVE holds as pending — stored in
-// the VM's config but taken by the running guest only at its next cold
-// boot — then one per cloud-init change of this run that is saved but not
-// yet on the VM's cloud-init drive; and, when a check could not be made,
-// one warning quoting why, after whatever was found — naming the question
-// left open: whether a change is pending, or (when only the cloud-init
-// check failed) whether it has reached the cloud-init drive. Every line is
-// advisory: the change was made, so the exit status stays 0 and stdout (the
-// lines a script parses) is untouched. Keys and the cause are quoted like
-// every other kv line; the target id is line-safe by the roster's own
-// validation.
-func reportPending(errOut io.Writer, targetID string, vmid int, op *idempotent.VMFieldsEnsure, postErr error) {
+// reportPending prints, on stderr, what VMFieldsEnsure's post-checks found
+// (PostApply after a change, PostNoop on a no-op): one notice per change of
+// this run that PVE holds as pending — stored in the VM's config but taken
+// by the running guest only at its next cold boot — then one per cloud-init
+// change of this run that is saved but not yet on the VM's cloud-init
+// drive; then one per requested setting the run did not change because it
+// already read as set, but which PVE still holds pending or has not yet
+// put on the drive; and, when a check could not be made, one warning
+// quoting why, after whatever was found — naming the question left open:
+// whether a setting is pending, or (when only the cloud-init check failed)
+// whether it has reached the cloud-init drive — and worded by changed
+// (warnPostCheck), since on a no-op nothing was applied. Every line is
+// advisory: the exit status stays 0 and stdout (the lines a script parses)
+// is untouched. Keys and the cause are quoted like every other kv line;
+// the target id is line-safe by the roster's own validation.
+func reportPending(errOut io.Writer, targetID string, vmid int, op *idempotent.VMFieldsEnsure, changed bool, postErr error) {
 	for _, f := range op.Pending {
 		fmt.Fprintf(errOut, "notice: %s: vm %d: %s is pending: it takes effect at the VM's next cold boot\n", targetID, vmid, kvjson.QuoteKey(f))
 	}
@@ -541,15 +566,25 @@ func reportPending(errOut io.Writer, targetID string, vmid int, op *idempotent.V
 	for _, f := range op.CloudInitStaleDeletes {
 		fmt.Fprintf(errOut, "notice: %s: vm %d: delete=%s is saved but not yet on the cloud-init drive: the guest sees it after the drive is regenerated at the VM's next start\n", targetID, vmid, kvjson.QuoteValue(f))
 	}
-	var ciErr *idempotent.CloudInitCheckError
-	switch {
-	case postErr == nil:
-	case errors.As(postErr, &ciErr):
-		// /pending was answered; only the cloud-init check was not.
-		fmt.Fprintf(errOut, "warning: %s: vm %d: the change was applied but whether it has reached the cloud-init drive could not be checked: %s\n", targetID, vmid, kvjson.QuoteValue(boundErrText(postErr.Error())))
-	default:
-		fmt.Fprintf(errOut, "warning: %s: vm %d: the change was applied but whether it is pending could not be checked: %s\n", targetID, vmid, kvjson.QuoteValue(boundErrText(postErr.Error())))
+	for _, f := range op.AlreadyPending {
+		fmt.Fprintf(errOut, "notice: %s: vm %d: %s is already set but still pending: it takes effect at the VM's next cold boot\n", targetID, vmid, kvjson.QuoteKey(f))
 	}
+	for _, f := range op.AlreadyPendingDeletes {
+		fmt.Fprintf(errOut, "notice: %s: vm %d: delete=%s is already done but still pending: it takes effect at the VM's next cold boot\n", targetID, vmid, kvjson.QuoteValue(f))
+	}
+	for _, f := range op.AlreadyCloudInitStale {
+		fmt.Fprintf(errOut, "notice: %s: vm %d: %s is already set but not yet on the cloud-init drive: the guest sees it after the drive is regenerated at the VM's next start\n", targetID, vmid, kvjson.QuoteKey(f))
+	}
+	for _, f := range op.AlreadyCloudInitStaleDeletes {
+		fmt.Fprintf(errOut, "notice: %s: vm %d: delete=%s is already done but not yet on the cloud-init drive: the guest sees it after the drive is regenerated at the VM's next start\n", targetID, vmid, kvjson.QuoteValue(f))
+	}
+	question := "whether it is pending could not be checked"
+	var ciErr *idempotent.CloudInitCheckError
+	if errors.As(postErr, &ciErr) {
+		// /pending was answered; only the cloud-init check was not.
+		question = "whether it has reached the cloud-init drive could not be checked"
+	}
+	warnPostCheck(errOut, targetID, "vm", strconv.Itoa(vmid), changed, question, postErr)
 }
 
 // printDeletedFields prints one "<target>: delete=<field>" line per key

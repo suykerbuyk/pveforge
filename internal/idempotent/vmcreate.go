@@ -54,13 +54,33 @@ type VMCreateClient interface {
 // the one structural correctness issue this Op DOES own is netN/ipconfigN
 // pairing (see Validate).
 //
-// Not a PostApplier: its Read maps any GetVM error to "absent" (a pinned
-// contract), so a post-Apply check could not tell a failed create from an
-// unreadable re-read; that contract must change before it can opt in.
+// A ReReader and a PostApplier (pveforge-post-apply-verification-and-
+// pending, P3): Read's any-error-is-absent contract holds before the create
+// only; the re-read after it is ReRead, which tells PVE's own "no such VM"
+// from a read that failed, and PostApply reports a create whose task
+// succeeded but whose VM is then not found.
 type VMCreate struct {
 	Client VMCreateClient
 	VMID   int
 	Params url.Values
+
+	// createdMissing is ReRead's finding that PVE answered "no such VM"
+	// after the create, consumed by PostApply without another request.
+	createdMissing bool
+}
+
+var (
+	_ ReReader    = (*VMCreate)(nil)
+	_ PostApplier = (*VMCreate)(nil)
+)
+
+// CreatedNotFoundError is VMCreate.PostApply's error: the create task
+// reported success, yet the re-read after it found PVE answering that the
+// VM does not exist. Advisory, through Result.PostApplyErr.
+type CreatedNotFoundError struct{ VMID int }
+
+func (e *CreatedNotFoundError) Error() string {
+	return fmt.Sprintf("vm create: vm %d: the create task succeeded but PVE then reported the vm does not exist", e.VMID)
 }
 
 // Validate reports whether op.Params is well-formed: every ipconfigN key
@@ -181,6 +201,47 @@ func (op *VMCreate) Apply(ctx context.Context) error {
 
 	if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
 		return fmt.Errorf("vm create: vm %d: %w", op.VMID, err)
+	}
+	return nil
+}
+
+// ReRead is Run's re-read after a successful Apply, and only that (see
+// ReReader). Unlike Read it does not read every GetVM error as "absent":
+//   - the VM is present: its marshalled state, as Read gives it;
+//   - PVE's own answer that this vmid's config does not exist
+//     (isMissingVMError, the same classifier VMDestroy uses): "" — absent,
+//     recorded for PostApply;
+//   - any other error: that error, which Run reports as Result.AfterErr,
+//     because a read that failed says nothing about whether the VM exists.
+//
+// NOT verified against a live host, owed to pveforge-nested-pve-test-
+// harness: what PVE 9.2 answers for a missing vmid's status/current (see
+// pve.NotFound's caveat), and that a VM whose create task reported OK is
+// readable at once, so that "absent" here is never a false alarm.
+func (op *VMCreate) ReRead(ctx context.Context) (string, error) {
+	op.createdMissing = false
+	vm, err := op.Client.GetVM(ctx, op.Client.Node(), op.VMID)
+	if err != nil {
+		if isMissingVMError(err, op.VMID) {
+			op.createdMissing = true
+			return "", nil
+		}
+		return "", fmt.Errorf("vm create: vm %d: %w", op.VMID, err)
+	}
+	b, err := json.Marshal(vm)
+	if err != nil {
+		return "", fmt.Errorf("vm create: vm %d: encode current state: %w", op.VMID, err)
+	}
+	return string(b), nil
+}
+
+// PostApply reports a *CreatedNotFoundError when ReRead found PVE saying
+// the VM just created does not exist. It makes no request of its own; when
+// ReRead failed instead, it returns nil, because Result.AfterErr already
+// says the result could not be re-read.
+func (op *VMCreate) PostApply(context.Context) error {
+	if op.createdMissing {
+		return &CreatedNotFoundError{VMID: op.VMID}
 	}
 	return nil
 }

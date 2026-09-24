@@ -59,16 +59,21 @@ type UserEnsure struct {
 	BeforeJoin func(ctx context.Context, groups []string) error
 
 	found *pve.AccessUser // set by Read
+	read  bool            // Read's last list read succeeded
 }
 
 // Read scans the whole user list for UserID. A list that cannot be read is
 // an error, never "absent".
+//
+// found and read are reset before the list is read, so a failed read never
+// leaves an earlier read's user behind for PostApply to judge.
 func (op *UserEnsure) Read(ctx context.Context) (string, error) {
+	op.found, op.read = nil, false
 	users, err := op.Client.ListUsers(ctx)
 	if err != nil {
 		return "", err
 	}
-	op.found = nil
+	op.read = true
 	for i := range users {
 		if users[i].UserID == op.UserID {
 			u := users[i]
@@ -88,6 +93,39 @@ func renderUser(u *pve.AccessUser) string {
 	groups := slices.Clone(u.Groups)
 	slices.Sort(groups)
 	return fmt.Sprintf("enable=%t comment=%q email=%q groups=%q", u.Enabled, u.Comment, u.Email, strings.Join(groups, ","))
+}
+
+// UserEnsure and GroupEnsure are PostAppliers (pveforge-post-apply-
+// verification-and-pending, P3): their pveum flags are not verified against
+// a live host, and reading the result back is the only way a wrong one
+// would show.
+var (
+	_ PostApplier = (*UserEnsure)(nil)
+	_ PostApplier = (*GroupEnsure)(nil)
+)
+
+// ReadBackMismatchError is a PostApply's error when the write succeeded but
+// the object, re-read under the same lock, does not have every requested
+// value. Got is the re-read's rendering (Read's). Advisory, through
+// Result.PostApplyErr.
+type ReadBackMismatchError struct {
+	Kind, ID, Got string
+}
+
+func (e *ReadBackMismatchError) Error() string {
+	return fmt.Sprintf("%s %s reads back as %s, not as requested", e.Kind, e.ID, e.Got)
+}
+
+// PostApply judges Run's re-read, which refreshed found, with Satisfied: no
+// request of its own. A user absent after the write is a mismatch. When
+// that re-read failed there is nothing to judge — Read reset found and read
+// first, and Result.AfterErr already reports the failure — so PostApply
+// returns nil rather than a false mismatch.
+func (op *UserEnsure) PostApply(context.Context) error {
+	if !op.read || op.Satisfied("") {
+		return nil
+	}
+	return &ReadBackMismatchError{Kind: "user", ID: op.UserID, Got: renderUser(op.found)}
 }
 
 // Satisfied reports whether the user exists with every requested value.
@@ -176,16 +214,21 @@ type GroupEnsure struct {
 	Comment *string
 
 	found *pve.AccessGroup // set by Read
+	read  bool             // Read's last list read succeeded
 }
 
 // Read scans the whole group list for GroupID. A list that cannot be read
 // is an error, never "absent".
+//
+// found and read are reset before the list is read, as UserEnsure.Read's
+// are.
 func (op *GroupEnsure) Read(ctx context.Context) (string, error) {
+	op.found, op.read = nil, false
 	groups, err := op.Client.ListGroups(ctx)
 	if err != nil {
 		return "", err
 	}
-	op.found = nil
+	op.read = true
 	for i := range groups {
 		if groups[i].GroupID == op.GroupID {
 			g := groups[i]
@@ -193,10 +236,24 @@ func (op *GroupEnsure) Read(ctx context.Context) (string, error) {
 			break
 		}
 	}
-	if op.found == nil {
-		return "absent", nil
+	return renderGroup(op.found), nil
+}
+
+// renderGroup is GroupEnsure.Read's comparable rendering: "absent", or the
+// group's comment, quoted.
+func renderGroup(g *pve.AccessGroup) string {
+	if g == nil {
+		return "absent"
 	}
-	return fmt.Sprintf("comment=%q", op.found.Comment), nil
+	return fmt.Sprintf("comment=%q", g.Comment)
+}
+
+// PostApply judges Run's re-read as UserEnsure.PostApply does.
+func (op *GroupEnsure) PostApply(context.Context) error {
+	if !op.read || op.Satisfied("") {
+		return nil
+	}
+	return &ReadBackMismatchError{Kind: "group", ID: op.GroupID, Got: renderGroup(op.found)}
 }
 
 // Satisfied reports whether the group exists with the requested comment.

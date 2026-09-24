@@ -51,6 +51,10 @@ type tagClusterFake struct {
 	rootCmds  []string // commands root ran
 	onCreate  func()   // runs inside the create POST, before it is recorded
 	onListing func()   // runs on each /cluster/resources read
+	// afterCreate, when set, answers every read of a VM once the create was
+	// POSTed: "missing" is PVE's 500 for a config that does not exist,
+	// "fail" a 500 that says nothing about existence (P3's warnings).
+	afterCreate string
 }
 
 func newTagCluster(existing map[int]string) *tagClusterFake {
@@ -202,7 +206,17 @@ func (f *tagClusterFake) serve(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.Atoi(strings.SplitN(rest, "/", 2)[0])
 		f.mu.Lock()
 		_, ok := f.vms[id]
+		after := f.afterCreate != "" && f.posts > 0
 		f.mu.Unlock()
+		if after {
+			w.WriteHeader(http.StatusInternalServerError)
+			if f.afterCreate == "missing" {
+				_, _ = fmt.Fprintf(w, `{"data":null,"message":"Configuration file 'nodes/qa-pve-01/qemu-server/%d.conf' does not exist\n"}`, id)
+			} else {
+				_, _ = w.Write([]byte("pve says no"))
+			}
+			return
+		}
 		if !ok {
 			http.Error(w, "no such vm", http.StatusNotFound)
 			return
