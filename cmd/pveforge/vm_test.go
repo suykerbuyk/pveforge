@@ -23,13 +23,14 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
-// answerNothingPending answers vm set's post-apply read of
-// /nodes/{node}/qemu/{vmid}/pending with an empty list — nothing pending,
-// as for a stopped VM — so a fake written for the config endpoint neither
-// counts that read as a config GET nor turns it into a warning. It reports
-// whether it answered.
+// answerNothingPending answers vm set's post-apply reads — of
+// /nodes/{node}/qemu/{vmid}/pending and, after a cloud-init key changed,
+// /cloudinit — with an empty list: nothing pending, nothing stale on the
+// drive, as for a stopped VM. So a fake written for the config endpoint
+// neither counts those reads as config GETs nor turns them into a warning.
+// It reports whether it answered.
 func answerNothingPending(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/pending") {
+	if r.Method != http.MethodGet || !(strings.HasSuffix(r.URL.Path, "/pending") || strings.HasSuffix(r.URL.Path, "/cloudinit")) {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -72,6 +72,13 @@ type fakeClient struct {
 	// config answers never hands PostApply a config object to reject.
 	pendingResults []json.RawMessage
 	pendingCalls   int
+
+	// cloudInitResults and cloudInitErr answer PostApply's GET .../cloudinit
+	// (P2′) the same way, apart from both queues: unscripted it is "[]" —
+	// nothing stale on the drive — and cloudInitErr fails only that read.
+	cloudInitResults []json.RawMessage
+	cloudInitErr     error
+	cloudInitCalls   int
 }
 
 func (f *fakeClient) Node() string { return f.node }
@@ -169,6 +176,17 @@ func (f *fakeClient) RawRequest(_ context.Context, method, path string, params u
 	f.lastRawMethod = method
 	f.lastRawPath = path
 	f.rawCalls = append(f.rawCalls, method+" "+path+"?"+params.Encode())
+	if strings.HasSuffix(path, "/cloudinit") {
+		idx := f.cloudInitCalls
+		f.cloudInitCalls++
+		if f.cloudInitErr != nil {
+			return nil, f.cloudInitErr
+		}
+		if len(f.cloudInitResults) == 0 {
+			return json.RawMessage(`[]`), nil
+		}
+		return f.cloudInitResults[min(idx, len(f.cloudInitResults)-1)], nil
+	}
 	if strings.HasSuffix(path, "/pending") {
 		idx := f.pendingCalls
 		f.pendingCalls++

@@ -37,6 +37,12 @@ type deleteFakePVE struct {
 	pendingStatus int
 	pendingBody   string
 	pendingReads  int
+
+	// cloudInitStatus, cloudInitBody and cloudInitReads do the same for
+	// GET .../cloudinit (P2′).
+	cloudInitStatus int
+	cloudInitBody   string
+	cloudInitReads  int
 }
 
 func newDeleteFakePVE(t *testing.T, config map[string]string) (*deleteFakePVE, *httptest.Server) {
@@ -50,6 +56,21 @@ func newDeleteFakePVE(t *testing.T, config map[string]string) (*deleteFakePVE, *
 func (f *deleteFakePVE) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/qa-pve-01/qemu/100/cloudinit" {
+		f.cloudInitReads++
+		if f.cloudInitStatus != 0 && f.cloudInitStatus != http.StatusOK {
+			w.WriteHeader(f.cloudInitStatus)
+			_, _ = w.Write([]byte(f.cloudInitBody))
+			return
+		}
+		body := f.cloudInitBody
+		if body == "" {
+			body = "[]"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":` + body + `}`))
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/qa-pve-01/qemu/100/pending" {
 		f.pendingReads++
 		if f.pendingStatus != 0 && f.pendingStatus != http.StatusOK {

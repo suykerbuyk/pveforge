@@ -35,6 +35,7 @@ var _ PostApplier = (*VMFieldsEnsure)(nil)
 // read needs only VM.Audit.
 func (op *VMFieldsEnsure) PostApply(ctx context.Context) error {
 	op.Pending, op.PendingDeletes = nil, nil
+	op.CloudInitStale, op.CloudInitStaleDeletes = nil, nil
 	if len(op.Applied) == 0 && len(op.Deleted) == 0 {
 		return nil
 	}
@@ -59,7 +60,7 @@ func (op *VMFieldsEnsure) PostApply(ctx context.Context) error {
 		}
 	}
 	op.Pending, op.PendingDeletes = keys, deletes
-	return nil
+	return op.checkCloudInit(ctx)
 }
 
 // decodePending strictly decodes a /pending answer into the keys with a
@@ -68,23 +69,29 @@ func (op *VMFieldsEnsure) PostApply(ctx context.Context) error {
 // has no string key, a "delete" that is not 0, 1 or 2 — is
 // pve.ErrUnverifiableRead: never read as "nothing is pending".
 func decodePending(raw json.RawMessage) (pending, deleting map[string]bool, err error) {
+	return decodeChanges(raw, "pending")
+}
+
+// decodeChanges is decodePending for any PVE list of the same
+// {key, value?, pending?, delete?} shape; list names it in errors.
+func decodeChanges(raw json.RawMessage, list string) (pending, deleting map[string]bool, err error) {
 	var entries []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
-		return nil, nil, fmt.Errorf("%w: the pending list is not a JSON array", pve.ErrUnverifiableRead)
+		return nil, nil, fmt.Errorf("%w: the %s list is not a JSON array", pve.ErrUnverifiableRead, list)
 	}
 	pending, deleting = map[string]bool{}, map[string]bool{}
 	for i, e := range entries {
 		if e == nil {
-			return nil, nil, fmt.Errorf("%w: pending entry %d is not an object", pve.ErrUnverifiableRead, i)
+			return nil, nil, fmt.Errorf("%w: %s entry %d is not an object", pve.ErrUnverifiableRead, list, i)
 		}
 		var key string
 		if err := json.Unmarshal(e["key"], &key); err != nil || key == "" {
-			return nil, nil, fmt.Errorf("%w: pending entry %d has no key", pve.ErrUnverifiableRead, i)
+			return nil, nil, fmt.Errorf("%w: %s entry %d has no key", pve.ErrUnverifiableRead, list, i)
 		}
 		if d, ok := e["delete"]; ok {
 			var n int
 			if err := json.Unmarshal(d, &n); err != nil || n < 0 || n > 2 {
-				return nil, nil, fmt.Errorf("%w: pending entry %d has a delete flag that is not 0, 1 or 2", pve.ErrUnverifiableRead, i)
+				return nil, nil, fmt.Errorf("%w: %s entry %d has a delete flag that is not 0, 1 or 2", pve.ErrUnverifiableRead, list, i)
 			}
 			if n > 0 {
 				deleting[key] = true

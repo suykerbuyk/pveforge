@@ -86,6 +86,17 @@ type VMFieldsEnsure struct {
 	// PostApply has run.
 	Pending        []string
 	PendingDeletes []string
+
+	// CloudInitStale and CloudInitStaleDeletes are the rest of what
+	// PostApply found: the cloud-init keys (isCloudInitKey) of Applied and
+	// Deleted that PVE has saved but not yet written to the VM's cloud-init
+	// drive, which is regenerated at the VM's next start — so the guest,
+	// even a running one that PVE did not hold the change pending for, does
+	// not see them yet. A key already in Pending or PendingDeletes is not
+	// repeated here. Only this Run's own changes, in Applied's and Deleted's
+	// order; both nil until PostApply has run.
+	CloudInitStale        []string
+	CloudInitStaleDeletes []string
 }
 
 // Validate reports whether op is well-formed: VMID must be positive, at
