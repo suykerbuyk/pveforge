@@ -117,19 +117,6 @@ func (c *RoutedClient) FindByTag(ctx context.Context, tag string) (*proxmox.Clus
 	return c.rest.FindByTag(ctx, tag)
 }
 
-// FindByTagFold is FindByTag matching tags case-insensitively — see
-// Client.FindByTagFold.
-func (c *RoutedClient) FindByTagFold(ctx context.Context, tag string) (*proxmox.ClusterResource, error) {
-	return c.rest.FindByTagFold(ctx, tag)
-}
-
-// CanAuditAllVMs reports whether the token can see every VM — see
-// Client.CanAuditAllVMs's own doc comment. Cluster-wide, like FindByTag,
-// so no node parameter.
-func (c *RoutedClient) CanAuditAllVMs(ctx context.Context) (bool, error) {
-	return c.rest.CanAuditAllVMs(ctx)
-}
-
 func (c *RoutedClient) GetVM(ctx context.Context, node string, vmid int) (*proxmox.VirtualMachine, error) {
 	return c.rest.GetVM(ctx, node, vmid)
 }

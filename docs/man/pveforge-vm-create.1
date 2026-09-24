@@ -32,25 +32,37 @@ part of the create itself, so the VM is never briefly untagged.
 
 .PP
 --unique-tag X (opt-in; X must be one of this create's own tags) refuses
-the create if any VM in the cluster already carries X. Tags are matched
-case-insensitively, as PVE matches them: Foo and foo are one tag. An empty
-or blank X is refused. The check is made
-under a pveforge lock on the tag, taken before the VM's own lock and held
-until the new VM shows up in PVE's cluster resource list, so two pveforge
-creates with the same --unique-tag on this roster target never both
-succeed. Its limits:
-  - it fails closed: a resource list that cannot be read, or reads as
-    null, refuses the create;
-  - it needs VM.Audit on /vms (propagating), because PVE lists only the
-    VMs a token can see; without it the create is refused ("cannot verify
-    tag uniqueness");
+the create if any guest in the cluster, VM or container, already carries
+X. Tags are matched case-insensitively, as PVE matches them: Foo and foo
+are one tag. An empty or blank X is refused.
+
+.PP
+The guests are listed as root over SSH (pvesh get /cluster/resources),
+not with the roster's token: PVE leaves a guest out of a token's list
+whenever the token lacks VM.Audit on that guest's own path (a NoAccess or
+any narrower role there, on the token's user or group, or a NoAccess on
+its pool), and no read a token can make shows that none was left out.
+root's list leaves out nothing. So --unique-tag needs root SSH, as user
+ensure does: the target's stored SSH key, or --no-ssh-key and the PVE
+password. That read runs nothing else as root.
+
+.PP
+The check is made under a pveforge lock on the tag, taken before the VM's
+own lock and held until the new VM shows up in root's list, so two
+pveforge creates with the same --unique-tag on this roster target never
+both succeed. Its limits:
+  - it fails closed: a list that cannot be read, or that is not exactly
+    what PVE returns (null, a malformed entry, an unknown guest type),
+    refuses the create; so does a root read that takes more than 30s;
+  - tags are folded even when the datacenter's tag-style sets
+    case-sensitive=1, so pveforge then refuses more than PVE distinguishes,
+    never less;
+  - root's list is PVE's replicated cluster config: a guest on an offline
+    node is still listed, but a node without quorum may serve a stale
+    list;
   - the lock is per roster target: two targets that are nodes of one
     cluster are not serialised against each other, and neither is the
     web UI or qm;
-  - it needs VM.Audit on /vms as a whole: a NoAccess ACL on one VM
-    (/vms/VMID) hides that VM from the list while this check still passes,
-    so a tag that VM carries is not seen;
-  - only QEMU VMs are counted: an LXC container carrying X is not;
   - PVE's resource list lags; if the new VM is not listed within 30s, the
     create still succeeds and a warning says a concurrent check may miss it.
     A signal (Ctrl-C) during that wait exits 130 (143 for SIGTERM) with an
@@ -76,12 +88,16 @@ Without --unique-tag, two creates with the same tags both succeed.
 	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
 
 .PP
+\fB--no-ssh-key\fP[=false]
+	with --unique-tag: connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key
+
+.PP
 \fB--roster\fP=""
 	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
 
 .PP
 \fB--unique-tag\fP=""
-	refuse the create if any VM in the cluster already carries this tag (one of this create's own tags; needs VM.Audit on /vms)
+	refuse the create if any VM or container in the cluster already carries this tag (one of this create's own tags); the guests are listed as root over SSH
 
 
 .SH SEE ALSO

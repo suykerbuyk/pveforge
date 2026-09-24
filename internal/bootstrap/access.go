@@ -82,6 +82,15 @@ func (a *RootAccess) Close() error {
 	return a.session.Close()
 }
 
+// Connect opens the root session now, asking for the password first when
+// the session is keyless, rather than on the first command. A caller that
+// is about to take a pveforge lock connects first, so a prompt or a slow
+// dial never holds the lock.
+func (a *RootAccess) Connect(ctx context.Context) error {
+	_, err := a.root(ctx)
+	return err
+}
+
 // root returns the session, dialing it on first use.
 func (a *RootAccess) root(ctx context.Context) (SSHSession, error) {
 	if a.session != nil {
@@ -107,7 +116,8 @@ func (a *RootAccess) root(ctx context.Context) (SSHSession, error) {
 	return s, nil
 }
 
-// pveum runs one pveum command as root and returns its stdout.
+// pveum runs one command as root and returns its stdout: a pveum command,
+// or ClusterGuests' one pvesh read. It is RootAccess's only command runner.
 func (a *RootAccess) pveum(ctx context.Context, cmd string) (string, error) {
 	s, err := a.root(ctx)
 	if err != nil {
@@ -121,6 +131,24 @@ func (a *RootAccess) pveum(ctx context.Context, cmd string) (string, error) {
 		return "", fmt.Errorf("%s exited %d: %s", firstWords(cmd), res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return res.Stdout, nil
+}
+
+// ClusterGuestsCommand is the one command ClusterGuests runs as root: a
+// read of PVE's cluster resource list, nothing else.
+const ClusterGuestsCommand = "pvesh get /cluster/resources --type vm --output-format json"
+
+// ClusterGuests lists every QEMU VM and LXC container in the cluster, with
+// its tags, as root@pam (ClusterGuestsCommand). root's read is filtered by
+// no ACL: PVE drops a guest from a token's list unless the token holds
+// VM.Audit on that guest's own /vms/<vmid>, and no read a token can make
+// proves none was dropped. The reply is decoded strictly
+// (pve.ParseClusterGuests); any failure is an error, never an empty list.
+func (a *RootAccess) ClusterGuests(ctx context.Context) ([]pve.Guest, error) {
+	out, err := a.pveum(ctx, ClusterGuestsCommand)
+	if err != nil {
+		return nil, fmt.Errorf("list the cluster's guests as root: %w", err)
+	}
+	return pve.ParseClusterGuests([]byte(out))
 }
 
 // refusedByToken reports whether a REST read failed because the token may

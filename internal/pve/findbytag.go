@@ -44,22 +44,7 @@ var ErrAmbiguousTag = errors.New("tag matches more than one resource")
 //
 // Three-way result: zero matches wraps ErrNotFound, exactly one match
 // returns that resource, and more than one wraps ErrAmbiguousTag.
-//
-// The match is case-sensitive; FindByTagFold is the same lookup matching as
-// PVE does by default.
 func (c *Client) FindByTag(ctx context.Context, tag string) (*proxmox.ClusterResource, error) {
-	return c.findByTag(ctx, tag, func(a, b string) bool { return a == b })
-}
-
-// FindByTagFold is FindByTag with tags matched case-insensitively
-// (strings.EqualFold), as PVE matches them by default: to PVE, "Foo" and
-// "foo" are one tag, so a lookup meant to say whether a tag is taken must
-// find either spelling.
-func (c *Client) FindByTagFold(ctx context.Context, tag string) (*proxmox.ClusterResource, error) {
-	return c.findByTag(ctx, tag, strings.EqualFold)
-}
-
-func (c *Client) findByTag(ctx context.Context, tag string, same func(a, b string) bool) (*proxmox.ClusterResource, error) {
 	if tag == "" {
 		return nil, fmt.Errorf("find by tag: tag is required")
 	}
@@ -82,7 +67,7 @@ func (c *Client) findByTag(ctx context.Context, tag string, same func(a, b strin
 			continue
 		}
 		for _, t := range strings.Split(r.Tags, proxmox.TagSeperator) {
-			if same(t, tag) {
+			if t == tag {
 				matches = append(matches, r)
 				break
 			}
@@ -97,20 +82,4 @@ func (c *Client) findByTag(ctx context.Context, tag string, same func(a, b strin
 	default:
 		return nil, fmt.Errorf("find by tag %q: %d matches: %w", tag, len(matches), ErrAmbiguousTag)
 	}
-}
-
-// CanAuditAllVMs reports whether c's token holds VM.Audit on /vms with
-// propagate — PVE's own ?path=/vms answer (PathPermissions), inheritance
-// from / included. /cluster/resources lists only the VMs the caller can
-// audit, with HTTP 200 and no sign of what it left out, so a FindByTag
-// ErrNotFound means "no VM carries the tag" only for a caller that can see
-// every VM: this is that condition. Any read failure is returned as it is,
-// never read as false or true.
-func (c *Client) CanAuditAllVMs(ctx context.Context) (bool, error) {
-	held, err := c.PathPermissions(ctx, "/vms")
-	if err != nil {
-		return false, err
-	}
-	prop, ok := held["VM.Audit"]
-	return ok && prop, nil
 }

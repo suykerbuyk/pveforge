@@ -18,6 +18,12 @@ import (
 // (pveum, aclModify) are used only inside access.go; and the Ops themselves
 // are built only by the two commands, which wire the self and escalation
 // checks into them (UserEnsure.BeforeJoin, via CheckGroupJoin).
+//
+// ClusterGuests, `vm create --unique-tag`'s root read, is held to its
+// reviewed sites too. It runs one read-only command
+// (TestRootAccess_ClusterGuests_RunsOnlyTheRead), and vm.go, its only
+// caller, holds none of the writers above: vm.go is not an allowed file,
+// so a writer reference there fails this test.
 var (
 	tgtAddUser     = sourceguard.Target{AnyQualifier: true, Name: "AddUser"}
 	tgtModifyUser  = sourceguard.Target{AnyQualifier: true, Name: "ModifyUser"}
@@ -29,9 +35,10 @@ var (
 	tgtCheckJoin   = sourceguard.Target{AnyQualifier: true, Name: "CheckGroupJoin"}
 	tgtUserEnsure  = sourceguard.Target{ImportPath: "github.com/suykerbuyk/pveforge/internal/idempotent", Name: "UserEnsure"}
 	tgtGroupEnsure = sourceguard.Target{ImportPath: "github.com/suykerbuyk/pveforge/internal/idempotent", Name: "GroupEnsure"}
+	tgtClusterGst  = sourceguard.Target{AnyQualifier: true, Name: "ClusterGuests"}
 
 	rootWriterTargets = []sourceguard.Target{tgtAddUser, tgtModifyUser, tgtAddGroup, tgtModifyGroup, tgtGrantACL,
-		tgtPveum, tgtACLModify, tgtCheckJoin, tgtUserEnsure, tgtGroupEnsure}
+		tgtPveum, tgtACLModify, tgtCheckJoin, tgtUserEnsure, tgtGroupEnsure, tgtClusterGst}
 )
 
 var rootWriterSites = []struct {
@@ -47,7 +54,8 @@ var rootWriterSites = []struct {
 	{"cmd/pveforge/access.go", tgtCheckJoin, 1},
 	{"cmd/pveforge/access.go", tgtUserEnsure, 1},
 	{"cmd/pveforge/access.go", tgtGroupEnsure, 1},
-	{"internal/bootstrap/access.go", tgtPveum, 9},
+	{"internal/bootstrap/access.go", tgtPveum, 10},
+	{"cmd/pveforge/vm.go", tgtClusterGst, 2}, // the check and the visibility wait
 	{"internal/bootstrap/access.go", tgtACLModify, 1},
 }
 

@@ -2,6 +2,7 @@ package sshexec
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -101,5 +102,41 @@ func TestClient_Run_ContextCancellation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "deadline") && !strings.Contains(err.Error(), "context") {
 		t.Fatalf("expected a context-cancellation error, got: %v", err)
+	}
+}
+
+// Run is bounded by ctx even while it opens the session: a server that
+// completed the handshake and then stopped answering (a half-open
+// connection) used to hold NewSession, and so Run, forever.
+func TestClient_Run_ContextBoundsTheSessionOpen(t *testing.T) {
+	fs := newFakeServer(t)
+	kp, pub := clientKeypair(t)
+	fs.allowPublicKey(pub)
+	fs.stall = make(chan struct{})
+	t.Cleanup(func() { close(fs.stall) })
+	fs.Start(t)
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	client, err := Dial(dialCtx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.Close()
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer runCancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Run(runCtx, "true")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run = %v, want the context's deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return when its context ended: the session open is unbounded")
 	}
 }
