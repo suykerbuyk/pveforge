@@ -144,6 +144,11 @@ func TestVMCreate_EndToEnd_NullGetVMIsAbsentAndCreates(t *testing.T) {
 	if !res.Changed {
 		t.Error("expected Changed=true")
 	}
+	// P3: after the create, the same null is a re-read that could not be
+	// verified — AfterErr, never "absent", never a created-not-found.
+	if !errors.Is(res.AfterErr, pve.ErrUnverifiableRead) || res.PostApplyErr != nil {
+		t.Errorf("AfterErr %v, PostApplyErr %v; want ErrUnverifiableRead only", res.AfterErr, res.PostApplyErr)
+	}
 }
 
 // --- P1-7: linked-clone storage-family pre-check ---------------------------

@@ -16,9 +16,9 @@ write runs as root over SSH with pveum, as for user ensure. A group's members
 are set on its users (user ensure --group).
 
 .PP
-If the change is made but its result cannot be re-read afterwards, a
-one-line warning is printed on stderr; stdout is unchanged and the exit
-status is still 0.
+If the change is made but its result cannot be re-read afterwards, or is
+re-read without every requested value, a one-line warning is printed on
+stderr; stdout is unchanged and the exit status is still 0.
 
 
 .SH OPTIONS

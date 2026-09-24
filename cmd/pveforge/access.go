@@ -166,9 +166,9 @@ made outside pveforge.
 Disabling the user that owns the roster's own token is refused: it would lock
 pveforge out of the target.
 
-If the change is made but its result cannot be re-read afterwards, a
-one-line warning is printed on stderr; stdout is unchanged and the exit
-status is still 0.`,
+If the change is made but its result cannot be re-read afterwards, or is
+re-read without every requested value, a one-line warning is printed on
+stderr; stdout is unchanged and the exit status is still 0.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetID, userID := args[0], args[1]
@@ -235,6 +235,7 @@ status is still 0.`,
 			verb := ensureVerb(res)
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: user %s %s\n", targetID, userID, verb)
 			warnNotReread(cmd.ErrOrStderr(), targetID, "user", userID, res.AfterErr)
+			warnPostCheck(cmd.ErrOrStderr(), targetID, "user", userID, res.Changed, "it does not read back as requested", res.PostApplyErr)
 			if verb == "created" && strings.HasSuffix(userID, "@pve") {
 				fmt.Fprintf(cmd.ErrOrStderr(), "notice: %s: user %s has no password: it cannot log in until one is set with pveum passwd\n", targetID, userID)
 			}
@@ -277,9 +278,9 @@ a group already as asked is left alone, and root is never connected to. The
 write runs as root over SSH with pveum, as for user ensure. A group's members
 are set on its users (user ensure --group).
 
-If the change is made but its result cannot be re-read afterwards, a
-one-line warning is printed on stderr; stdout is unchanged and the exit
-status is still 0.`,
+If the change is made but its result cannot be re-read afterwards, or is
+re-read without every requested value, a one-line warning is printed on
+stderr; stdout is unchanged and the exit status is still 0.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetID, groupID := args[0], args[1]
@@ -311,6 +312,7 @@ status is still 0.`,
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: group %s %s\n", targetID, groupID, ensureVerb(res))
 			warnNotReread(cmd.ErrOrStderr(), targetID, "group", groupID, res.AfterErr)
+			warnPostCheck(cmd.ErrOrStderr(), targetID, "group", groupID, res.Changed, "it does not read back as requested", res.PostApplyErr)
 			return nil
 		},
 	}

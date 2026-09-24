@@ -66,11 +66,13 @@ func TestVMCreate_EndToEnd_AgainstRealPVEClient(t *testing.T) {
 
 	mux := http.NewServeMux()
 
-	// The VM never actually "exists" in this fake — every GetVM call (the
-	// initial Read, and Run's own best-effort post-Apply re-read) sees a
-	// 404, which VMCreate.Read treats as "doesn't exist yet" per its own
-	// documented contract. This keeps the fake server simple while still
-	// exercising the real create + wait path end to end.
+	// The VM never actually "exists" in this fake — every GetVM call sees a
+	// 404 that is not PVE's "no such VM" answer. The initial Read treats it
+	// as "doesn't exist yet" per its own documented contract; the re-read
+	// after the create is VMCreate.ReRead (P3), which does not, so the
+	// result is reported unverified (AfterErr) rather than absent. This
+	// keeps the fake server simple while still exercising the real create
+	// + wait path end to end.
 	mux.HandleFunc(fmt.Sprintf("/nodes/%s/qemu/%d/status/current", node, vmid), func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such vm", http.StatusNotFound)
 	})
@@ -113,6 +115,10 @@ func TestVMCreate_EndToEnd_AgainstRealPVEClient(t *testing.T) {
 	}
 	if !res.Changed {
 		t.Error("expected Changed=true: the vmid did not exist yet")
+	}
+	// P3: the post-create 404 is a re-read that failed, not an absence.
+	if res.AfterErr == nil || res.PostApplyErr != nil {
+		t.Errorf("AfterErr %v, PostApplyErr %v; want the re-read's failure and no created-not-found", res.AfterErr, res.PostApplyErr)
 	}
 	if got := atomic.LoadInt32(&createCalls); got != 1 {
 		t.Fatalf("expected exactly 1 POST to /nodes/%s/qemu, got %d", node, got)

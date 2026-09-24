@@ -296,12 +296,15 @@ func TestWarnNotReread_F1_TheCauseIsRenderedAsRunRootRendersIt(t *testing.T) {
 	})
 }
 
-// VC1 pins today's contract, for pveforge-post-apply-verification-and-
-// pending (P3) to flip: VMCreate.Read maps any read error to "absent", so a
-// vm create whose post-create read fails cannot report it. Exit 0, the
-// created line, and no warning. P3 changes VMCreate.Read and must make this
-// test's post-create case warn through warnNotReread.
-func TestVMCreate_VC1_ReReadFailureIsNotReportedToday(t *testing.T) {
+// VC1, flipped by pveforge-post-apply-verification-and-pending (P3): every
+// read of the VM fails with a 500 that is not PVE's "no such VM", before
+// the create and after it. Before it, VMCreate.Read still maps the failure
+// to "absent", so the create is issued; after it, the re-read is
+// VMCreate.ReRead, which does not, so Run sets AfterErr and vm create warns
+// through warnNotReread — exactly one quoted, bounded line — with exit 0
+// and the created line unchanged. No post-create "does not exist" warning:
+// a read that failed says nothing about whether the VM exists.
+func TestVMCreate_VC1_ReReadFailureWarns(t *testing.T) {
 	var mu sync.Mutex
 	created := false
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +322,7 @@ func TestVMCreate_VC1_ReReadFailureIsNotReportedToday(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, base+"/nodes/qa-pve-01/qemu/101"):
 			// Every read of the VM fails, before the create and after it.
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte("pve says no"))
+			_, _ = w.Write([]byte("pve says no\nwarning: forged"))
 		default:
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 		}
@@ -328,10 +331,22 @@ func TestVMCreate_VC1_ReReadFailureIsNotReportedToday(t *testing.T) {
 	rp := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 	code, stdout, stderr := runRootArgs("vm", "create", "--roster", rp, "qa-pve-01", "101", "name=web")
-	if code != 0 || stdout != "qa-pve-01: vm 101 created\n" || stderr != "" {
-		t.Fatalf("exit %d, stdout %q, stderr %q; want today's contract: created, no warning", code, stdout, stderr)
+	if code != 0 || stdout != "qa-pve-01: vm 101 created\n" {
+		t.Fatalf("exit %d, stdout %q, stderr %q; want 0 and the created line", code, stdout, stderr)
 	}
 	if !created {
 		t.Fatal("the create POST was never reached")
+	}
+	// One line: the 500's body carries a forged second line, which must not
+	// reach stderr as one (go-proxmox's error text names the status only).
+	const prefix = "warning: qa-pve-01: vm 101: the write was applied but its result could not be re-read: "
+	if strings.Count(stderr, "\n") != 1 || !strings.HasPrefix(stderr, prefix) {
+		t.Fatalf("stderr = %q, want exactly one line starting %q", stderr, prefix)
+	}
+	if !strings.Contains(stderr, "re-read") || !strings.Contains(stderr, "500") {
+		t.Errorf("stderr = %q, want the cause naming the failed re-read and its 500", stderr)
+	}
+	if strings.Contains(stderr, "does not exist") {
+		t.Errorf("stderr = %q: a read that failed must not be reported as the VM not existing", stderr)
 	}
 }

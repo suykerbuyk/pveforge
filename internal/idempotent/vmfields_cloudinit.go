@@ -2,9 +2,6 @@ package idempotent
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 )
@@ -52,12 +49,15 @@ type CloudInitCheckError struct{ Err error }
 func (e *CloudInitCheckError) Error() string { return e.Err.Error() }
 func (e *CloudInitCheckError) Unwrap() error { return e.Err }
 
-// checkCloudInit is PostApply's second read, pveforge-post-apply-verification-
-// and-pending's P2′: only when this Run wrote or deleted a cloud-init key
-// that /pending did not already report, it reads GET
-// /nodes/{node}/qemu/{vmid}/cloudinit once and records in CloudInitStale and
-// CloudInitStaleDeletes which of those keys PVE has not yet written to the
-// drive. Its error, like /pending's, is Result.PostApplyErr: advisory.
+// checkCloudInit is the second read of PostApply and PostNoop,
+// pveforge-post-apply-verification-and-pending's P2′: only when writes or
+// deletes hold a cloud-init key that /pending did not already report
+// (pendingWrites, pendingDeletes), it reads GET
+// /nodes/{node}/qemu/{vmid}/cloudinit once and returns which of those keys
+// PVE has not yet written to the drive, in their given order. PostApply
+// passes this Run's own changes (Applied, Deleted); PostNoop the keys the
+// command asked for. Its error, a *CloudInitCheckError, is like /pending's
+// Result.PostApplyErr: advisory.
 //
 // NOT verified against a live host, owed to the nested harness
 // (pveforge-nested-pve-test-harness): that PVE 9.2.x answers /cloudinit
@@ -70,41 +70,24 @@ func (e *CloudInitCheckError) Unwrap() error { return e.Err }
 // VM.Audit. The decode is strict for the same reason as /pending's: an
 // answer of any other shape is pve.ErrUnverifiableRead, never "nothing to
 // report".
-func (op *VMFieldsEnsure) checkCloudInit(ctx context.Context) error {
-	var writes, deletes []string
-	for _, f := range op.Applied {
-		if isCloudInitKey(f) && !slices.Contains(op.Pending, f) {
-			writes = append(writes, f)
-		}
-	}
-	for _, f := range op.Deleted {
-		if isCloudInitKey(f) && !slices.Contains(op.PendingDeletes, f) {
-			deletes = append(deletes, f)
-		}
-	}
-	if len(writes) == 0 && len(deletes) == 0 {
-		return nil
-	}
-	path := fmt.Sprintf("/nodes/%s/qemu/%d/cloudinit", url.PathEscape(op.Client.Node()), op.VMID)
-	raw, err := op.Client.RawRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return &CloudInitCheckError{fmt.Errorf("vm fields ensure: vm %d: read the cloud-init drive's state: %w", op.VMID, err)}
-	}
-	stale, staleDel, err := decodeChanges(raw, "cloud-init")
-	if err != nil {
-		return &CloudInitCheckError{fmt.Errorf("vm fields ensure: vm %d: read the cloud-init drive's state: %w", op.VMID, err)}
-	}
-	var keys, dels []string
+func (op *VMFieldsEnsure) checkCloudInit(ctx context.Context, writes, deletes, pendingWrites, pendingDeletes []string) (stale, staleDeletes []string, err error) {
+	var ciWrites, ciDeletes []string
 	for _, f := range writes {
-		if stale[f] {
-			keys = append(keys, f)
+		if isCloudInitKey(f) && !slices.Contains(pendingWrites, f) {
+			ciWrites = append(ciWrites, f)
 		}
 	}
 	for _, f := range deletes {
-		if staleDel[f] {
-			dels = append(dels, f)
+		if isCloudInitKey(f) && !slices.Contains(pendingDeletes, f) {
+			ciDeletes = append(ciDeletes, f)
 		}
 	}
-	op.CloudInitStale, op.CloudInitStaleDeletes = keys, dels
-	return nil
+	if len(ciWrites) == 0 && len(ciDeletes) == 0 {
+		return nil, nil, nil
+	}
+	onDrive, onDriveDel, err := op.readChanges(ctx, "cloudinit", "read the cloud-init drive's state")
+	if err != nil {
+		return nil, nil, &CloudInitCheckError{err}
+	}
+	return pick(ciWrites, onDrive), pick(ciDeletes, onDriveDel), nil
 }

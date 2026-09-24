@@ -68,7 +68,9 @@ func TestVMSet_PendingNoticeQuotesTheKey(t *testing.T) {
 }
 
 // T11: a clean /pending — nothing of ours pending — prints nothing on
-// stderr, and a run that changed nothing does not read /pending at all.
+// stderr. A run that changed nothing reads /pending once (PostNoop, P3:
+// a value that is only pending reads back as set) and, with nothing of its
+// own pending, prints nothing either.
 func TestVMSet_NothingPending_NoStderr(t *testing.T) {
 	f, code, stdout, stderr := runVMSetPending(t, func(f *deleteFakePVE) {
 		f.pendingBody = `[{"key":"cores","value":4},{"key":"memory","value":2048,"pending":4096}]`
@@ -80,9 +82,12 @@ func TestVMSet_NothingPending_NoStderr(t *testing.T) {
 		t.Errorf("pending reads = %d, want 1", f.pendingReads)
 	}
 
-	f, code, stdout, stderr = runVMSetPending(t, func(*deleteFakePVE) {}, "cores=2")
-	if code != 0 || stdout != "" || stderr != "" || f.pendingReads != 0 {
-		t.Fatalf("no-op: exit %d, stdout %q, stderr %q, pending reads %d; want 0, nothing, and no read", code, stdout, stderr, f.pendingReads)
+	f, code, stdout, stderr = runVMSetPending(t, func(f *deleteFakePVE) {
+		f.pendingBody = `[{"key":"cores","value":2},{"key":"memory","value":2048,"pending":4096}]`
+	}, "cores=2")
+	if code != 0 || stdout != "" || stderr != "" || f.pendingReads != 1 || f.cloudInitReads != 0 {
+		t.Fatalf("no-op: exit %d, stdout %q, stderr %q, pending reads %d, cloud-init reads %d; want 0, nothing, one /pending read and no /cloudinit read",
+			code, stdout, stderr, f.pendingReads, f.cloudInitReads)
 	}
 }
 

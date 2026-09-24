@@ -33,6 +33,17 @@ type routeFake struct {
 
 func newRouteFake(t *testing.T, routes map[string]string) (*httptest.Server, *routeFake) {
 	t.Helper()
+	return newRouteFakeFunc(t, func(key string) (string, bool) {
+		body, ok := routes[key]
+		return body, ok
+	})
+}
+
+// newRouteFakeFunc is newRouteFake with each "METHOD path" answered by
+// route, so a fake's answer can change as the test runs (a list that
+// reflects a write made elsewhere, e.g. by root over SSH).
+func newRouteFakeFunc(t *testing.T, route func(key string) (string, bool)) (*httptest.Server, *routeFake) {
+	t.Helper()
 	f := &routeFake{}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
@@ -46,7 +57,7 @@ func newRouteFake(t *testing.T, routes map[string]string) (*httptest.Server, *ro
 		f.mu.Lock()
 		f.hits = append(f.hits, hit)
 		f.mu.Unlock()
-		body, ok := routes[key]
+		body, ok := route(key)
 		if !ok {
 			t.Errorf("routeFake: unexpected request %s", key)
 			http.NotFound(w, r)

@@ -25,6 +25,9 @@ type fakeVMCreateClient struct {
 	getVMResult *proxmox.VirtualMachine
 	getVMErr    error
 	getVMCalls  int
+	// createdVM, when set, is what GetVM answers once CreateVM has been
+	// called: a fake that reflects its own create (P3's ReRead reads it).
+	createdVM *proxmox.VirtualMachine
 
 	createVMUPID  string
 	createVMErr   error
@@ -42,6 +45,9 @@ func (f *fakeVMCreateClient) Node() string { return f.node }
 
 func (f *fakeVMCreateClient) GetVM(_ context.Context, _ string, _ int) (*proxmox.VirtualMachine, error) {
 	f.getVMCalls++
+	if f.createdVM != nil && f.createVMCalls > 0 {
+		return f.createdVM, nil
+	}
 	if f.getVMErr != nil {
 		return nil, f.getVMErr
 	}
@@ -166,9 +172,12 @@ func TestVMCreate_Read_ExistingVMID(t *testing.T) {
 // full Run-style Read -> Satisfied(false) -> Apply cycle: Apply must
 // actually be called (CreateVM + WaitForTask both invoked).
 func TestVMCreate_ViaRun_FreshVMID_AppliesCreate(t *testing.T) {
+	// The fake reflects its own create: after CreateVM, GetVM finds the VM,
+	// so the re-read after the create is clean.
 	client := &fakeVMCreateClient{
 		node:         "qa-pve-01",
 		getVMErr:     errors.New("no such vm"),
+		createdVM:    &proxmox.VirtualMachine{VMID: 100, Name: "web", Status: "stopped"},
 		createVMUPID: "UPID:qa-pve-01:1:2:3:qmcreate:100:root@pam:",
 	}
 	op := &VMCreate{Client: client, VMID: 100, Params: url.Values{"cores": {"2"}}}
@@ -180,6 +189,11 @@ func TestVMCreate_ViaRun_FreshVMID_AppliesCreate(t *testing.T) {
 	}
 	if !res.Changed {
 		t.Error("expected Changed=true for a fresh vmid")
+	}
+	// Anti-vacuity for the clean path: the created VM was re-read and
+	// found, so neither advisory is set, and After is the VM, not Before's "".
+	if res.AfterErr != nil || res.PostApplyErr != nil || res.After == "" || res.Before != "" {
+		t.Errorf("Before %q, After %q, AfterErr %v, PostApplyErr %v; want a clean re-read of the created VM", res.Before, res.After, res.AfterErr, res.PostApplyErr)
 	}
 	if client.createVMCalls != 1 {
 		t.Errorf("expected 1 CreateVM call, got %d", client.createVMCalls)

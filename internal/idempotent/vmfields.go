@@ -97,6 +97,21 @@ type VMFieldsEnsure struct {
 	// order; both nil until PostApply has run.
 	CloudInitStale        []string
 	CloudInitStaleDeletes []string
+
+	// AlreadyPending and AlreadyPendingDeletes are the keys this command
+	// asked for that the Run did NOT change — each already read as set (a
+	// Read without current=1 sees a pending value as applied), or for a
+	// delete as absent — which PVE still holds pending. PostNoop finds them
+	// on a no-op; PostApply finds them in a batch where other keys changed,
+	// from the same /pending read. AlreadyCloudInitStale and
+	// AlreadyCloudInitStaleDeletes are PostNoop's requested cloud-init keys
+	// that are not yet on the drive (not repeating a key already pending).
+	// Only requested keys, in the order requested; all nil until a check
+	// has run.
+	AlreadyPending               []string
+	AlreadyPendingDeletes        []string
+	AlreadyCloudInitStale        []string
+	AlreadyCloudInitStaleDeletes []string
 }
 
 // Validate reports whether op is well-formed: VMID must be positive, at

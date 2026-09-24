@@ -135,7 +135,7 @@ func TestReportPending_CloudInitNoticeQuotesTheKey(t *testing.T) {
 		CloudInitStaleDeletes: []string{"b\nnotice: forged"},
 	}
 	var out strings.Builder
-	reportPending(&out, "qa-pve-01", 100, op, nil)
+	reportPending(&out, "qa-pve-01", 100, op, true, nil)
 	want := `notice: qa-pve-01: vm 100: "a\nnotice: forged"` + ciNotice + `notice: qa-pve-01: vm 100: delete="b\nnotice: forged"` + ciNotice
 	if out.String() != want {
 		t.Errorf("notices:\n got:  %q\n want: %q", out.String(), want)

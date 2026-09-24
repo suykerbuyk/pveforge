@@ -70,6 +70,12 @@ both succeed. Its limits:
     was listed: the tag's lock was released early.
 Without --unique-tag, two creates with the same tags both succeed.
 
+.PP
+After the create, the VM is read back. If that read fails, one stderr warning
+says the result could not be re-read; if PVE answers that the VM just created
+does not exist, one stderr warning says so. Either way stdout is unchanged and
+the exit status is still 0: the create task succeeded.
+
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]

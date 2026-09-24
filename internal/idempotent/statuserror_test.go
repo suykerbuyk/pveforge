@@ -115,6 +115,11 @@ func TestVMCreate_EndToEnd_StatusErrorGetVMIsAbsentAndCreates(t *testing.T) {
 			if !res.Changed {
 				t.Error("expected Changed=true")
 			}
+			// P3: after the create the same answer is a re-read that
+			// failed — never "absent", never a created-not-found.
+			if res.AfterErr == nil || res.PostApplyErr != nil {
+				t.Errorf("AfterErr %v, PostApplyErr %v; want the re-read's failure only", res.AfterErr, res.PostApplyErr)
+			}
 		})
 	}
 }

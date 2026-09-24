@@ -23,14 +23,28 @@ type fakeAccess struct {
 	groups  []pve.AccessGroup
 	listErr error
 	writes  []string
+
+	// listErrAfterWrite fails every list read once a write has been made:
+	// the re-read after a write that succeeded (P3).
+	listErrAfterWrite error
+	// dropWrites records each write but does not apply it, as a pveum flag
+	// that PVE accepted but did not act on would (P3's read-back check).
+	dropWrites bool
+}
+
+func (f *fakeAccess) listErrNow() error {
+	if f.listErrAfterWrite != nil && len(f.writes) > 0 {
+		return f.listErrAfterWrite
+	}
+	return f.listErr
 }
 
 func (f *fakeAccess) ListUsers(context.Context) ([]pve.AccessUser, error) {
-	return slices.Clone(f.users), f.listErr
+	return slices.Clone(f.users), f.listErrNow()
 }
 
 func (f *fakeAccess) ListGroups(context.Context) ([]pve.AccessGroup, error) {
-	return slices.Clone(f.groups), f.listErr
+	return slices.Clone(f.groups), f.listErrNow()
 }
 
 func str(p *string) string {
@@ -42,6 +56,9 @@ func str(p *string) string {
 
 func (f *fakeAccess) AddUser(_ context.Context, s UserSpec) error {
 	f.writes = append(f.writes, fmt.Sprintf("add %s enable=%t comment=%s email=%s groups=%s", s.UserID, s.Enable, str(s.Comment), str(s.Email), strings.Join(s.Groups, ",")))
+	if f.dropWrites {
+		return nil
+	}
 	u := pve.AccessUser{UserID: s.UserID, Enabled: s.Enable, Groups: slices.Clone(s.Groups)}
 	if s.Comment != nil {
 		u.Comment = *s.Comment
@@ -55,6 +72,9 @@ func (f *fakeAccess) AddUser(_ context.Context, s UserSpec) error {
 
 func (f *fakeAccess) ModifyUser(_ context.Context, s UserSpec) error {
 	f.writes = append(f.writes, fmt.Sprintf("modify %s enable=%t comment=%s email=%s append=%s", s.UserID, s.Enable, str(s.Comment), str(s.Email), strings.Join(s.Groups, ",")))
+	if f.dropWrites {
+		return nil
+	}
 	for i := range f.users {
 		if f.users[i].UserID == s.UserID {
 			f.users[i].Enabled = s.Enable
@@ -72,6 +92,9 @@ func (f *fakeAccess) ModifyUser(_ context.Context, s UserSpec) error {
 
 func (f *fakeAccess) AddGroup(_ context.Context, id string, comment *string) error {
 	f.writes = append(f.writes, fmt.Sprintf("add group %s comment=%s", id, str(comment)))
+	if f.dropWrites {
+		return nil
+	}
 	g := pve.AccessGroup{GroupID: id}
 	if comment != nil {
 		g.Comment = *comment
@@ -82,6 +105,9 @@ func (f *fakeAccess) AddGroup(_ context.Context, id string, comment *string) err
 
 func (f *fakeAccess) ModifyGroup(_ context.Context, id, comment string) error {
 	f.writes = append(f.writes, fmt.Sprintf("modify group %s comment=%s", id, comment))
+	if f.dropWrites {
+		return nil
+	}
 	for i := range f.groups {
 		if f.groups[i].GroupID == id {
 			f.groups[i].Comment = comment
@@ -154,6 +180,10 @@ func TestUserEnsure(t *testing.T) {
 			if res.Changed != (c.wantWrite != nil) {
 				t.Errorf("Changed = %t", res.Changed)
 			}
+			// The fake applies its writes, so the read-back check is clean.
+			if res.AfterErr != nil || res.PostApplyErr != nil {
+				t.Errorf("AfterErr %v, PostApplyErr %v; want both nil", res.AfterErr, res.PostApplyErr)
+			}
 			// A second run finds it done.
 			f.writes = nil
 			op2 := c.op
@@ -212,6 +242,9 @@ func TestGroupEnsure(t *testing.T) {
 			}
 			if !reflect.DeepEqual(f.writes, c.wantWrite) || res.Changed != (c.wantWrite != nil) {
 				t.Errorf("writes %q Changed %t; want %q", f.writes, res.Changed, c.wantWrite)
+			}
+			if res.AfterErr != nil || res.PostApplyErr != nil {
+				t.Errorf("AfterErr %v, PostApplyErr %v; want both nil", res.AfterErr, res.PostApplyErr)
 			}
 		})
 	}
