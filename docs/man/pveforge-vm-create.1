@@ -30,6 +30,34 @@ field=value arguments, or via --json / --json-file. Tags are not special
 — pass tags=... as a create parameter and PVE applies them atomically as
 part of the create itself, so the VM is never briefly untagged.
 
+.PP
+--unique-tag X (opt-in; X must be one of this create's own tags) refuses
+the create if any VM in the cluster already carries X. Tags are matched
+case-insensitively, as PVE matches them: Foo and foo are one tag. An empty
+or blank X is refused. The check is made
+under a pveforge lock on the tag, taken before the VM's own lock and held
+until the new VM shows up in PVE's cluster resource list, so two pveforge
+creates with the same --unique-tag on this roster target never both
+succeed. Its limits:
+  - it fails closed: a resource list that cannot be read, or reads as
+    null, refuses the create;
+  - it needs VM.Audit on /vms (propagating), because PVE lists only the
+    VMs a token can see; without it the create is refused ("cannot verify
+    tag uniqueness");
+  - the lock is per roster target: two targets that are nodes of one
+    cluster are not serialised against each other, and neither is the
+    web UI or qm;
+  - it needs VM.Audit on /vms as a whole: a NoAccess ACL on one VM
+    (/vms/VMID) hides that VM from the list while this check still passes,
+    so a tag that VM carries is not seen;
+  - only QEMU VMs are counted: an LXC container carrying X is not;
+  - PVE's resource list lags; if the new VM is not listed within 30s, the
+    create still succeeds and a warning says a concurrent check may miss it.
+    A signal (Ctrl-C) during that wait exits 130 (143 for SIGTERM) with an
+    error saying the VM WAS created and the wait was interrupted before it
+    was listed: the tag's lock was released early.
+Without --unique-tag, two creates with the same tags both succeed.
+
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]
@@ -50,6 +78,10 @@ part of the create itself, so the VM is never briefly untagged.
 .PP
 \fB--roster\fP=""
 	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--unique-tag\fP=""
+	refuse the create if any VM in the cluster already carries this tag (one of this create's own tags; needs VM.Audit on /vms)
 
 
 .SH SEE ALSO
