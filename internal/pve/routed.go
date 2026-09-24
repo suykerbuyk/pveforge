@@ -237,6 +237,14 @@ func (c *RoutedClient) WaitForAgentExec(ctx context.Context, vmid, pid int, poll
 	return c.rest.WaitForAgentExec(ctx, c.target.Node, vmid, pid, pollInterval, timeout)
 }
 
+// RollbackWitness proves a rolled-back guest is running, under one bounded
+// deadline — see Client.RollbackWitness's own doc comment, especially on
+// what it retries and what it passes through. A thin pass-through with no
+// node parameter, for the same reason AgentExec above has none.
+func (c *RoutedClient) RollbackWitness(ctx context.Context, vmid int, command []string, wantOutput string, timeout time.Duration) (*AgentExecStatus, error) {
+	return c.rest.RollbackWitness(ctx, c.target.Node, vmid, command, wantOutput, timeout)
+}
+
 // AgentInterfaces fetches the interfaces vmid's guest agent reports — see
 // Client.AgentInterfaces's own doc comment. A thin pass-through with no
 // node parameter, for the same reason AgentExec above has none.

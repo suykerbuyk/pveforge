@@ -189,7 +189,7 @@ func (e *ErrSnapshotExists) Error() string {
 // and CascadeDeleteSnapshots (isPseudoEntryName), which must still reach a
 // real snapshot named "Current". Matchable with errors.As against
 // *ErrReservedSnapshotName. Raised by CreateSnapshot, NewerSnapshots,
-// Rollback and CascadeDeleteSnapshots — which is why its message says "not
+// Rollback and CascadeDeleteSnapshots ("current" only) — which is why its message says "not
 // a real snapshot" rather than naming any one operation.
 //
 // Deliberately a SEPARATE error type, raised by a SEPARATE guard, from
