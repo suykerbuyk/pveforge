@@ -108,13 +108,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -140,8 +135,9 @@ var (
 	// construction rather than by relying on this module's zero-t.Parallel
 	// property: -race is then clean no matter who adds a parallel test later.
 	// ExpectViolation's EXACTNESS does still assume no parallelism (it is
-	// scoped by wall-clock nesting, not by goroutine), which is what
-	// AssertNoParallel pins.
+	// scoped by wall-clock nesting, not by goroutine), which the module's
+	// no-parallel pin holds for every package using netguard
+	// (internal/sourceguard/noparallel_guard_test.go).
 	mu sync.Mutex
 
 	installed     bool
@@ -376,50 +372,4 @@ func Stats() (observed, refused, expectedCount int) {
 		}
 	}
 	return observedDials, refused, expectedCount
-}
-
-// AssertNoParallel fails t if any _test.go file in the CALLING package's
-// directory calls t.Parallel.
-//
-// It pins what ExpectViolation's exactness depends on: the registration is
-// scoped by wall-clock nesting rather than by goroutine, so a parallel
-// companion could excuse an unrelated test's real violation. Unlike the
-// hand-copied noparallel_test.go in internal/roster and internal/bootstrap,
-// this one crosses package boundaries — `go test` runs each package with its
-// own directory as the working directory, so "." is the caller's package.
-func AssertNoParallel(t *testing.T) {
-	t.Helper()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read package directory: %v", err)
-	}
-	fset := token.NewFileSet()
-	scanned := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		file, perr := parser.ParseFile(fset, filepath.Join(".", e.Name()), nil, parser.SkipObjectResolution)
-		if perr != nil {
-			t.Fatalf("parse %s: %v", e.Name(), perr)
-		}
-		scanned++
-		ast.Inspect(file, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Parallel" {
-				return true
-			}
-			t.Errorf("%s:%d: t.Parallel is not allowed in this package: netguard's "+
-				"recorder is process-global, and ExpectViolation scopes a deliberate "+
-				"violation by wall-clock nesting, so a parallel test could have its "+
-				"real violation excused by an unrelated companion",
-				e.Name(), fset.Position(sel.Pos()).Line)
-			return true
-		})
-	}
-	// Without this the check passes trivially if the glob ever stops
-	// matching — the failure mode this repo keeps rediscovering.
-	if scanned == 0 {
-		t.Fatal("no _test.go files were scanned, so this guard proved nothing")
-	}
 }

@@ -62,8 +62,9 @@ var defaultTaskWaitTimeout = TaskWaitCeiling
 // Not safe for two test packages to use concurrently: it mutates
 // process-wide state with no locking, matching the seams named above. Each
 // package's tests run in their own process, so the hazard is only ever
-// intra-package, and TestNoParallelTests in this package and in
-// cmd/pveforge pins that neither uses t.Parallel. A test that leaves a
+// intra-package, and the module's no-parallel pin
+// (internal/sourceguard/noparallel_guard_test.go) holds that no package using
+// it calls t.Parallel. A test that leaves a
 // WaitForTask goroutine running must join it BEFORE restore runs, or the
 // race detector reports the restore's write against the poll loop's read.
 func SetTaskTimingsForTests(interval, timeout time.Duration) (restore func()) {
