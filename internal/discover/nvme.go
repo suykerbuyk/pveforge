@@ -21,12 +21,14 @@ import (
 // pveforge-discoverability-schema's own recorded decision. Revisit once
 // there are 2-3 real resolvers to generalize from.
 //
-// Pattern fields are DERIVED from device.NVMeSerialAllowedExtra/
-// NVMeBackingAllowedExtra/NVMeFormatAllowedExtra (internal/device/
-// nvme.go) via allowedExtraToPattern, rather than restated as independent
-// regexes — those constants are exactly what NVMeDrive.Validate itself
-// checks against, so this schema can never silently drift from the real
-// validation logic as long as both read the same constants.
+// Pattern fields are DERIVED from internal/device/nvme.go's own constants
+// rather than restated as independent regexes: serial and format from
+// device.NVMeSerialAllowedExtra/NVMeFormatAllowedExtra via
+// allowedExtraToPattern, and backing is device.NVMeBackingPattern itself.
+// Those are exactly what NVMeDrive.Validate checks against, so this
+// schema can never silently drift from the real validation logic as long
+// as both read the same constants (TestNVMeDriveSchema_AgreesWithValidate
+// pins it).
 var NVMeDriveSchema = Schema{
 	Type:        "object",
 	Description: "An emulated NVMe drive attached via the args: raw-QEMU escape hatch (Proxmox has no first-class NVMe bus type).",
@@ -38,8 +40,8 @@ var NVMeDriveSchema = Schema{
 		},
 		"backing": {
 			Type:        "string",
-			Description: `The QEMU -drive file= target: a PVE volid (e.g. "local-lvm:vm-100-disk-1") or a raw host path.`,
-			Pattern:     allowedExtraToPattern(device.NVMeBackingAllowedExtra),
+			Description: `The QEMU -drive file= target: an absolute host path (e.g. "/dev/pve/vm-100-disk-1"), not a PVE volid or a URL. QEMU opens it as root on the host, so the path is a trust decision for whoever configures it: pveforge refuses only a malformed path, not a sensitive one.`,
+			Pattern:     device.NVMeBackingPattern,
 		},
 		"format": {
 			Type:        "string",
@@ -78,8 +80,8 @@ var DeviceSchemas = map[string]Schema{
 // TestAllowedExtraToPattern_TrailingHyphenIsLiteral) that Go's RE2
 // already parses a single trailing '-' straight after a completed range
 // like "0-9" as a literal hyphen, not as a second range operator reaching
-// back into the already-consumed '9' — there being only one '-' in either
-// of NVMeSerialAllowedExtra/NVMeBackingAllowedExtra, it can't complete a
+// back into the already-consumed '9' — there being only one '-' in
+// NVMeSerialAllowedExtra (and none in NVMeFormatAllowedExtra), it can't complete a
 // second "atom-atom" triple no matter where it sits. Escaping it anyway
 // costs nothing and removes any need to reason about ordering if extra
 // ever gained a second '-' or a different arrangement.
