@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -19,11 +20,18 @@ type NVMeDrive struct {
 	// Validate) since it's embedded directly into a comma-delimited QEMU
 	// option string.
 	Serial string
-	// Backing is the QEMU `-drive file=` target: a PVE volid (e.g.
-	// "local-lvm:vm-100-disk-1") or a raw host path. Required. Resolving
-	// a PVE volid to its actual host filesystem path is out of scope for
-	// this resolver — callers supply whatever `-drive file=` already
-	// accepts.
+	// Backing is the QEMU `-drive file=` target: an absolute host path
+	// (e.g. "/dev/pve/vm-100-disk-1" or
+	// "/var/lib/vz/images/100/vm-100-disk-1.raw"). Required. It is NOT a PVE
+	// volid ("local-lvm:vm-100-disk-1" is not a path QEMU can open) and not
+	// a URL: NVMeBackingPattern refuses ':' so no QEMU protocol syntax
+	// ("nbd:", "ssh://", ...) can reach file=. Resolving a volid to its path
+	// is future work, for when a real caller exists.
+	//
+	// QEMU opens this path as root on the host, so which path is a trust
+	// decision owned by whoever configures it. pveforge refuses only a
+	// malformed path, never a sensitive one: it does not stop "/etc/shadow",
+	// or a host disk such as "/dev/sda", from being handed to the guest.
 	Backing string
 	// Format is the QEMU `-drive format=` value (e.g. "raw", "qcow2").
 	// Optional — PVE/QEMU infer it when unset, though LVM-backed volumes
@@ -49,14 +57,21 @@ const (
 	// realistic naming conventions without opening up anything QEMU's
 	// comma-delimited option syntax would treat specially.
 	NVMeSerialAllowedExtra = "-_"
-	// NVMeBackingAllowedExtra: a PVE volid ("local-lvm:vm-100-disk-1")
-	// or a raw host path needs '.', '/', and ':' in addition to
-	// dash/underscore.
-	NVMeBackingAllowedExtra = "-_./:"
 	// NVMeFormatAllowedExtra: QEMU format values ("raw", "qcow2", ...)
 	// are plain alphanumeric; no extra characters are needed or allowed.
 	NVMeFormatAllowedExtra = ""
 )
+
+// NVMeBackingPattern is what Backing must match: an absolute, clean host
+// path. Every segment holds at least one character that is not '.', so
+// "." and ".." segments are refused, as are "//", a trailing '/', and "/"
+// alone; ':' is refused, so no volid and no QEMU protocol prefix; ',' and
+// whitespace are refused, as for every field. Validate compiles it, and
+// internal/discover's NVMeDriveSchema publishes this same string, so the
+// schema and the check cannot drift apart.
+const NVMeBackingPattern = `^(/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*)+$`
+
+var nvmeBackingRE = regexp.MustCompile(NVMeBackingPattern)
 
 // Validate reports whether n is well-formed: Serial and Backing are
 // required and non-empty, and every set field is restricted to a safe
@@ -64,13 +79,15 @@ const (
 // could break out of their slot in the comma-delimited QEMU
 // -device/-drive option strings Apply builds them into (the same
 // defense-in-depth discipline as sshexec's field-name/shell-quoting
-// checks elsewhere in this project).
+// checks elsewhere in this project). Backing must also be an absolute,
+// clean host path (NVMeBackingPattern); that is all it checks of the path
+// (see Backing on why).
 func (n NVMeDrive) Validate() error {
 	if !isSafeToken(n.Serial, NVMeSerialAllowedExtra) {
 		return fmt.Errorf("nvme drive: serial %q is empty or contains unsafe characters", n.Serial)
 	}
-	if !isSafeToken(n.Backing, NVMeBackingAllowedExtra) {
-		return fmt.Errorf("nvme drive: backing %q is empty or contains unsafe characters", n.Backing)
+	if !nvmeBackingRE.MatchString(n.Backing) {
+		return fmt.Errorf("nvme drive: backing %q is not an absolute, clean host path (no ':', ',', whitespace, '.' or '..' segments, or trailing '/')", n.Backing)
 	}
 	if n.Format != "" && !isSafeToken(n.Format, NVMeFormatAllowedExtra) {
 		return fmt.Errorf("nvme drive: format %q contains unsafe characters", n.Format)

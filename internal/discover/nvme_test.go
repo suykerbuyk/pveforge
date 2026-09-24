@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"github.com/suykerbuyk/pveforge/internal/device"
 	"regexp"
 	"testing"
 )
@@ -96,14 +97,24 @@ func TestAllowedExtraToPattern_EmptyExtra(t *testing.T) {
 	}
 }
 
-func TestAllowedExtraToPattern_BackingAllowsDotSlashColon(t *testing.T) {
-	pattern := allowedExtraToPattern("-_./:")
-	re := regexp.MustCompile(pattern)
-	if !re.MatchString("local-lvm:vm-100-disk-1") {
-		t.Errorf("pattern %q should match a real PVE volid", pattern)
+// TestNVMeDriveSchema_BackingIsTheValidatePattern: the backing pattern is
+// device.NVMeBackingPattern itself, not a restatement of it, and it refuses
+// what Validate refuses: a PVE volid and QEMU protocol syntax. (Agreement
+// over the whole input table is internal/device's
+// TestNVMeDriveSchema_AgreesWithValidate.)
+func TestNVMeDriveSchema_BackingIsTheValidatePattern(t *testing.T) {
+	got := NVMeDriveSchema.Properties["backing"].Pattern
+	if got != device.NVMeBackingPattern {
+		t.Fatalf("backing pattern = %q, want device.NVMeBackingPattern %q", got, device.NVMeBackingPattern)
 	}
-	if !re.MatchString("/var/lib/vz/images/100/disk.raw") {
-		t.Errorf("pattern %q should match a raw host path", pattern)
+	re := regexp.MustCompile(got)
+	for _, s := range []string{"local-lvm:vm-100-disk-1", "nbd:qa-pve-01:10809", "nbd://qa-pve-01/export"} {
+		if re.MatchString(s) {
+			t.Errorf("backing pattern %q matched %q", got, s)
+		}
+	}
+	if !re.MatchString("/dev/pve/vm-100-disk-1") {
+		t.Errorf("backing pattern %q refused an absolute host path", got)
 	}
 }
 
