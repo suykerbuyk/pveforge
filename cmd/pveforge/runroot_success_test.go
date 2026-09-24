@@ -275,6 +275,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 		"bootstrap",
 		"completion", "completion/bash", "completion/fish", "completion/powershell", "completion/zsh",
 		"discover", "discover/device", "discover/network", "discover/node", "discover/storage", "discover/vm",
+		"exec",
 		"help",
 		"network", "network/bridge", "network/bridge/create", "network/bridge/destroy", "network/get", "network/set",
 		"node", "node/get",

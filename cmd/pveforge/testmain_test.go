@@ -36,6 +36,17 @@ import (
 // longhand rather than deferred ON PURPOSE: os.Exit does not run deferred
 // functions, so a `defer restore()` here would silently never fire.
 func TestMain(m *testing.M) {
+	// A command `pveforge exec` handed over to (exec_test.go) is chosen by
+	// its argv, not its environment: exec passes the environment through,
+	// so cliChildEnv below is still set in it. It runs before anything else.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case execProbeArg:
+			os.Exit(runExecProbe(os.Args[2:]))
+		case dumpableProbeArg:
+			os.Exit(runDumpableProbe())
+		}
+	}
 	// A re-executed child of the signal tests is pveforge itself, not a
 	// test run: it gets the same trip-wires, then runs the CLI and exits
 	// with its status (see signal_subprocess_test.go).

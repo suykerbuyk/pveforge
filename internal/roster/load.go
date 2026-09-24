@@ -26,6 +26,9 @@ func Decode(data []byte) (*Roster, error) {
 	if err := toml.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("parse roster: %w", err)
 	}
+	if err := checkKeys(data); err != nil {
+		return nil, fmt.Errorf("parse roster: %w", err)
+	}
 	if err := validate(&r); err != nil {
 		return nil, err
 	}
@@ -65,6 +68,9 @@ func validate(r *Roster) error {
 		}
 		if t.Node == "" {
 			return fmt.Errorf("target %q: missing required field node", t.ID)
+		}
+		if t.Export != "" && t.Export != ExportToken {
+			return fmt.Errorf("target %q: export = %q: the only value is %q", t.ID, t.Export, ExportToken)
 		}
 		if t.Token != nil {
 			if t.Token.SecretEnc == "" {

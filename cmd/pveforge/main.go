@@ -118,6 +118,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newNetworkCmd())
 	root.AddCommand(newDiscoverCmd())
 	root.AddCommand(newAPICmd())
+	root.AddCommand(newExecCmd())
 	root.AddCommand(newSchemaCmd())
 	return root
 }
