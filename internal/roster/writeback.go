@@ -109,6 +109,9 @@ func AppendTarget(path string, t Target) error {
 	if t.Token != nil || t.SSH != nil {
 		return fmt.Errorf("append target %q: must not carry auth subtables; use WriteTokenAuth/WriteSSHAuth after appending", t.ID)
 	}
+	if t.Export != "" {
+		return fmt.Errorf("append target %q: export is set only by editing the roster by hand", t.ID)
+	}
 
 	lock := flock.New(path + ".lock")
 	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -200,6 +203,9 @@ func verifyAppendOnly(oldData, newData []byte, targetID string) error {
 	}
 	if last.Token != nil || last.SSH != nil {
 		return fmt.Errorf("appended target %q unexpectedly carries auth subtables", targetID)
+	}
+	if last.Export != "" {
+		return fmt.Errorf("appended target %q unexpectedly carries export", targetID)
 	}
 	return nil
 }
@@ -378,6 +384,9 @@ func verifyOnlyTargetFieldsChanged(oldData, newData []byte, targetID string) err
 			return fmt.Errorf("target #%d id changed: %q -> %q", i, ot.ID, nt.ID)
 		}
 		if ot.ID == targetID {
+			if ot.Export != nt.Export {
+				return fmt.Errorf("target %q: export changed unexpectedly while updating fields", targetID)
+			}
 			if !tokenAuthEqual(ot.Token, nt.Token) {
 				return fmt.Errorf("target %q: token auth changed unexpectedly while updating fields", targetID)
 			}
@@ -548,7 +557,7 @@ func verifyOnlyIntendedChange(oldData, newData []byte, targetID, modifiedSubtabl
 			// Only modifiedSubtable may differ for the target we intended to
 			// change; every other field, including the OTHER auth subtable,
 			// must be identical.
-			if ot.Host != nt.Host || ot.Node != nt.Node || ot.APIPort != nt.APIPort || ot.InsecureTLS != nt.InsecureTLS {
+			if ot.Host != nt.Host || ot.Node != nt.Node || ot.APIPort != nt.APIPort || ot.InsecureTLS != nt.InsecureTLS || ot.Export != nt.Export {
 				return fmt.Errorf("target %q: non-auth fields changed unexpectedly", targetID)
 			}
 			if modifiedSubtable != "token" && !tokenAuthEqual(ot.Token, nt.Token) {
@@ -567,7 +576,7 @@ func verifyOnlyIntendedChange(oldData, newData []byte, targetID, modifiedSubtabl
 }
 
 func targetDeepEqual(a, b Target) bool {
-	if a.ID != b.ID || a.Host != b.Host || a.Node != b.Node || a.APIPort != b.APIPort || a.InsecureTLS != b.InsecureTLS {
+	if a.ID != b.ID || a.Host != b.Host || a.Node != b.Node || a.APIPort != b.APIPort || a.InsecureTLS != b.InsecureTLS || a.Export != b.Export {
 		return false
 	}
 	return tokenAuthEqual(a.Token, b.Token) && sshAuthEqual(a.SSH, b.SSH)

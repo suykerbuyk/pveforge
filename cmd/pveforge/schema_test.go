@@ -97,6 +97,16 @@ func TestNewSchemaCmd_KnownCommandMutationLevels(t *testing.T) {
 		t.Errorf("roster validate mutation = %q, want %q", rosterValidate.Mutation, mutationSafe)
 	}
 
+	// exec hands a credential to an arbitrary program: the unbounded blast
+	// radius mutation.go names as destructive.
+	execCmd, ok := findSubcommand(schema, "exec")
+	if !ok {
+		t.Fatal("exec not found in schema")
+	}
+	if execCmd.Mutation != mutationDestructive {
+		t.Errorf("exec mutation = %q, want %q", execCmd.Mutation, mutationDestructive)
+	}
+
 	schemaCmd, ok := findSubcommand(schema, "schema")
 	if !ok {
 		t.Fatal("schema not found in schema")

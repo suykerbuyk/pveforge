@@ -1,0 +1,69 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-exec - Run a command with the target's API token in its environment
+
+
+.SH SYNOPSIS
+\fBpveforge exec <target> -- <command> [args...] [flags]\fP
+
+
+.SH DESCRIPTION
+Run a command with the target's API token in its environment.
+
+.PP
+pveforge decrypts the target's API token and replaces itself with the
+command (execve), whose environment gains exactly one variable:
+
+.PP
+PVEFORGE_PVE_AUTHORIZATION=PVEAPIToken=<token id>=<secret>
+
+.PP
+That is the value of the Authorization header PVE's API takes.
+PVEFORGE_ROSTER_PASSPHRASE and PVEFORGE_PVE_PASSWORD are removed from
+the command's environment; everything else passes through. The command's
+exit status is its own. Nothing is written to disk and no host is contacted.
+One line on stderr names the token id, the target and the command, never the
+secret.
+
+.PP
+Only a target the roster marks export = "token" (set by editing the roster
+by hand) can have its token handed out. The SSH key never leaves pveforge.
+The mark is a guardrail, not a security boundary: anyone holding the
+passphrase can copy a target's secret_enc into a roster where it is marked.
+
+.PP
+On Linux pveforge is non-dumpable while it holds the secret. The command is
+dumpable again after the execve, so any process of the same user can read its
+environment, secret included.
+
+.PP
+Keep the secret out of the command's argv, which every user on the host can
+read. With curl, pass the header through a config on stdin, written by the
+shell's builtin printf, whose arguments are no process's argv. For example,
+run pveforge exec qa-pve-01 -- ./pve-version.sh, where pve-version.sh is:
+
+.EX
+#!/bin/sh
+printf 'header = "Authorization: %s"' "$PVEFORGE_PVE_AUTHORIZATION" |
+  curl -sS -K - https://qa-pve-01.example.com:8006/api2/json/version
+.EE
+
+.PP
+Never curl -H "Authorization: $PVEFORGE_PVE_AUTHORIZATION": that puts the
+secret in curl's argv. Never run a command under exec that prints its
+environment (env, printenv, set, a debug log): it prints the secret.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for exec
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge(1)\fP

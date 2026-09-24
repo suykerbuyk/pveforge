@@ -42,6 +42,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `roster init [path]` / `validate [path]` | Create an empty roster file; parse and validate one |
 | `roster import-token` | Put an API token minted outside pveforge into the roster, once PVE proves its grants |
 | `bootstrap` | Turn a PAM login into a scoped API token held in the roster |
+| `exec <target> -- <command>` | Run a command with the target's API token in its environment |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
 | `network set`, `network bridge create` / `destroy` | Change node-level network interfaces |
@@ -59,9 +60,17 @@ The roster is a TOML file listing targets (`id`, `host`, `node`) and the
 credentials pveforge holds for them. It is found at `--roster`, else
 `PVEFORGE_ROSTER`, else `./pveforge.toml`. `pveforge roster init` writes a
 commented template (mode 0600). `id`, `host` and `node` are required, and
-`api_port` (default 8006) and `insecure_tls` may be set by hand. The
+`api_port` (default 8006) and `insecure_tls` may be set by hand, and so may
+`export = "token"`, which lets `pveforge exec` hand that target's API token to
+another program. `export` is set only by hand: no pveforge command writes it,
+and any other value is refused when the roster is loaded. The
 `[targets.token]` and `[targets.ssh]` blocks are written by `bootstrap` and
 `import-token`, and their `*_enc` fields must not be edited.
+
+Keys are case-sensitive. A roster holding a key that is not spelled exactly as
+above (`Export`, `Host_Key_Fingerprint`), or a key pveforge does not know, is
+refused at load with the key and its line. The TOML library alone would match
+keys regardless of case and let the last spelling win.
 
 Secrets are encrypted at rest with age (scrypt passphrase). The passphrase is
 taken from `PVEFORGE_ROSTER_PASSPHRASE`, else from a no-echo prompt when stdin
@@ -75,8 +84,9 @@ not.
 | Variable | Used for |
 |---|---|
 | `PVEFORGE_ROSTER` | Roster path, when `--roster` is not given |
-| `PVEFORGE_ROSTER_PASSPHRASE` | The roster passphrase; without it, a terminal prompt (never for `roster import-token`, whose stdin is the token secret) |
-| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password; without it, a terminal prompt |
+| `PVEFORGE_ROSTER_PASSPHRASE` | The roster passphrase; without it, a terminal prompt (never for `roster import-token`, whose stdin is the token secret). Removed from `exec`'s command's environment |
+| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password; without it, a terminal prompt. Removed from `exec`'s command's environment |
+| `PVEFORGE_PVE_AUTHORIZATION` | Set by `exec` in its command's environment, never read by pveforge: the `Authorization` header value `PVEAPIToken=<token id>=<secret>` |
 
 ## Bootstrap
 
@@ -117,6 +127,39 @@ Nothing on PVE is created or revoked. A target that already holds a different
 token is refused unless `--replace` is given; the replaced token stays live on
 PVE. An imported target holds no SSH key, so a later plain `bootstrap` of it is
 refused: pass `--no-ssh-key`.
+
+## Handing a token to a script
+
+```sh
+PVEFORGE_ROSTER_PASSPHRASE=… pveforge exec qa-pve-01 -- sh -c '
+  printf "header = \"Authorization: %s\"\n" "$PVEFORGE_PVE_AUTHORIZATION" |
+    curl -sS -K - https://qa-pve-01.example.com:8006/api2/json/version'
+```
+
+`exec` decrypts the target's API token and replaces itself with the command
+(execve). The command's environment gains `PVEFORGE_PVE_AUTHORIZATION` and
+loses `PVEFORGE_ROSTER_PASSPHRASE` and `PVEFORGE_PVE_PASSWORD`; everything
+else passes through. Its exit status is the command's own.
+
+- Only a target marked `export = "token"` in the roster is handed out. The
+  SSH key never is. The mark is a guardrail against handing out a token by
+  accident, not a security boundary: anyone holding the passphrase can copy a
+  target's `secret_enc` into a roster where it is marked.
+- Nothing is written to disk and no host is contacted. On Linux, pveforge
+  makes itself non-dumpable before it decrypts, so no core dump or same-user
+  process can read the secret out of it. That protection ends at the execve:
+  the command is dumpable again, and any process of the same user can read
+  its environment (`/proc/<pid>/environ`), secret included.
+- One stderr line names the token id, the target and the command, never the
+  secret. It is printed after every check has passed, just before the execve.
+  If the execve itself fails, an error follows it saying the token was not
+  handed over, and the exit status is 1.
+- Keep the secret out of argv, which every user on the host can read: the
+  recipe above passes it to curl on stdin (`printf` is a shell builtin). Never
+  write `curl -H "Authorization: $PVEFORGE_PVE_AUTHORIZATION"`.
+- **Never run a command under `exec` that prints its environment** (`env`,
+  `printenv`, `set`, a debug log). It prints the secret, into a terminal, a
+  log or an agent's transcript.
 
 ## Idempotence and locking
 
@@ -160,6 +203,9 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 | `1` | The command failed |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
+
+`exec` exits with these statuses only when it fails before handing over. Once
+it runs the command, the exit status is the command's own.
 
 On the first SIGINT or SIGTERM, pveforge stops and finishes any cleanup it had
 started. Unless it was only waiting for a lock or at a prompt, it says on

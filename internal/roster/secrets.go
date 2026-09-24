@@ -293,6 +293,23 @@ type ResolvedTarget struct {
 	SSHPrivateKey []byte
 }
 
+// TokenSecret decrypts t's API token secret, and nothing else: the SSH key,
+// if t holds one, stays sealed. A passphrase that does not open the secret
+// is ErrWrongPassphrase, naming PassphraseEnvVar.
+func (t *Target) TokenSecret(passphrase string) ([]byte, error) {
+	if t.Token == nil {
+		return nil, fmt.Errorf("target %q holds no API token", t.ID)
+	}
+	pt, err := DecryptString(t.Token.SecretEnc, passphrase)
+	if errors.Is(err, age.ErrIncorrectIdentity) {
+		return nil, fmt.Errorf("%w: it does not open the token secret of target %s; check %s", ErrWrongPassphrase, t.ID, PassphraseEnvVar)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decrypt token secret for %q: %w", t.ID, err)
+	}
+	return pt, nil
+}
+
 // Resolve decrypts t's secrets using passphrase.
 func (t *Target) Resolve(passphrase string) (*ResolvedTarget, error) {
 	rt := &ResolvedTarget{Target: *t}

@@ -17,6 +17,10 @@ const rosterTemplate = `# pveforge roster — targets and how to reach them.
 # it has generated credentials for a target — do not hand-edit their
 # *_enc fields.
 #
+# Setting export = "token" on a target, by hand, lets ` + "`pveforge exec`" + `
+# hand that target's API token to another program. Leave it out to keep
+# the token inside pveforge.
+#
 # [[targets]]
 # id   = "qa-pve-01"
 # host = "qa-pve-01.example.com"
