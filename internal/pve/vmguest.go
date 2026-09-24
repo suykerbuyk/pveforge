@@ -281,10 +281,15 @@ func IsAgentExecTimeoutError(err error) bool {
 // stdin and is sent raw, not base64.
 //
 // Goes through RawRequest rather than go-proxmox's own
-// VirtualMachine.AgentExec, for this project's standing reason —
-// go-proxmox's handleResponse discards the response body entirely on
-// HTTP 500/501, which is exactly the status PVE uses to report that the
-// guest agent is not running. That reason stands at v0.8.2-pveforge.2.
+// VirtualMachine.AgentExec. The original reason is gone: through
+// v0.8.2-pveforge.0 go-proxmox's handleResponse discarded the response
+// body on HTTP 500/501, the status PVE uses to report that the guest agent
+// is not running, but since .1 it returns a *proxmox.StatusError that
+// keeps the body. What still holds at v0.8.2-pveforge.3: that error's text
+// is only the HTTP status line, whose reason phrase HTTP/2 erases, while
+// RawRequest's StatusError puts PVE's own text in the message; and
+// go-proxmox JSON-encodes the command where this method form-encodes it,
+// like every other write path here (see UNVERIFIED below).
 // Through .1 the method also had two defects of its own, both fixed at .2:
 // it ignored its own Post error, so every transport failure surfaced as
 // the misleading "no pid returned from agent exec command", and it decoded

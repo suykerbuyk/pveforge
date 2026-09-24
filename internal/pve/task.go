@@ -186,7 +186,7 @@ const maxConsecutiveTransientPolls = 3
 //     blindly retry a non-idempotent operation on one of these.
 //
 // The poll loop is pveforge's own rather than go-proxmox's Task.Wait,
-// because go-proxmox (still at v0.8.2-pveforge.2) reports every non-2xx status poll
+// because go-proxmox (still at v0.8.2-pveforge.3) reports every non-2xx status poll
 // as a *proxmox.StatusError, which Task.Wait returns at once: a single
 // pveproxy hiccup mid-task would end the wait. Each poll decodes into a
 // FRESH Task, polls start immediately (no sleep before the first), and
@@ -204,7 +204,11 @@ const maxConsecutiveTransientPolls = 3
 //     status at all (ErrUnverifiableRead). The 4th consecutive transient
 //     poll ends the wait, reporting the last one's cause;
 //   - anything else ends the wait at once: any other status (400, a 404 for
-//     an unknown UPID, 500, ...), proxmox.ErrNotAuthorized, a decode error,
+//     an unknown UPID, 500, ...), proxmox.ErrNotAuthorized, a decode error
+//     (including a *proxmox.ShapeError, a field of the wrong JSON type:
+//     never retried, and never read as a success even when the same
+//     payload says "stopped" with "OK", since a payload outside PVE's
+//     contract is not trusted for its exit status either),
 //     a status other than "running"/"stopped", "stopped" without an exit
 //     status, or a canceled ctx (checked before a failed poll is
 //     classified, so a cancel is never retried as a transient failure).

@@ -620,6 +620,59 @@ func TestWaitForTask_StoppedWithoutExitStatusIsNotATaskFailure(t *testing.T) {
 	requirePolls(t, s, 1)
 }
 
+// A poll whose task time is the wrong JSON type panicked in go-proxmox's
+// Task.UnmarshalJSON through v0.8.2-pveforge.2; since .3 it is a
+// *proxmox.ShapeError. The task was dispatched and already seen running,
+// so its outcome is unknown: the wait ends at once, never retried as a
+// transient poll and never read as a success, even when the same payload
+// says stopped/OK.
+func TestWaitForTask_ShapeErrorIsOutcomeUnknown(t *testing.T) {
+	s0 := newTaskScript("qa-pve-01")
+	for _, tc := range []struct {
+		name, field, body string
+	}{
+		{"running starttime", "starttime", fmt.Sprintf(`{"data":{"status":"running","starttime":"x","upid":%q,"node":%q}}`, s0.upid, s0.node)},
+		{"running endtime", "endtime", fmt.Sprintf(`{"data":{"status":"running","endtime":true,"upid":%q,"node":%q}}`, s0.upid, s0.node)},
+		{"stopped OK endtime", "endtime", fmt.Sprintf(`{"data":{"status":"stopped","exitstatus":"OK","starttime":1700000000,"endtime":"x","upid":%q,"node":%q}}`, s0.upid, s0.node)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTaskTimings(t, time.Millisecond, time.Second)
+			s := newTaskScript("qa-pve-01")
+			c := s.client(t, s.running(), pollStep{200, tc.body, pollServe}, s.stopped("OK"))
+
+			err := c.WaitForTask(context.Background(), s.node, s.upid)
+			requireOutcomeUnknown(t, err)
+			if !errors.Is(err, proxmox.ErrUnexpectedShape) {
+				t.Fatalf("expected proxmox.ErrUnexpectedShape in the chain, got %v", err)
+			}
+			var se *proxmox.ShapeError
+			if !errors.As(err, &se) || se.Type != "Task" || se.Field != tc.field {
+				t.Fatalf("expected a *proxmox.ShapeError for Task.%s, got %v", tc.field, err)
+			}
+			requirePolls(t, s, 2)
+			if got := atomic.LoadInt32(&s.conns); got != 2 {
+				t.Fatalf("connections = %d, want 2 (one per poll)", got)
+			}
+		})
+	}
+}
+
+// The control for the test above: a null task time is absent, not a shape
+// error, so a wait over null times completes normally.
+func TestWaitForTask_NullTaskTimesAreAbsent(t *testing.T) {
+	withTaskTimings(t, time.Millisecond, time.Second)
+	s := newTaskScript("qa-pve-01")
+	c := s.client(t,
+		pollStep{200, fmt.Sprintf(`{"data":{"status":"running","starttime":null,"endtime":null,"upid":%q,"node":%q}}`, s.upid, s.node), pollServe},
+		pollStep{200, fmt.Sprintf(`{"data":{"status":"stopped","exitstatus":"OK","starttime":null,"endtime":null,"upid":%q,"node":%q}}`, s.upid, s.node), pollServe},
+	)
+
+	if err := c.WaitForTask(context.Background(), s.node, s.upid); err != nil {
+		t.Fatalf("WaitForTask: %v", err)
+	}
+	requirePolls(t, s, 2)
+}
+
 // waitWithCancel runs WaitForTask, cancels its context after 20ms, and
 // returns its error and how long it took, failing if it outlives 2s.
 func waitWithCancel(t *testing.T, c *Client, s *taskScript) (error, time.Duration) {
