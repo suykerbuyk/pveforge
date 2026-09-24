@@ -500,18 +500,9 @@ warning line says so.`,
 			if err := printDeletedFields(cmd.OutOrStdout(), args[0], op.Deleted); err != nil {
 				return err
 			}
-			// The write succeeded, so this is advisory and the exit status
-			// stays 0 — failing it would push a caller into a needless
-			// retry. Stderr, not stdout, so the applied lines a script
-			// parses are unchanged. The cause is quoted like runRoot's own
-			// error line, because it can carry server text (a 5xx body)
-			// that must not forge a second line; the target id is printed
-			// bare, as printAppliedFields prints it, because the roster
-			// refuses any id that would need quoting
-			// (roster.ValidateTargetID).
-			if res.AfterErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: vm %d: the write was applied but its result could not be re-read: %s\n", args[0], vmid, kvjson.QuoteValue(boundErrText(res.AfterErr.Error())))
-			}
+			// Advisory (warnNotReread): the exit status stays 0, and stdout
+			// is unchanged.
+			warnNotReread(cmd.ErrOrStderr(), args[0], "vm", strconv.Itoa(vmid), res.AfterErr)
 			reportPending(cmd.ErrOrStderr(), args[0], vmid, op, res.PostApplyErr)
 			return nil
 		},

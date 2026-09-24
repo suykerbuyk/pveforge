@@ -320,9 +320,9 @@ func TestBoundErrText_B7_AnEchoedSecretStraddlingTheBoundNeverLeaks(t *testing.T
 // exactly as often as expected.
 func TestBoundErrText_B8_EveryPrintedErrorTextIsBounded(t *testing.T) {
 	wantBounded := map[string]int{
-		"main.go: runRoot: err.Error()":            1,
-		"vm.go: newVMSetCmd: res.AfterErr.Error()": 1,
-		"vm.go: reportPending: postErr.Error()":    2, // the pending and the cloud-init warnings
+		"main.go: runRoot: err.Error()":              1,
+		"reread.go: warnNotReread: afterErr.Error()": 1, // Run's AfterErr, for every command that reports it
+		"vm.go: reportPending: postErr.Error()":      2, // the pending and the cloud-init warnings
 	}
 	fset, files, info := checkedPackage(t)
 	errType := types.Universe.Lookup("error").Type().Underlying().(*types.Interface)

@@ -46,6 +46,11 @@ made outside pveforge.
 Disabling the user that owns the roster's own token is refused: it would lock
 pveforge out of the target.
 
+.PP
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.
+
 
 .SH OPTIONS
 \fB--allow-escalating-role\fP[=false]

@@ -164,7 +164,11 @@ Nothing serialises user ensure against acl grant, or either against changes
 made outside pveforge.
 
 Disabling the user that owns the roster's own token is refused: it would lock
-pveforge out of the target.`,
+pveforge out of the target.
+
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetID, userID := args[0], args[1]
@@ -230,6 +234,7 @@ pveforge out of the target.`,
 			}
 			verb := ensureVerb(res)
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: user %s %s\n", targetID, userID, verb)
+			warnNotReread(cmd.ErrOrStderr(), targetID, "user", userID, res.AfterErr)
 			if verb == "created" && strings.HasSuffix(userID, "@pve") {
 				fmt.Fprintf(cmd.ErrOrStderr(), "notice: %s: user %s has no password: it cannot log in until one is set with pveum passwd\n", targetID, userID)
 			}
@@ -270,7 +275,11 @@ func newGroupEnsureCmd() *cobra.Command {
 		Long: `Create a PVE group, or set its comment when --comment is given. Idempotent:
 a group already as asked is left alone, and root is never connected to. The
 write runs as root over SSH with pveum, as for user ensure. A group's members
-are set on its users (user ensure --group).`,
+are set on its users (user ensure --group).
+
+If the change is made but its result cannot be re-read afterwards, a
+one-line warning is printed on stderr; stdout is unchanged and the exit
+status is still 0.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetID, groupID := args[0], args[1]
@@ -301,6 +310,7 @@ are set on its users (user ensure --group).`,
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: group %s %s\n", targetID, groupID, ensureVerb(res))
+			warnNotReread(cmd.ErrOrStderr(), targetID, "group", groupID, res.AfterErr)
 			return nil
 		},
 	}
