@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // RootOnlyFields is the set of VM config fields empirically confirmed to
@@ -44,6 +45,13 @@ func IsRootOnlyWriteError(err error) bool {
 	return strings.Contains(err.Error(), rootOnlyErrorSubstring)
 }
 
+// QMSetTimeout bounds a `qm set` (SetVMConfigField, DeleteVMConfigField),
+// in place of CommandTimeout: qm waits up to 10s for the VM's config lock,
+// and on a running VM it then applies every pending change it can
+// hotplug, which may take far longer than the write itself (the field
+// written here, args, is never hotplugged, but other pending changes are).
+var QMSetTimeout = 120 * time.Second
+
 // SetVMConfigField sets a single VM config field via `qm set`, for fields
 // in RootOnlyFields that Proxmox's API refuses to accept from any token.
 // Runs over c's existing SSH connection, which must be authenticated as a
@@ -53,7 +61,7 @@ func (c *Client) SetVMConfigField(ctx context.Context, vmid int, field, value st
 		return fmt.Errorf("set vm config field: invalid field name %q", field)
 	}
 	cmd := fmt.Sprintf("qm set %s --%s %s", ShellQuote(strconv.Itoa(vmid)), field, ShellQuote(value))
-	res, err := c.Run(ctx, cmd)
+	res, err := c.Run(WithCommandTimeout(ctx, QMSetTimeout), cmd)
 	if err != nil {
 		return fmt.Errorf("set vm %d field %q: %w", vmid, field, err)
 	}
@@ -74,7 +82,7 @@ func (c *Client) DeleteVMConfigField(ctx context.Context, vmid int, field string
 		return fmt.Errorf("delete vm config field: invalid field name %q", field)
 	}
 	cmd := fmt.Sprintf("qm set %s --delete %s", ShellQuote(strconv.Itoa(vmid)), ShellQuote(field))
-	res, err := c.Run(ctx, cmd)
+	res, err := c.Run(WithCommandTimeout(ctx, QMSetTimeout), cmd)
 	if err != nil {
 		return fmt.Errorf("delete vm %d field %q: %w", vmid, field, err)
 	}

@@ -278,14 +278,12 @@ func (a *RootAccess) rootOSAccounts(ctx context.Context, pamUserIDs []string) (m
 	for i, n := range names {
 		quoted[i] = sshexec.ShellQuote(n)
 	}
-	s, err := a.root(ctx)
+	// Through the bounded runner (rootRun, not pveum): getent's exit 2,
+	// "one or more keys were not found", is an answer, not a failure.
+	cmd := "getent passwd -- " + strings.Join(quoted, " ")
+	res, err := a.rootRun(ctx, cmd)
 	if err != nil {
 		return nil, err
-	}
-	cmd := "getent passwd -- " + strings.Join(quoted, " ")
-	res, err := s.Run(ctx, cmd)
-	if err != nil {
-		return nil, fmt.Errorf("run getent passwd: %w", err)
 	}
 	if res.ExitCode != 0 && res.ExitCode != 2 {
 		return nil, fmt.Errorf("getent passwd exited %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))

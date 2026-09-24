@@ -268,7 +268,13 @@ func runJSONArray(ctx context.Context, s SSHSession, cmd string, out interface{}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("%s exited %d: %s", firstWords(cmd), res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	trimmed := strings.TrimSpace(res.Stdout)
+	return decodeJSONArray(cmd, res.Stdout, out)
+}
+
+// decodeJSONArray is runJSONArray's decode, for a command's stdout already
+// in hand (RootAccess's runner reads it).
+func decodeJSONArray(cmd, stdout string, out interface{}) error {
+	trimmed := strings.TrimSpace(stdout)
 	if trimmed == "" {
 		return fmt.Errorf("%s printed nothing (expected a JSON array)", firstWords(cmd))
 	}
@@ -652,6 +658,9 @@ type runner struct {
 // context cannot skip the step that makes the post-remove window safe or
 // reportable, and it is created immediately before that step: never one
 // deadline started at the remove, which the forward steps would consume.
+// Its cleanupTimeout (30s) also caps the cleanup's token remove: that
+// parent deadline is earlier than PVEConfigWriteTimeout, so a slow remove
+// ends at 30s, reported as a leftover that may exist.
 func (r *runner) cleanupCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(r.ctx), cleanupTimeout)
 }
@@ -737,7 +746,7 @@ func (r *runner) fail(cause error) (*Result, error) {
 // cannot be proven gone it is reported as LeftoverToken.
 func (r *runner) removeFresh() {
 	sctx, cancel := r.cleanupCtx()
-	res, err := r.session.Run(sctx, r.removeCmd())
+	res, err := r.session.Run(configWrite(sctx), r.removeCmd())
 	cancel()
 	if err == nil && res.ExitCode == 0 {
 		return
@@ -750,6 +759,10 @@ func (r *runner) removeFresh() {
 	case tokenAbsent:
 		return
 	case tokenUnreadable:
+		state = LeftoverMayExist
+	}
+	if writeOutcomeUnknown(err) {
+		// A timed-out remove may still land: "exists" would overclaim.
 		state = LeftoverMayExist
 	}
 	if err != nil {
@@ -809,7 +822,7 @@ func (r *runner) validatePostMint(secret string) (verdict, nonVerdict error) {
 func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) {
 	addCmd := fmt.Sprintf("pveum user token add %s %s --privsep 1 --output-format json",
 		sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
-	res, err := r.session.Run(r.ctx, addCmd)
+	res, err := r.session.Run(configWrite(r.ctx), addCmd)
 	if err != nil {
 		// Ambiguous: the add may have run. Re-read, never infer.
 		switch r.reread() {
@@ -818,6 +831,12 @@ func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) 
 			r.removeFresh()
 		case tokenUnreadable:
 			r.leftover(LeftoverMayExist)
+		case tokenAbsent:
+			// After a TIMED-OUT add, absent is not the last word: the
+			// killed pveum may still land the token after the re-read.
+			if writeOutcomeUnknown(err) {
+				r.leftover(LeftoverMayExist)
+			}
 		}
 		return r.fail(fmt.Errorf("run pveum user token add: %w", err))
 	}
@@ -949,10 +968,24 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 	return r.mintAndPersist(OutcomeReplaced, "")
 }
 
+// priorUnknown ends the run when whether the roster-held token was revoked
+// is unknown: the roster may point at a dead token, so it is cleared.
+func (r *runner) priorUnknown(cause error) (*Result, error) {
+	r.removed = true
+	r.res.PriorRevoked = true
+	r.res.PriorToken = PriorTokenUnknown
+	if cerr := roster.ClearTokenAuth(r.opts.RosterPath, r.opts.TargetID); cerr != nil {
+		r.res.RosterToken = RosterTokenStaleRevoked
+	} else {
+		r.res.RosterToken = RosterTokenCleared
+	}
+	return r.fail(cause)
+}
+
 // removeHeld removes the roster-held token on PVE. stop reports that the
 // run must end with (res, err).
 func (r *runner) removeHeld() (res *Result, err error, stop bool) {
-	out, runErr := r.session.Run(r.ctx, r.removeCmd())
+	out, runErr := r.session.Run(configWrite(r.ctx), r.removeCmd())
 	if runErr == nil {
 		if out.ExitCode != 0 {
 			return nil, fmt.Errorf("bootstrap %s: pveum user token remove exited %d; pveforge did not revoke the token: %s", r.opts.TargetID, out.ExitCode, strings.TrimSpace(out.Stderr)), true
@@ -968,19 +1001,15 @@ func (r *runner) removeHeld() (res *Result, err error, stop bool) {
 		r.res.PriorRevoked = true
 		return nil, nil, false
 	case tokenPresentState:
-		return nil, fmt.Errorf("bootstrap %s: pveum user token remove failed (%v) and the token still exists; pveforge did not revoke it", r.opts.TargetID, runErr), true
-	default:
-		// Unknown whether it was revoked. The roster may point at a dead
-		// token: clear it, then stop.
-		r.removed = true
-		r.res.PriorRevoked = true
-		r.res.PriorToken = PriorTokenUnknown
-		if cerr := roster.ClearTokenAuth(r.opts.RosterPath, r.opts.TargetID); cerr != nil {
-			r.res.RosterToken = RosterTokenStaleRevoked
-		} else {
-			r.res.RosterToken = RosterTokenCleared
+		if !writeOutcomeUnknown(runErr) {
+			return nil, fmt.Errorf("bootstrap %s: pveum user token remove failed (%v) and the token still exists; pveforge did not revoke it", r.opts.TargetID, runErr), true
 		}
-		res, err := r.fail(fmt.Errorf("pveum user token remove failed (%v) and the follow-up read could not establish whether the token still exists", runErr))
+		// After a TIMED-OUT remove, present is not the last word: the
+		// killed pveum may still land the remove after the re-read.
+		res, err := r.priorUnknown(fmt.Errorf("pveum user token remove timed out (%v); the token was still listed after it, but the remove may yet take effect, so whether it was revoked is unknown", runErr))
+		return res, err, true
+	default:
+		res, err := r.priorUnknown(fmt.Errorf("pveum user token remove failed (%v) and the follow-up read could not establish whether the token still exists", runErr))
 		return res, err, true
 	}
 }

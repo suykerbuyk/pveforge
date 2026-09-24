@@ -1221,7 +1221,9 @@ func TestRun_R18b_FreshBudgetPerCleanupStep(t *testing.T) {
 }
 
 // R18c: a cleanup step slower than its budget is abandoned: leftover, and
-// the error names the timeout.
+// the error names the timeout. The leftover MAY exist, not "exists": the
+// timed-out remove may still land after the re-read that found the token
+// (pveforge-root-channel-deadlines S1).
 func TestRun_R18c_CleanupStepTimesOut(t *testing.T) {
 	withCleanupTimeout(t, 100*time.Millisecond)
 	s, session, tr, v := prior(t, map[string]fakeRunResult{"pveum acl modify": {res: RunResult{ExitCode: 1}}})
@@ -1243,7 +1245,7 @@ func TestRun_R18c_CleanupStepTimesOut(t *testing.T) {
 	start := time.Now()
 	res, err := Run(context.Background(), s.opts, tr, v)
 	wantRevoked(t, res, err)
-	if res.LeftoverToken != heldID || res.LeftoverState != LeftoverExists || !strings.Contains(err.Error(), "deadline exceeded") {
+	if res.LeftoverToken != heldID || res.LeftoverState != LeftoverMayExist || !strings.Contains(err.Error(), "deadline exceeded") {
 		t.Fatalf("leftover = %q (%q), err = %v", res.LeftoverToken, res.LeftoverState, err)
 	}
 	if time.Since(start) > 2*time.Second {

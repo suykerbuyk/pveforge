@@ -176,7 +176,9 @@ pveforge acl grant qa-pve-01 --group ops --grant /pool/lab:PVEVMUser::1
 These write as root over SSH with `pveum`, never with the roster's API token,
 which never holds `User.Modify` or `Permissions.Modify`. A target that holds no
 SSH key needs `--no-ssh-key`, which connects as root with the PVE password for
-that run, as `bootstrap --no-ssh-key` does.
+that run, as `bootstrap --no-ssh-key` does. The password is asked for before
+the user's or group's lock is taken; root is dialed only if something must be
+read or written as root.
 
 - `user ensure` and `group ensure` are idempotent. The read that decides
   whether to write uses the token (root's `pveum` when the token may not read
@@ -262,6 +264,29 @@ group (`user ensure`, `group ensure`), take a per-object lock (files under `<ros
 read shares it. So two pveforge processes never mutate the same object at once,
 and a read waits for a mutation in progress. `--lock-wait` bounds the wait for another
 process's lock: 0 means the 15m default, and the maximum is 1h.
+
+Every command pveforge runs over SSH is bounded, so a dead connection or a hung
+host never holds a lock without end:
+
+- 30 seconds by default: every read, and two small writes, bootstrap's append
+  of its key to root's `authorized_keys` (which on PVE lives in
+  `/etc/pve/priv`) and a live `bridge link set` for bridge isolation;
+- 90 for `pveum` user, group, ACL and token writes (PVE itself allows about
+  70), except bootstrap's cleanup removal of a token it could not use, which
+  its own 30-second cleanup bound ends first;
+- 120 for `qm set` on a root-only field (it may apply the VM's other pending
+  changes);
+- slightly more than 30 for a snippet upload, scaled by its size.
+
+A command that runs past its bound is sent SIGKILL and reported with exit 1 as
+timed out, with an unknown outcome: it may or may not have taken effect, and on
+the host it may outlive pveforge and its lock. A read made after it cannot
+settle that either, so pveforge reports such a token or write as possibly
+applied, never as definitely not. If the connection is so dead that even the
+SIGKILL cannot be sent within 2 seconds, pveforge closes it. A command whose
+session never opened was never sent, and is reported as a plain failure.
+Re-running `user ensure`, `group ensure`, `acl grant` or `vm set` is safe; each
+reads the current state first. Only a signal (Ctrl-C) exits 130 or 143.
 
 `api` locks by path. A path that names a pveforge-managed object is always
 locked; `--unsafe-no-lock` does not change that. On any other path:

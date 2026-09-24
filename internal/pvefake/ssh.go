@@ -54,8 +54,9 @@ type SSHServer struct {
 	handleExec                   func(cmd string) (stdout, stderr string, exitCode int)
 	started                      bool
 
-	mu   sync.Mutex
-	cmds []string
+	mu    sync.Mutex
+	cmds  []string
+	conns int
 }
 
 // NewSSHServer generates a fresh host key and binds a loopback listener,
@@ -143,6 +144,14 @@ func (s *SSHServer) Port(t testing.TB) int {
 	return p
 }
 
+// Connections returns how many authenticated connections were made so far:
+// a dial that runs no command is visible here, not in Commands.
+func (s *SSHServer) Connections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conns
+}
+
 // Commands returns every exec command received so far, in arrival order.
 func (s *SSHServer) Commands() []string {
 	s.mu.Lock()
@@ -175,6 +184,9 @@ func (s *SSHServer) handleConn(conn net.Conn) {
 		return
 	}
 	defer func() { _ = sconn.Close() }()
+	s.mu.Lock()
+	s.conns++
+	s.mu.Unlock()
 	go ssh.DiscardRequests(reqs)
 
 	for newChan := range chans {
