@@ -120,7 +120,7 @@ func missingVMErrorText(vmid int) string {
 // --- isMissingVMError -------------------------------------------------
 
 func TestIsMissingVMError_MatchesRealMissingVMText(t *testing.T) {
-	err := errors.New(missingVMErrorText(100))
+	err := pveAnswer(missingVMErrorText(100))
 	if !isMissingVMError(err, 100) {
 		t.Error("expected a match for the vmid's own missing-config text")
 	}
@@ -133,7 +133,7 @@ func TestIsMissingVMError_MatchesRealMissingVMText(t *testing.T) {
 // real destroy exactly the way GetVM's opaque errors did in the rejected
 // first draft of this Op.
 func TestIsMissingVMError_RejectsAuthFailureNearMiss(t *testing.T) {
-	err := errors.New("raw request: pve returned 500 Internal Server Error: user 'root@pve' does not exist")
+	err := pveAnswer("raw request: pve returned 500 Internal Server Error: user 'root@pve' does not exist")
 	if isMissingVMError(err, 100) {
 		t.Error("expected the auth-failure near-miss to be rejected, not classified as \"VM gone\"")
 	}
@@ -143,7 +143,7 @@ func TestIsMissingVMError_RejectsAuthFailureNearMiss(t *testing.T) {
 // a missing-config message for a DIFFERENT vmid must not satisfy this
 // vmid's check.
 func TestIsMissingVMError_RejectsWrongVMID(t *testing.T) {
-	err := errors.New(missingVMErrorText(101))
+	err := pveAnswer(missingVMErrorText(101))
 	if isMissingVMError(err, 100) {
 		t.Error("expected vmid 101's missing-config text to not match vmid 100's check")
 	}
@@ -169,7 +169,7 @@ func TestIsMissingVMError_NilErrorIsFalse(t *testing.T) {
 func TestVMDestroy_Read_ClassifiedMissing_ReportsGone(t *testing.T) {
 	client := &fakeVMDestroyClient{
 		node:            "qa-pve-01",
-		rawRequestSteps: []rawRequestStep{{err: errors.New(missingVMErrorText(100))}},
+		rawRequestSteps: []rawRequestStep{{err: pveAnswer(missingVMErrorText(100))}},
 	}
 	op := &VMDestroy{Client: client, VMID: 100}
 
@@ -211,7 +211,7 @@ func TestVMDestroy_Read_NearMissAuthError_Propagates(t *testing.T) {
 	client := &fakeVMDestroyClient{
 		node: "qa-pve-01",
 		rawRequestSteps: []rawRequestStep{
-			{err: errors.New("raw request: pve returned 500 Internal Server Error: user 'root@pve' does not exist")},
+			{err: pveAnswer("raw request: pve returned 500 Internal Server Error: user 'root@pve' does not exist")},
 		},
 	}
 	op := &VMDestroy{Client: client, VMID: 100}
@@ -252,7 +252,7 @@ func baseDestroyClient() *fakeVMDestroyClient {
 		stopVMUPID:    "UPID:qa-pve-01:1:1:1:qmstop:100:root@pam:",
 		destroyVMUPID: "UPID:qa-pve-01:2:2:2:qmdestroy:100:root@pam:",
 		rawRequestSteps: []rawRequestStep{
-			{err: errors.New(missingVMErrorText(100))},
+			{err: pveAnswer(missingVMErrorText(100))},
 		},
 	}
 }
@@ -452,7 +452,7 @@ func destroyKey() lock.ObjectKey {
 func TestVMDestroy_ViaRun_AlreadyGone_SkipsApply(t *testing.T) {
 	client := &fakeVMDestroyClient{
 		node:            "qa-pve-01",
-		rawRequestSteps: []rawRequestStep{{err: errors.New(missingVMErrorText(100))}},
+		rawRequestSteps: []rawRequestStep{{err: pveAnswer(missingVMErrorText(100))}},
 	}
 	op := &VMDestroy{Client: client, VMID: 100}
 
@@ -498,7 +498,7 @@ func TestVMDestroy_ViaRun_FullCycle_AppliesAndConfirmsGone(t *testing.T) {
 		destroyVMUPID: "UPID:qa-pve-01:2:2:2:qmdestroy:100:root@pam:",
 		rawRequestSteps: []rawRequestStep{
 			{result: json.RawMessage(`{"name":"test-vm"}`)}, // Read: exists
-			{err: errors.New(missingVMErrorText(100))},      // Apply's reverify: gone
+			{err: pveAnswer(missingVMErrorText(100))},       // Apply's reverify: gone
 		},
 	}
 	op := &VMDestroy{Client: client, VMID: 100}

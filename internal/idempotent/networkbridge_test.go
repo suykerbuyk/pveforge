@@ -144,7 +144,7 @@ func (f *fakeNetworkBridgeClient) handleGet(iface string) (json.RawMessage, erro
 		return nil, resp.err
 	}
 	if resp.missing {
-		return nil, fmt.Errorf("raw request: pve returned 500 Internal Server Error: iface '%s' does not exist", iface)
+		return nil, pveAnswer(fmt.Sprintf("raw request: pve returned 500 Internal Server Error: iface '%s' does not exist", iface))
 	}
 	b, err := json.Marshal(resp.fields)
 	if err != nil {

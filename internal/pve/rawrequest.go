@@ -159,12 +159,7 @@ type StatusError struct {
 // newStatusError is the StatusError for res, whose body was body, with
 // what (e.g. "raw request") leading its text.
 func newStatusError(what string, res *http.Response, body []byte) *StatusError {
-	return &StatusError{
-		Code:   res.StatusCode,
-		Status: res.Status,
-		Body:   body,
-		msg:    fmt.Sprintf("%s: pve returned %s: %s", what, res.Status, strings.TrimSpace(string(body))),
-	}
+	return NewStatusError(what, res.StatusCode, res.Status, body)
 }
 
 func (e *StatusError) Error() string { return e.msg }
