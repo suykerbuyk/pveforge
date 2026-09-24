@@ -154,3 +154,49 @@ func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
 		t.Errorf("internal/netguard/testdata/weakprobe no longer imports netguard (%q): drop this anti-vacuity row", weak)
 	}
 }
+
+// testOnlyDeps are packages, by import-path prefix, that the module may use
+// from tests only: cobra/doc generates docs/man (cmd/pveforge/man_test.go),
+// and go-md2man, blackfriday and go.yaml.in/yaml come in under it. None may
+// be linked into a binary: pveforge ships no man-page generator.
+var testOnlyDeps = []string{
+	"github.com/spf13/cobra/doc",
+	"github.com/cpuguy83/go-md2man/",
+	"github.com/russross/blackfriday/",
+	"go.yaml.in/yaml/",
+}
+
+// TestManPageGeneratorNeverReachesProduction: no main package's `go list
+// -deps` holds a testOnlyDeps package — a blank or transitive import
+// included, which a source walk would miss. Anti-vacuity: cmd/pveforge's
+// test dependencies do hold each one, so the check is looking at a real
+// importer rather than at packages nothing uses.
+func TestManPageGeneratorNeverReachesProduction(t *testing.T) {
+	mains := strings.Fields(goList(t, "-f", `{{if eq .Name "main"}}{{.ImportPath}}{{end}}`, "./..."))
+	if !slices.Contains(mains, modulePath+"cmd/pveforge") {
+		t.Fatalf("mains = %v: cmd/pveforge is not among them", mains)
+	}
+	matches := func(pkgs []string, prefix string) []string {
+		var hit []string
+		for _, p := range pkgs {
+			if strings.HasPrefix(p, prefix) {
+				hit = append(hit, p)
+			}
+		}
+		return hit
+	}
+	for _, m := range mains {
+		deps := strings.Fields(goList(t, "-deps", m))
+		for _, d := range testOnlyDeps {
+			if hit := matches(deps, d); len(hit) > 0 {
+				t.Errorf("%s links %v: the man-page generator's dependencies must stay test-only", m, hit)
+			}
+		}
+	}
+	testDeps := strings.Fields(goList(t, "-deps", "-test", "./cmd/pveforge"))
+	for _, d := range testOnlyDeps {
+		if len(matches(testDeps, d)) == 0 {
+			t.Errorf("no test of cmd/pveforge depends on %s: this guard is not looking at a real importer (or it is dead and should go)", d)
+		}
+	}
+}
