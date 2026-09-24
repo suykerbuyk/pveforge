@@ -131,6 +131,7 @@ func TestNewSchemaCmd_KnownCommandMutationLevels(t *testing.T) {
 		{[]string{"user", "ensure"}, mutationMutating},
 		{[]string{"group", "ensure"}, mutationMutating},
 		{[]string{"acl", "grant"}, mutationDestructive},
+		{[]string{"access", "inventory"}, mutationSafe},
 	} {
 		got, ok := findRootPath(t, schema, c.path...)
 		if !ok {

@@ -32,6 +32,10 @@ type AccessUser struct {
 	Comment string
 	Email   string
 	Groups  []string
+	// GroupsListed reports whether the answer carried a "groups" field at
+	// all (possibly empty), as AccessGroup.UsersListed does for members: a
+	// caller deciding on membership requires it.
+	GroupsListed bool
 }
 
 // AccessGroup is one PVE group and its members.
@@ -83,11 +87,16 @@ func ParseAccessUsers(raw []byte) ([]AccessUser, error) {
 		return nil, err
 	}
 	out := make([]AccessUser, 0, len(entries))
+	seen := map[string]bool{}
 	for i, e := range entries {
 		id, err := requiredString(e, "userid")
 		if err != nil {
 			return nil, fmt.Errorf("user list entry %d: %w", i, err)
 		}
+		if seen[id] {
+			return nil, fmt.Errorf("user list: user %s is listed twice: %w", id, ErrUnverifiableRead)
+		}
+		seen[id] = true
 		en, err := requiredBool(e, "enable")
 		if err != nil {
 			return nil, fmt.Errorf("user list entry %s: %w", id, err)
@@ -102,6 +111,12 @@ func ParseAccessUsers(raw []byte) ([]AccessUser, error) {
 		if u.Groups, err = optionalList(e, "groups"); err != nil {
 			return nil, fmt.Errorf("user list entry %s: %w", id, err)
 		}
+		if g := repeated(u.Groups); g != "" {
+			return nil, fmt.Errorf("user list entry %s: group %s is listed twice: %w", id, g, ErrUnverifiableRead)
+		}
+		if v, ok := e["groups"]; ok && string(v) != "null" {
+			u.GroupsListed = true
+		}
 		out = append(out, u)
 	}
 	return out, nil
@@ -114,11 +129,16 @@ func ParseAccessGroups(raw []byte) ([]AccessGroup, error) {
 		return nil, err
 	}
 	out := make([]AccessGroup, 0, len(entries))
+	seen := map[string]bool{}
 	for i, e := range entries {
 		id, err := requiredString(e, "groupid")
 		if err != nil {
 			return nil, fmt.Errorf("group list entry %d: %w", i, err)
 		}
+		if seen[id] {
+			return nil, fmt.Errorf("group list: group %s is listed twice: %w", id, ErrUnverifiableRead)
+		}
+		seen[id] = true
 		g := AccessGroup{GroupID: id}
 		if g.Comment, err = optionalString(e, "comment"); err != nil {
 			return nil, fmt.Errorf("group list entry %s: %w", id, err)
@@ -223,6 +243,18 @@ func requiredBool(e map[string]json.RawMessage, key string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("%q is %s, not 0 or 1: %w", key, v, ErrUnverifiableRead)
+}
+
+// repeated returns an entry of list that appears in it more than once, or "".
+func repeated(list []string) string {
+	seen := map[string]bool{}
+	for _, v := range list {
+		if seen[v] {
+			return v
+		}
+		seen[v] = true
+	}
+	return ""
 }
 
 // optionalList reads a comma-joined string or an array of strings; absent,

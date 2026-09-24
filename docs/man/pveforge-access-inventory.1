@@ -1,0 +1,65 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-access-inventory - List every user, group and ACL entry, and each @pam user's account on the node
+
+
+.SH SYNOPSIS
+\fBpveforge access inventory <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+List every PVE user, group and ACL entry on a target, read as root over SSH
+with pveum, never with the roster's API token: a token's view is filtered by
+its privileges, and a shorter list would look complete. Nothing is written.
+.IP \(bu 2
+users: each user's realm, state, groups, and the ACL entries it holds,
+both those naming it and, marked "via", those of each group it is in.
+A @pam user is looked up on the node (getent passwd): os_account_status
+is "found", with the account, or "absent"; any other realm is "not-pam".
+.IP \(bu 2
+groups: each group's members (null when PVE's answer did not list them:
+unknown, not none) and the ACL entries naming it.
+.IP \(bu 2
+acls: every ACL entry, API tokens' included; a token appears only here.
+
+.PP
+Every ACL entry whose role confers an escalating privilege (Permissions.Modify, User.Modify, Sys.Modify, Realm.Allocate, Sys.Console, VM.Monitor, Realm.AllocateUser, Datastore.Allocate, Mapping.Modify)
+lists those privileges under "escalating". Effective permissions (paths,
+propagation and roles combined) are not computed: see pveum user permissions.
+
+.PP
+A user's groups, and so the entries marked "via", come from the user list's
+groups field, which every user must carry, cross-checked against each
+group's members both ways: if the two lists disagree, or a field is
+missing, the inventory fails rather than show a user holding less than it
+does. The node's accounts are looked up with getent passwd, for @pam users
+only; an account no PVE user names is not listed. A name getent would read
+as a UID (digits, optionally after '+') cannot be looked up by name: it is
+"unchecked". The roster's API token is not used or decrypted.
+
+.PP
+The lists are read one after another with no lock held: a change made while
+they are read, by pveforge or anyone else, can show half-applied.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for inventory
+
+.PP
+\fB--no-ssh-key\fP[=false]
+	connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-access(1)\fP

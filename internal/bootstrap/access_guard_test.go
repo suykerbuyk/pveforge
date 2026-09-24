@@ -54,7 +54,7 @@ var rootWriterSites = []struct {
 	{"cmd/pveforge/access.go", tgtCheckJoin, 1},
 	{"cmd/pveforge/access.go", tgtUserEnsure, 1},
 	{"cmd/pveforge/access.go", tgtGroupEnsure, 1},
-	{"internal/bootstrap/access.go", tgtPveum, 10},
+	{"internal/bootstrap/access.go", tgtPveum, 9},
 	{"cmd/pveforge/vm.go", tgtClusterGst, 2}, // the check and the visibility wait
 	{"internal/bootstrap/access.go", tgtACLModify, 1},
 }
@@ -97,6 +97,36 @@ func TestRootAccessWriters_OnlyAtTheirSites(t *testing.T) {
 			if got := len(res.Allowed(file, tgt)); got != want {
 				t.Errorf("%s: %d reference(s) to %s, want exactly %d", file, got, tgt, want)
 			}
+		}
+	}
+}
+
+// TestRootSession_OnlyAtItsSites (S1): a command reaches root only through
+// RootAccess.root, and that is taken at exactly its reviewed sites: in
+// access.go, Connect (which dials and runs nothing), pveum and the role
+// list; in inventory.go, getent. A new raw root command anywhere else, or
+// another one in either file, fails here.
+func TestRootSession_OnlyAtItsSites(t *testing.T) {
+	tgt := sourceguard.Target{AnyQualifier: true, Name: "root"}
+	sites := map[string]int{"internal/bootstrap/access.go": 3, "internal/bootstrap/inventory.go": 1}
+	scope := sourceguard.Scope{Root: "../.."}
+	for f := range sites {
+		scope.AllowFiles = append(scope.AllowFiles, f)
+	}
+	res, err := sourceguard.NonTestReferences(scope, []sourceguard.Target{tgt})
+	if err != nil {
+		t.Fatalf("NonTestReferences: %v", err)
+	}
+	if v := res.Violations(); len(v) > 0 {
+		var lines []string
+		for _, ref := range v {
+			lines = append(lines, "  "+ref.String())
+		}
+		t.Errorf("RootAccess.root is taken outside its reviewed sites:\n%s", strings.Join(lines, "\n"))
+	}
+	for f, want := range sites {
+		if got := len(res.Allowed(f, tgt)); got != want {
+			t.Errorf("%s: %d reference(s) to %s, want exactly %d", f, got, tgt, want)
 		}
 	}
 }

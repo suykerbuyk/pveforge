@@ -152,7 +152,7 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 			var client *pve.RoutedClient
 			var root guestLister
 			if tagGuard {
-				a, _, rest, closeAll, err := openRootAccessAndREST(cmd, args[0], noSSHKey)
+				a, _, rest, closeAll, err := openRootAccessAndREST(cmd, args[0], noSSHKey, true)
 				if err != nil {
 					return err
 				}

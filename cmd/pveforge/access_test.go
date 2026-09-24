@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,9 +73,15 @@ const (
 // accessSetup starts a REST fake and an SSH fake with its keyed roster.
 func accessSetup(t *testing.T, routes map[string]string, answers map[string]string) (string, *pvefake.SSHServer, *routeFake) {
 	t.Helper()
+	return accessSetupExec(t, routes, pveumFake(answers))
+}
+
+// accessSetupExec is accessSetup with root's commands answered by exec.
+func accessSetupExec(t *testing.T, routes map[string]string, exec func(cmd string) (string, string, int)) (string, *pvefake.SSHServer, *routeFake) {
+	t.Helper()
 	srv, rf := newRouteFake(t, routes)
 	fs := pvefake.NewSSHServer(t)
-	fs.HandleExec(pveumFake(answers))
+	fs.HandleExec(exec)
 	path := newTestRosterWithSSHTarget(t, srv, fs)
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 	rootAt(t, fs)
@@ -377,5 +384,198 @@ func TestREADME_NamesEveryEscalatingPrivilege(t *testing.T) {
 		if !strings.Contains(string(b), "`"+p+"`") {
 			t.Errorf("README does not name %s", p)
 		}
+	}
+}
+
+// ---- access inventory (6b) ----
+
+const (
+	invCLIUsers = `[{"userid":"root@pam","enable":1,"groups":"admins"},{"userid":"alice@pve","enable":1,"groups":"ops","comment":"line one\nline two"}]`
+	invCLIACLs  = `[{"path":"/","roleid":"Administrator","type":"group","ugid":"admins","propagate":1},{"path":"/","roleid":"PVEVMUser","type":"token","ugid":"root@pam!pveforge","propagate":0}]`
+)
+
+// inventoryExec answers inventory's root reads, getent included.
+func inventoryExec(cmd string) (string, string, int) {
+	if strings.HasPrefix(cmd, "getent passwd") {
+		return "root:x:0:0:root:/root:/bin/bash\n", "", 0
+	}
+	return pveumFake(map[string]string{
+		"pveum user list":  invCLIUsers,
+		"pveum group list": cliGroupList,
+		"pveum acl list":   invCLIACLs,
+		"pveum role list":  cliRoleList,
+	})(cmd)
+}
+
+var inventoryCommands = []string{
+	"pveum user list --full 1 --output-format json",
+	"pveum group list --output-format json",
+	"pveum acl list --output-format json",
+	"pveum role list --output-format json",
+	"getent passwd -- 'root'",
+}
+
+// Every read goes over root; the token's REST view is never asked, even
+// though the target holds a token. kv output keeps every key on one line,
+// a comment holding a line break included.
+func TestAccessInventory_ReadsAsRootKV(t *testing.T) {
+	path, fs, rf := accessSetupExec(t, nil, inventoryExec)
+	code, stdout, stderr := runRootArgs("access", "inventory", "--roster", path, "qa-pve-01")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if !slices.Equal(fs.Commands(), inventoryCommands) {
+		t.Errorf("root ran %q", fs.Commands())
+	}
+	if len(rf.got()) != 0 {
+		t.Errorf("the token was asked: %q", rf.got())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	var keys []string
+	for _, l := range lines {
+		k, _, _ := strings.Cut(l, "=")
+		keys = append(keys, k)
+	}
+	if !slices.Equal(keys, []string{"acls", "groups", "target", "users"}) {
+		t.Fatalf("kv keys = %q\nstdout %q", keys, stdout)
+	}
+	if !strings.Contains(stdout, `"comment":"line one\nline two"`) || !strings.Contains(stdout, `"os_account_status":"found"`) ||
+		!strings.Contains(stdout, `"escalating":["Permissions.Modify","Sys.Modify"]`) {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+func TestAccessInventory_JSON(t *testing.T) {
+	path, _, _ := accessSetupExec(t, nil, inventoryExec)
+	code, stdout, stderr := runRootArgs("access", "inventory", "--roster", path, "qa-pve-01", "-o", "json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	var got struct {
+		Target string `json:"target"`
+		Users  []struct {
+			UserID    string `json:"userid"`
+			Status    string `json:"os_account_status"`
+			OSAccount *struct {
+				UID int `json:"uid"`
+			} `json:"os_account"`
+			ACLs []struct {
+				Via string `json:"via"`
+			} `json:"acls"`
+		} `json:"users"`
+		ACLs []struct {
+			Type string `json:"type"`
+		} `json:"acls"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("%v: %s", err, stdout)
+	}
+	if got.Target != "qa-pve-01" || len(got.Users) != 2 || got.Users[0].Status != "found" || got.Users[0].OSAccount == nil ||
+		got.Users[1].Status != "not-pam" || got.Users[1].OSAccount != nil ||
+		len(got.Users[0].ACLs) != 1 || got.Users[0].ACLs[0].Via != "admins" || len(got.ACLs) != 2 || got.ACLs[1].Type != "token" {
+		t.Errorf("json = %s", stdout)
+	}
+}
+
+// --no-ssh-key reaches the root session: without it a keyless target is
+// refused, with it root is dialed with the password.
+func TestAccessInventory_KeylessTarget(t *testing.T) {
+	srv, rf := newRouteFake(t, nil)
+	fs := pvefake.NewSSHServer(t)
+	fs.AllowPassword("root", "root-pw")
+	fs.HandleExec(inventoryExec)
+	fs.Start()
+	path := writeTestRoster(t, srv, "qa-pve-01", "qa-pve-01", "")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+	rootAt(t, fs)
+
+	code, _, stderr := runRootArgs("access", "inventory", "--roster", path, "qa-pve-01")
+	if code != 1 || !strings.Contains(stderr, "holds no SSH key: pass --no-ssh-key") {
+		t.Fatalf("without the flag: exit %d, stderr %q", code, stderr)
+	}
+	t.Setenv(pvePasswordEnvVar, "root-pw")
+	code, _, stderr = runRootArgs("access", "inventory", "--roster", path, "qa-pve-01", "--no-ssh-key")
+	if code != 0 {
+		t.Fatalf("with the flag: exit %d, stderr %q", code, stderr)
+	}
+	if !slices.Equal(fs.Commands(), inventoryCommands) || len(rf.got()) != 0 {
+		t.Errorf("root ran %q, REST %q", fs.Commands(), rf.got())
+	}
+}
+
+// A failed read is a failed command with nothing on stdout.
+func TestAccessInventory_ReadFailure(t *testing.T) {
+	path, _, _ := accessSetupExec(t, nil, func(cmd string) (string, string, int) {
+		if strings.HasPrefix(cmd, "pveum acl list") {
+			return "", "permission denied", 13
+		}
+		return inventoryExec(cmd)
+	})
+	code, stdout, stderr := runRootArgs("access", "inventory", "--roster", path, "qa-pve-01")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "exited 13: permission denied") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+// S2 through runRoot: free text PVE holds (a comment) reaches -o json with
+// DEL and C1 escaped, never raw, and decodes back unchanged.
+func TestAccessInventory_JSONEscapesC1(t *testing.T) {
+	comment := "x\u0085y\u009b[31mz\u007f"
+	users := `[{"userid":"root@pam","enable":1,"groups":"admins"},{"userid":"alice@pve","enable":1,"groups":"ops","comment":"x\u0085y\u009b[31mz\u007f"}]`
+	path, _, _ := accessSetupExec(t, nil, func(cmd string) (string, string, int) {
+		if strings.HasPrefix(cmd, "pveum user list") {
+			return users, "", 0
+		}
+		return inventoryExec(cmd)
+	})
+	code, stdout, stderr := runRootArgs("access", "inventory", "--roster", path, "qa-pve-01", "-o", "json")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if strings.ContainsFunc(stdout, func(r rune) bool { return r >= 0x7f && r <= 0x9f }) {
+		t.Errorf("raw DEL or C1 on stdout: %q", stdout)
+	}
+	var got struct {
+		Users []struct {
+			Comment string `json:"comment"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil || len(got.Users) != 2 || got.Users[1].Comment != comment {
+		t.Errorf("decoded %+v, %v; want comment %q", got, err, comment)
+	}
+}
+
+// S4: inventory never builds the token client, so it never decrypts the
+// token's secret: with a secret sealed under another passphrase it still
+// runs, while group ensure, which does use the token, fails on it.
+func TestAccessInventory_NeverDecryptsTheToken(t *testing.T) {
+	path, fs, _ := accessSetupExec(t, nil, inventoryExec)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, rest, ok := strings.Cut(string(b), "secret_enc = '''\n")
+	_, tail, ok2 := strings.Cut(rest, "'''")
+	if !ok || !ok2 {
+		t.Fatalf("no secret_enc block in %s", b)
+	}
+	sealed, err := fixtureEncrypt([]byte("test-secret"), "a different passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(head+"secret_enc = '''\n"+sealed+"'''"+tail), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runRootArgs("group", "ensure", "--roster", path, "qa-pve-01", "ops")
+	if code == 0 || !strings.Contains(stderr, "decrypt") {
+		t.Fatalf("control: group ensure exit %d, stderr %q; want a failure to decrypt the token, or the test proves nothing", code, stderr)
+	}
+	code, _, stderr = runRootArgs("access", "inventory", "--roster", path, "qa-pve-01")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if !slices.Equal(fs.Commands(), inventoryCommands) {
+		t.Errorf("root ran %q", fs.Commands())
 	}
 }
