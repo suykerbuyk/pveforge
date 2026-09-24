@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -33,11 +34,11 @@ func sshTargetKeypair(t *testing.T) (*sshexec.Keypair, ssh.PublicKey) {
 
 // bootstrappedTarget builds a roster.Target with both a working token and
 // working, correctly-pinned SSH auth against fs, ready for a RoutedClient.
-func bootstrappedTarget(t *testing.T, fs *fakeSSHServer, passphrase string) *roster.Target {
+func bootstrappedTarget(t *testing.T, fs *pvefake.SSHServer, passphrase string) *roster.Target {
 	t.Helper()
 	kp, pub := sshTargetKeypair(t)
-	fs.allowedPub = pub
-	// Every caller of bootstrappedTarget configures fs (handleExec, if it
+	fs.AllowKey(pub)
+	// Every caller of bootstrappedTarget configures fs (HandleExec, if it
 	// wants a non-default one) before calling this, and fs.allowedPub —
 	// the last piece of configuration — is set immediately above, so
 	// starting the accept loop here is safe: no test writes to fs's
@@ -48,7 +49,7 @@ func bootstrappedTarget(t *testing.T, fs *fakeSSHServer, passphrase string) *ros
 	// real bootstrap would, so PinnedHostKeyCallback has something
 	// genuine to check against.
 	var captured sshexec.CapturedHostKey
-	c, err := sshexec.Dial(context.Background(), fs.addr, "root", kp.PrivateKeyPEM, sshexec.CaptureHostKeyCallback(&captured))
+	c, err := sshexec.Dial(context.Background(), fs.Addr(), "root", kp.PrivateKeyPEM, sshexec.CaptureHostKeyCallback(&captured))
 	if err != nil {
 		t.Fatalf("dial to capture host key: %v", err)
 	}
@@ -80,20 +81,20 @@ func bootstrappedTarget(t *testing.T, fs *fakeSSHServer, passphrase string) *ros
 	}
 }
 
-func withFakeSSHPort(t *testing.T, fs *fakeSSHServer) {
+func withFakeSSHPort(t *testing.T, fs *pvefake.SSHServer) {
 	t.Helper()
 	orig := sshPort
-	sshPort = fs.port(t)
+	sshPort = fs.Port(t)
 	t.Cleanup(func() { sshPort = orig })
 }
 
 func TestRoutedClient_RootOnlyField_RoutesToSSH_NeverTouchesREST(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	restHit := false
@@ -161,12 +162,12 @@ func TestRoutedClient_NonRootOnlyField_UsesRESTOnly(t *testing.T) {
 }
 
 func TestRoutedClient_UnregisteredRootOnlyField_FallsBackToSSH(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	sshCalled := false
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		sshCalled = true
 		return "", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +310,7 @@ func TestRoutedClient_Close_NoopWhenSSHNeverDialed(t *testing.T) {
 }
 
 func TestRoutedClient_Close_ClosesSSHWhenDialed(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	withFakeSSHPort(t, fs)
 
 	tg := bootstrappedTarget(t, fs, "roster-pass")
@@ -340,7 +341,7 @@ func TestRoutedClient_Close_ClosesSSHWhenDialed(t *testing.T) {
 // RoutedClient (simulating a drop); the next call must fail but discard
 // the dead connection; the call after that must succeed by redialing.
 func TestRoutedClient_RedialsAfterConnectionDrop(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	withFakeSSHPort(t, fs)
 
 	tg := bootstrappedTarget(t, fs, "roster-pass")
@@ -395,8 +396,8 @@ func TestRoutedClient_RedialsAfterConnectionDrop(t *testing.T) {
 // the whole point of the health-check distinction — would still pass
 // every other test in this file; only this test catches that.
 func TestRoutedClient_RemoteCommandFailure_ReusesHealthyConnection(t *testing.T) {
-	fs := newFakeSSHServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		if cmd == "true" {
 			// sshConnectionHealthy's probe: the connection is fine.
 			return "", "", 0
@@ -404,7 +405,7 @@ func TestRoutedClient_RemoteCommandFailure_ReusesHealthyConnection(t *testing.T)
 		// The actual `qm set` command: fails on its own merits every
 		// time, regardless of connection health.
 		return "", "qm set: bad vmid", 1
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	tg := bootstrappedTarget(t, fs, "roster-pass")
@@ -729,12 +730,12 @@ func TestRoutedClient_SetVMConfigFieldCAS_RootOnlyField_Refuses(t *testing.T) {
 }
 
 func TestRoutedClient_UploadSnippet_Success(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -799,11 +800,11 @@ func TestRoutedClient_UploadSnippet_RejectsUnsafeFilename(t *testing.T) {
 // with no "path" field, e.g. LVM/ZFS) is surfaced as an error and never
 // falls through to attempting the SSH write anyway with a garbage path.
 func TestRoutedClient_UploadSnippet_StoragePathLookupFailure(t *testing.T) {
-	fs := newFakeSSHServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		t.Fatal("should not reach ssh when the storage path lookup fails")
 		return "", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	restSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -829,12 +830,12 @@ func TestRoutedClient_UploadSnippet_StoragePathLookupFailure(t *testing.T) {
 }
 
 func TestRoutedClient_TapLinkState_Forwards(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return `[{"ifname":"tap100i0","isolated":true}]` + "\n", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	tg := bootstrappedTarget(t, fs, "roster-pass")
@@ -858,12 +859,12 @@ func TestRoutedClient_TapLinkState_Forwards(t *testing.T) {
 }
 
 func TestRoutedClient_SetBridgePortIsolated_Forwards(t *testing.T) {
-	fs := newFakeSSHServer(t)
+	fs := pvefake.NewSSHServer(t)
 	var receivedCmd string
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		receivedCmd = cmd
 		return "", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	tg := bootstrappedTarget(t, fs, "roster-pass")
@@ -891,10 +892,10 @@ func TestRoutedClient_SetBridgePortIsolated_Forwards(t *testing.T) {
 // setViaSSH), so nothing else in this suite would catch a regression in
 // this one specifically.
 func TestRoutedClient_WithSSH_RedialsAfterConnectionDrop(t *testing.T) {
-	fs := newFakeSSHServer(t)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		return `[{"ifname":"tap100i0","isolated":false}]` + "\n", "", 0
-	}
+	})
 	withFakeSSHPort(t, fs)
 
 	tg := bootstrappedTarget(t, fs, "roster-pass")

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 // hostKeyCaptureOnly returns a HostKeyCallback that accepts anything —
@@ -18,21 +20,21 @@ func acceptAnyHostKey() ssh.HostKeyCallback {
 }
 
 func TestDial_WithKey_RunCapturesStdoutStderrExit(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.AllowKey(pub)
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		if cmd == "fail-me" {
 			return "partial-out", "boom\n", 3
 		}
 		return "hello stdout\n", "hello stderr\n", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -56,38 +58,38 @@ func TestDial_WithKey_RunCapturesStdoutStderrExit(t *testing.T) {
 }
 
 func TestDial_WrongKeyRejected(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	_, allowedPub := clientKeypair(t)
-	fs.allowPublicKey(allowedPub)
-	fs.Start(t)
+	fs.AllowKey(allowedPub)
+	fs.Start()
 
 	otherKp, _ := clientKeypair(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := Dial(ctx, fs.addr, "root", otherKp.PrivateKeyPEM, acceptAnyHostKey())
+	_, err := Dial(ctx, fs.Addr(), "root", otherKp.PrivateKeyPEM, acceptAnyHostKey())
 	if err == nil {
 		t.Fatal("expected error connecting with an unauthorized key")
 	}
 }
 
 func TestClient_Run_ContextCancellation(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		<-block
 		return "", "", 0
-	}
-	fs.Start(t)
+	})
+	fs.Start()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	client, err := Dial(dialCtx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(dialCtx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -109,16 +111,15 @@ func TestClient_Run_ContextCancellation(t *testing.T) {
 // completed the handshake and then stopped answering (a half-open
 // connection) used to hold NewSession, and so Run, forever.
 func TestClient_Run_ContextBoundsTheSessionOpen(t *testing.T) {
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.stall = make(chan struct{})
-	t.Cleanup(func() { close(fs.stall) })
-	fs.Start(t)
+	fs.AllowKey(pub)
+	fs.Stall()
+	fs.Start()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	client, err := Dial(dialCtx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	client, err := Dial(dialCtx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -139,4 +140,20 @@ func TestClient_Run_ContextBoundsTheSessionOpen(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return when its context ended: the session open is unbounded")
 	}
+}
+
+// clientKeypair is a small test helper: generates a keypair and returns
+// both the sshexec.Keypair (PEM etc.) and the parsed ssh.PublicKey the fake
+// server needs to allow it.
+func clientKeypair(t *testing.T) (*Keypair, ssh.PublicKey) {
+	t.Helper()
+	kp, err := GenerateEd25519Keypair("test")
+	if err != nil {
+		t.Fatalf("GenerateEd25519Keypair: %v", err)
+	}
+	signer, err := ssh.ParsePrivateKey(kp.PrivateKeyPEM)
+	if err != nil {
+		t.Fatalf("ParsePrivateKey: %v", err)
+	}
+	return kp, signer.PublicKey()
 }

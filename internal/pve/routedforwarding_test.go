@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sourceguard"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
@@ -188,7 +189,7 @@ func assertNoRequests(t *testing.T, got []fwdRequest) {
 
 // fwdSSH is a fake SSH server that records every command it is asked to run.
 type fwdSSH struct {
-	fs   *fakeSSHServer
+	fs   *pvefake.SSHServer
 	mu   sync.Mutex
 	cmds []string
 }
@@ -206,8 +207,8 @@ func newFwdSSH(t *testing.T) (*fwdSSH, *roster.Target) {
 // status 0 and no output.
 func newFwdSSHWith(t *testing.T, respond func(cmd string) (stdout, stderr string, exitCode int)) (*fwdSSH, *roster.Target) {
 	t.Helper()
-	s := &fwdSSH{fs: newFakeSSHServer(t)}
-	s.fs.handleExec = func(cmd string) (string, string, int) {
+	s := &fwdSSH{fs: pvefake.NewSSHServer(t)}
+	s.fs.HandleExec(func(cmd string) (string, string, int) {
 		s.mu.Lock()
 		s.cmds = append(s.cmds, cmd)
 		s.mu.Unlock()
@@ -215,7 +216,7 @@ func newFwdSSHWith(t *testing.T, respond func(cmd string) (stdout, stderr string
 			return "", "", 0
 		}
 		return respond(cmd)
-	}
+	})
 	withFakeSSHPort(t, s.fs)
 	tg := bootstrappedTarget(t, s.fs, "roster-pass")
 	// bootstrappedTarget fixes both ID and Node at "qa-pve-01"; see

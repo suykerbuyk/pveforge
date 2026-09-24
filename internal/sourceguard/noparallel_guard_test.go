@@ -41,6 +41,7 @@ var noParallel = []struct{ pkg, why string }{
 	{"internal/sshexec", "netguard's recorder; SetDialGuardForTests; os.Stdin"},
 	{"internal/lock", "pollInterval and defaultWait, which the lock-wait tests shorten"},
 	{"internal/netguard", "its own recorder (installed, violations, expecting, observedDials), which its tests reset"},
+	{"internal/pvefake", "DrainJoinTimeout, the RecordStdin mode's drain bound, which TestSSHServer_BoundedDrainRecordsTruncation lowers"},
 }
 
 // parallelAllowed lists the packages whose tests touch no process-global
@@ -52,7 +53,6 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"internal/kvjson", "pure rendering"},
 	{"internal/lock/lockguard", "a static source guard"},
 	{"internal/nodump", "its test calls Set in a child process, never in the test process"},
-	{"internal/pvefake", "each test builds its own fake servers"},
 	{"internal/sourceguard", "static walks and read-only go commands"},
 }
 

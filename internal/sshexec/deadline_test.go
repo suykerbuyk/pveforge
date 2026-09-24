@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
 // pveforge-root-channel-deadlines: every command Run executes is bounded,
@@ -18,15 +20,15 @@ import (
 // timeout is told apart from the caller's cancellation.
 
 // hangingServer returns a started fake server whose commands block until
-// the test ends (or, with asyncExec, until then too), and a client for it.
-func hangingServer(t *testing.T, async bool) (*fakeServer, *Client) {
+// the test ends (with AsyncExec when async), and a client for it.
+func hangingServer(t *testing.T, async bool) (*pvefake.SSHServer, *Client) {
 	t.Helper()
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	fs.handleExec = func(cmd string) (string, string, int) {
+	fs.HandleExec(func(cmd string) (string, string, int) {
 		// A qm set of the value 'slow', and any command over 32 KiB (a
 		// WriteFile with a large payload), take 400ms.
 		if strings.Contains(cmd, "'slow'") || len(cmd) > 32<<10 {
@@ -42,12 +44,14 @@ func hangingServer(t *testing.T, async bool) (*fakeServer, *Client) {
 		}
 		<-release
 		return "", "", 0
+	})
+	if async {
+		fs.AsyncExec()
 	}
-	fs.asyncExec = async
-	fs.Start(t)
+	fs.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, err := Dial(ctx, fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	c, err := Dial(ctx, fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -134,13 +138,12 @@ func TestRun_R3_AnEarlierParentDeadlineWins(t *testing.T) {
 // reported as such: no command was sent, so its outcome is known.
 func TestRun_R4_AStalledSessionOpenTimesOut(t *testing.T) {
 	setCommandTimeout(t, 200*time.Millisecond)
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
-	fs.stall = make(chan struct{})
-	t.Cleanup(func() { close(fs.stall) })
-	fs.Start(t)
-	c, err := Dial(context.Background(), fs.addr, "root", kp.PrivateKeyPEM, acceptAnyHostKey())
+	fs.AllowKey(pub)
+	fs.Stall()
+	fs.Start()
+	c, err := Dial(context.Background(), fs.Addr(), "root", kp.PrivateKeyPEM, acceptAnyHostKey())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -191,10 +194,10 @@ func TestRun_R6_SignalThenClose(t *testing.T) {
 		t.Fatalf("Run = %v, want ErrCommandTimedOut", err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	for len(fs.eventLog()) < 2 && time.Now().Before(deadline) {
+	for len(fs.Events()) < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got, want := fs.eventLog(), []string{"signal:KILL", "close"}; !slices.Equal(got, want) {
+	if got, want := fs.Events(), []string{"signal:KILL", "close"}; !slices.Equal(got, want) {
 		t.Fatalf("the server saw %q, want %q", got, want)
 	}
 }
@@ -292,23 +295,23 @@ func TestRun_D1_AStuckWriteCannotHoldTheTimeout(t *testing.T) {
 	t.Cleanup(func() { TimeoutCloseGrace = orig })
 	TimeoutCloseGrace = 300 * time.Millisecond
 
-	fs := newFakeServer(t)
+	fs := pvefake.NewSSHServer(t)
 	kp, pub := clientKeypair(t)
-	fs.allowPublicKey(pub)
+	fs.AllowKey(pub)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	fs.handleExec = func(string) (string, string, int) { <-release; return "", "", 0 }
-	fs.Start(t)
+	fs.HandleExec(func(string) (string, string, int) { <-release; return "", "", 0 })
+	fs.Start()
 	signer, err := ssh.ParsePrivateKey(kp.PrivateKeyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := net.Dial("tcp", fs.addr)
+	raw, err := net.Dial("tcp", fs.Addr())
 	if err != nil {
 		t.Fatal(err)
 	}
 	sc := &stuckConn{Conn: raw, gone: make(chan struct{})}
-	cc, chans, reqs, err := ssh.NewClientConn(sc, fs.addr, &ssh.ClientConfig{User: "root", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: acceptAnyHostKey()})
+	cc, chans, reqs, err := ssh.NewClientConn(sc, fs.Addr(), &ssh.ClientConfig{User: "root", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: acceptAnyHostKey()})
 	if err != nil {
 		t.Fatal(err)
 	}
