@@ -88,10 +88,15 @@
 //     TestNoPreInstallDialerAnywhereInTheModule sweeps all twelve for that,
 //     not just the six that wire a seam.
 //
-//  5. //go:linkname. The standing bound on every AST-based guard in this repo
-//     (pveforge-golinkname-defeats-source-guards) applies to the static half
-//     of this package's safety argument, and to AssertNoPreInstallDialer's
-//     in-package walk, exactly as it does to the others.
+//  5. //go:linkname. No AST walk sees it — the directive is a comment and
+//     `import _ "unsafe"` binds no identifier — so neither this package's
+//     static half nor AssertNoPreInstallDialer's in-package walk can. It is
+//     closed at the text level instead, module-wide:
+//     sourceguard.DirectiveEvasions (TestModule_NoDirectiveEvasions) refuses
+//     any linkname directive, any unsafe import and any non-Go source in
+//     non-test code. What stays open is a dependency linking into this
+//     module, which only the module guard's pinned dependency set bounds
+//     (pveforge-golinkname-defeats-source-guards).
 //
 // The ordering hole on the other side of TestMain — a client built at
 // package-variable initialisation or in init(), before Install runs, which

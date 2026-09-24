@@ -23,13 +23,14 @@ package main
 // WHAT THIS DOES NOT CLOSE
 // ---------------------------------------------------------------------------
 //
-//   - //go:linkname DEFEATS THIS GUARD, and every other AST-based guard in
-//     this repo. The directive is a COMMENT, and the `import _ "unsafe"` it
-//     requires binds no identifier, so no AST walker can see either half. A
-//     non-test file outside the target's own test binary can reach a
-//     transport constructor this way under any name it likes. Filed as
-//     pveforge-golinkname-defeats-source-guards. This guard does not close
-//     it and must not be cited as if it did.
+//   - //go:linkname IS INVISIBLE TO THIS GUARD, and to every other AST-based
+//     guard in this repo: the directive is a COMMENT, and the `import _
+//     "unsafe"` it requires binds no identifier. It is closed one layer
+//     down, at the text level: internal/sourceguard's
+//     TestModule_NoDirectiveEvasions refuses any linkname directive, any
+//     unsafe import and any non-Go source in non-test code, module-wide.
+//     Cite THAT test for linkname, never this one. A dependency linking into
+//     this module stays open (pveforge-golinkname-defeats-source-guards).
 //
 //   - REFLECTION. reflect.Value.MethodByName("TermWebSocket") puts the name
 //     in a string. A string is not an identifier.

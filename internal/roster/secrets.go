@@ -75,12 +75,20 @@ import (
 //     needs BOTH a renamed alias AND a package outside that test binary, such
 //     as a cmd/.
 //
-// This is not closeable by an AST-based guard, and it is a general property
-// of every source guard in this repo rather than anything specific to this
-// seam — but this seam is what creates the target, since before it there was
-// no variable to link against, so the caveat belongs with the guarantee.
-// pveforge-golinkname-defeats-source-guards owns the text-scan instrument
-// that would close it.
+// No AST-based guard can close that, so a fifth layer does it at the text
+// level: sourceguard.DirectiveEvasions, run over the whole module by
+// internal/sourceguard's TestModule_NoDirectiveEvasions, reads every
+// non-test file as bytes and refuses ANY //go:linkname directive, any import
+// of "unsafe", and any non-Go source (assembly can write this variable with
+// no directive at all) — whatever they name, and under any build tag. The
+// escaping case above (a renamed alias, outside internal/roster's test
+// binary) now fails that test by name.
+//
+// What that fifth layer does not buy, stated for the same reason: it covers
+// this module's own tree only. A dependency could //go:linkname into this
+// package without importing it; the module guard pins which dependencies
+// exist, and scanning the module cache is a separate decision
+// (pveforge-golinkname-defeats-source-guards).
 var scryptWorkFactorOverride = 0
 
 // SetScryptWorkFactorForTests lowers the scrypt work factor EncryptString

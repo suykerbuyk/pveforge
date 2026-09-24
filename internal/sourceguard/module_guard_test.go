@@ -2,6 +2,7 @@ package sourceguard
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,4 +144,50 @@ func TestModuleGraph_ForkPinnedAndUpstreamAbsent(t *testing.T) {
 			t.Errorf("go list -m all gave %d modules, fork present: %v — not the real module graph", len(graph), inGraph)
 		}
 	})
+}
+
+// TestModule_NoVendorTree: the module holds no vendor/ directory, at any
+// depth outside testdata. pveforge does not vendor, and one would be a
+// blind spot by construction: every walk in this package skips vendor/
+// (walkNonTest), while `go build` — what `make build` runs — compiles from a
+// root vendor/ when it exists, and modcheck's -mod=readonly build and
+// `go mod verify` never read it. Measured in review
+// (pveforge-golinkname-defeats-source-guards, RGL2): a //go:linkname plus
+// init planted in a vendored dependency made the built binary write scrypt
+// logN 10 with the directive scan, the roster guards and make lint all
+// green. A nested vendor/ is refused too: it is not compiled in module mode,
+// but it is skipped by the same walks, so nothing could hide there either.
+//
+// Anti-vacuity: the walk covers the module (cmd/pveforge and
+// internal/sourceguard reached).
+func TestModule_NoVendorTree(t *testing.T) {
+	root := filepath.Join("..", "..")
+	reached := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		reached[rel] = true
+		switch d.Name() {
+		case ".git", "testdata":
+			if path != root {
+				return filepath.SkipDir
+			}
+		case "vendor":
+			t.Errorf("%s: a vendor/ tree is in the module. pveforge does not vendor: go build would compile dependency code from it that no source guard walks — remove it", rel)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the module: %v", err)
+	}
+	if !reached["cmd/pveforge"] || !reached["internal/sourceguard"] {
+		t.Error("the walk did not cover the module")
+	}
 }
