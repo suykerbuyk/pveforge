@@ -928,9 +928,10 @@ func countingValidListServer(t *testing.T) (*Client, *int32) {
 
 // --- NewerSnapshots / Rollback: local refusals ---------------------------
 
-// TestRollback_ReservedNameNeverTouchesAnyEndpoint: a rollback to "current"
-// in any spelling or padding is refused with *ErrReservedSnapshotName before
-// the network is touched.
+// TestRollback_ReservedNameNeverTouchesAnyEndpoint: a rollback to "current",
+// padded or not, is refused with *ErrReservedSnapshotName before the network
+// is touched. Exactly "current": a real snapshot named "Current" is a valid
+// rollback target (TestSnapshotNameCase_S2).
 //
 // The prefix assertion is what makes this Rollback's OWN guard under test.
 // NewerSnapshots carries the same guard and also refuses before any network
@@ -939,7 +940,7 @@ func countingValidListServer(t *testing.T) (*Client, *int32) {
 // differs: Rollback's own refusal reads "rollback vm 4242: …", a refusal
 // passed up from NewerSnapshots reads "rollback vm 4242 to snapshot …".
 func TestRollback_ReservedNameNeverTouchesAnyEndpoint(t *testing.T) {
-	for _, name := range []string{"current", "Current", " current\t"} {
+	for _, name := range []string{"current", " current\t"} {
 		t.Run(strconv.Quote(name), func(t *testing.T) {
 			f, c := newSnapshotFixture(t, "qa-pve-01", rbVMID, chainABCD)
 			err := c.Rollback(context.Background(), "qa-pve-01", rbVMID, name)
@@ -978,7 +979,7 @@ func TestNewerSnapshots_RequiresNodeAndTarget(t *testing.T) {
 		{"mixed-whitespace target", "qa-pve-01", "\t\n ", "newer snapshots of vm 4242: snapshot name is required", false},
 		// Without this guard "current" reaches the list read, realSnapshots
 		// filters it, and the call fails AFTER the network as "not found".
-		{"reserved target", "qa-pve-01", " CURRENT", "newer snapshots of vm 4242: ", true},
+		{"reserved target", "qa-pve-01", " current", "newer snapshots of vm 4242: ", true},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			c, reqs := countingValidListServer(t)
@@ -1258,14 +1259,16 @@ func TestErrNotNewestSnapshot_CascadeOrderIsNewestFirst(t *testing.T) {
 // --- CascadeDeleteSnapshots: local refusals ------------------------------
 
 // TestCascadeDeleteSnapshots_ReservedNameNeverTouchesAnyEndpoint: an entry
-// naming "current", anywhere in names and in any spelling, refuses the
-// whole call before the list is read. (Without the guard the pre-state read
-// happens, realSnapshots filters "current" out, and the name is skipped as
-// absent — so no DELETE is sent either way. What the guard buys is refusing
-// a nonsensical request outright, before PVE is contacted; the zero list
-// count is what pins that.)
+// naming "current", anywhere in names and padded or not, refuses the whole
+// call before the list is read. Exactly "current": a "Current" is a real
+// snapshot a cascade must be able to delete (TestSnapshotNameCase_S1).
+// (Without the guard the pre-state read happens, realSnapshots filters
+// "current" out, and the name is skipped as absent — so no DELETE is sent
+// either way. What the guard buys is refusing a nonsensical request
+// outright, before PVE is contacted; the zero list count is what pins
+// that.)
 func TestCascadeDeleteSnapshots_ReservedNameNeverTouchesAnyEndpoint(t *testing.T) {
-	for _, names := range [][]string{{"current"}, {"bravo", " Current"}} {
+	for _, names := range [][]string{{"current"}, {"bravo", " current"}} {
 		t.Run(strings.Join(names, ","), func(t *testing.T) {
 			f, c := newSnapshotFixture(t, "qa-pve-01", rbVMID, chainABCD)
 			deleted, err := c.CascadeDeleteSnapshots(context.Background(), "qa-pve-01", rbVMID, names)
@@ -1772,7 +1775,7 @@ func TestCascadeDeleteSnapshots_NullUPIDStopsCascade(t *testing.T) {
 // dropped, in NewerSnapshots and in CascadeDeleteSnapshots; errors.As still
 // matched an empty struct, so the earlier tests could not tell.
 func TestReservedNameRefusal_CarriesVMIDAndName(t *testing.T) {
-	const given = " Current\t"
+	const given = " current\t"
 	for _, tc := range []struct {
 		op   string
 		call func(c *Client) error
