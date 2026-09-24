@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -36,8 +37,10 @@ func realMain() int {
 // misread (a line break or other control character, edge whitespace, a
 // leading quote), so server text embedded in an error (a pveum stderr, a
 // 5xx body) can never forge a second line such as "warning: ...". An error
-// text that needs no quoting prints exactly as before. Commands' own
-// stderr lines (cmd.ErrOrStderr()) go to the same writer.
+// text that needs no quoting prints exactly as before. Before it is quoted,
+// the text is bounded (boundErrText), so a server body cannot make that one
+// line arbitrarily long either. Commands' own stderr lines
+// (cmd.ErrOrStderr()) go to the same writer.
 //
 // When a signal interrupted the command (root's context was cancelled by
 // notifyInterrupt), it reports only what was observed:
@@ -49,7 +52,7 @@ func realMain() int {
 //   - it was at a secret prompt (roster.ErrPromptInterrupted): that error
 //     names the prompt, and is printed as it is;
 //   - anything else: the error, never replaced — an outcome-unknown or UPID
-//     text stays whole — between "interrupted (SIGINT): " and a note that a
+//     text keeps at least its head (boundErrText) — between "interrupted (SIGINT): " and a note that a
 //     change already sent may or may not have been applied.
 //
 // An interrupted run exits 128+signum: 130 for SIGINT, 143 for SIGTERM.
@@ -59,7 +62,8 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	msg, code := err.Error(), 1
+	// Bounded first, so the interrupt wrapping below is never what is cut.
+	msg, code := boundErrText(err.Error()), 1
 	var ie interruptError
 	if ctx := root.Context(); ctx != nil && errors.As(context.Cause(ctx), &ie) {
 		code = ie.exitCode()
@@ -69,6 +73,34 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stderr, kvjson.QuoteValue(msg))
 	return code
+}
+
+// maxErrTextBytes bounds the error text boundErrText lets through: far
+// above any PVE diagnostic (a parameter-error map, a message), far below a
+// proxy's HTML error page or a body echoed back whole.
+const maxErrTextBytes = 4096
+
+// boundErrText returns s unchanged when it is at most maxErrTextBytes
+// long; otherwise its head, cut on a UTF-8 boundary, followed by
+// " … [N bytes elided]". Every site that prints an error's text calls it on
+// that text before quoting it (kvjson.QuoteValue), so the quoting sees
+// exactly what is printed and stays one valid line.
+//
+// It bounds only what is printed. The error keeps its whole text, and
+// every in-process reader of it — the not-found and digest classifiers, and
+// bootstrap.Import's secret redaction, which must see an echoed secret
+// whole to remove it — runs on that full text, before this cut.
+func boundErrText(s string) string {
+	if len(s) <= maxErrTextBytes {
+		return s
+	}
+	cut := maxErrTextBytes
+	// Back off to the start of the rune the bound falls in: at most
+	// utf8.UTFMax-1 continuation bytes, so invalid input cannot walk far.
+	for i := 0; i < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(s[cut]); i++ {
+		cut--
+	}
+	return fmt.Sprintf("%s … [%d bytes elided]", s[:cut], len(s)-cut)
 }
 
 func newRootCmd() *cobra.Command {
