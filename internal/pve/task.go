@@ -186,7 +186,7 @@ const maxConsecutiveTransientPolls = 3
 //     blindly retry a non-idempotent operation on one of these.
 //
 // The poll loop is pveforge's own rather than go-proxmox's Task.Wait,
-// because go-proxmox v0.8.2-pveforge.1 reports every non-2xx status poll
+// because go-proxmox (still at v0.8.2-pveforge.2) reports every non-2xx status poll
 // as a *proxmox.StatusError, which Task.Wait returns at once: a single
 // pveproxy hiccup mid-task would end the wait. Each poll decodes into a
 // FRESH Task, polls start immediately (no sleep before the first), and
@@ -210,18 +210,14 @@ const maxConsecutiveTransientPolls = 3
 //     classified, so a cancel is never retried as a transient failure).
 //
 // upid's shape is validated BEFORE it is ever handed to proxmox.NewTask or
-// used in any network call. This matters because of a confirmed bug in
-// go-proxmox's NewTask, present since upstream v0.8.1 and STILL present at
-// the pinned v0.8.2-pveforge.1 (tasks.go:27-34): its own guard is
-// `len(sp) < 7`, but it then indexes sp[7] — a UPID that splits into
-// exactly 7 colon-separated fields
-// passes that guard and then panics with an out-of-range index inside
-// NewTask itself. A genuine PVE UPID always has 9 fields (8 colons), so
-// this can't fire from real PVE output, but pveforge has no panic recovery
-// anywhere, so a malformed UPID reaching that code must never be allowed
-// to get there at all — and since both proxmox.Task.Ping and this loop
-// call NewTask again on every single poll, the check has to happen once,
-// up front, here, rather than relying on anything downstream.
+// used in any network call: a UPID outside PVE's grammar is not one PVE
+// issued, so it is refused as an unverifiable read rather than polled
+// (validateUPIDShape). Through v0.8.2-pveforge.1 this also stood between a
+// 7-field UPID and a panic in go-proxmox's NewTask, whose guard was
+// `len(sp) < 7` before it indexed sp[7]. v0.8.2-pveforge.2 fixed that
+// (`len(sp) < 8`; TestForkNewTask_ShortUPIDDoesNotPanic pins it), and the
+// check stays for the grammar. Both proxmox.Task.Ping and this loop call
+// NewTask again on every poll, so the check is made once, up front, here.
 //
 // A related, still-unfixed-upstream risk in the same area: proxmox.Task's
 // UnmarshalJSON copies every field present in a status response onto the
@@ -261,7 +257,7 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 		// the check above already excludes — this stays as a defensive
 		// backstop against that behavior ever changing upstream, not dead
 		// code: this same library boundary already proved unreliable once
-		// (the sp[7] off-by-one this function's pre-check guards against).
+		// (the sp[7] off-by-one, fixed only at v0.8.2-pveforge.2).
 		return outcomeUnknown(errors.New("empty upid"))
 	}
 	if parsed.Node != node {
@@ -334,8 +330,8 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 // (unicode.IsSpace), and so is a control character, which no PVE writer
 // puts in a UPID. Anything else is refused as an unverifiable read before
 // any poll: a UPID outside this grammar is not one PVE issued, and it
-// would otherwise reach proxmox.NewTask (whose sp[7] panic WaitForTask
-// describes), a poll URL, and the stderr lines that print it.
+// would otherwise reach proxmox.NewTask, a poll URL, and the stderr lines
+// that print it.
 //
 // Derived from pve-common's source; not yet verified against a live host
 // (see pveforge-nested-pve-test-harness's live-check list).
@@ -358,7 +354,8 @@ var upidGrammar = regexp.MustCompile(`^UPID:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-
 
 // UPIDNode returns the node a UPID names (its second field), after
 // validating its shape with validateUPIDShape. It never calls
-// proxmox.NewTask, which panics on a 7-field UPID at the pinned fork.
+// proxmox.NewTask, which parses no node from a UPID of fewer than 8 fields
+// (and panicked on a 7-field one before v0.8.2-pveforge.2).
 //
 // A caller that already knows which node it dispatched to must pass THAT
 // node to WaitForTask, not this one: a node taken from the UPID itself makes

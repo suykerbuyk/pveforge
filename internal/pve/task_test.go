@@ -227,14 +227,13 @@ func TestWaitForTask_NodeMismatch(t *testing.T) {
 
 // TestWaitForTask_MalformedUPIDBoundary is the specific gap a design
 // review flagged: a UPID with exactly 6 colons / 7 fields — one field
-// short of a real UPID's trailing "<user>:" — passes upstream
-// proxmox.NewTask's own "len(sp) < 7" guard, but NewTask would then panic
-// indexing sp[7] if it were ever actually invoked on this input (pveforge
-// has no panic recovery anywhere). WaitForTask must reject this shape
-// itself, before proxmox.NewTask or any network call ever happens — this
-// asserts both the clean error AND that the fake server never receives a
-// request, proving the pre-check short-circuits strictly before NewTask,
-// not merely that some later guard happens to catch the fallout.
+// short of a real UPID's trailing "<user>:". Through v0.8.2-pveforge.1 it
+// passed proxmox.NewTask's "len(sp) < 7" guard and then panicked indexing
+// sp[7]; v0.8.2-pveforge.2 fixed that (TestForkNewTask_ShortUPIDDoesNotPanic).
+// WaitForTask still rejects this shape itself, as outside PVE's UPID
+// grammar, before proxmox.NewTask or any network call — this asserts both
+// the clean error AND that the fake server never receives a request,
+// proving the pre-check short-circuits strictly before NewTask.
 func TestWaitForTask_MalformedUPIDBoundary(t *testing.T) {
 	const malformed = "UPID:node1:1234:5678:aaaa:qmcreate:100" // 6 colons / 7 fields
 	handler, calls := taskStatusHandler(t, malformed, "node1", 0, "OK")
@@ -887,5 +886,34 @@ func TestWaitForTask_WarningsWithoutASink(t *testing.T) {
 	c := testClient(t, newFakeAPIServer(t, handler))
 	if err := c.WaitForTask(context.Background(), "qa-pve-01", upid); err != nil {
 		t.Fatalf("WaitForTask = %v, want success", err)
+	}
+}
+
+// TestForkNewTask_ShortUPIDDoesNotPanic pins the fork behaviour
+// WaitForTask's and UPIDNode's comments rely on at v0.8.2-pveforge.2:
+// proxmox.NewTask on a UPID of 7 fields (which panicked indexing sp[7]
+// through .1) or fewer returns a Task with no fields parsed, and parses a
+// full one. pveforge's own validateUPIDShape still refuses these first.
+func TestForkNewTask_ShortUPIDDoesNotPanic(t *testing.T) {
+	for _, upid := range []string{
+		"UPID:node1:1234:5678:aaaa:qmcreate:100", // 7 fields
+		"UPID:node1:1234:5678:aaaa:qmcreate",     // 6 fields
+		"UPID:node1",
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("proxmox.NewTask(%q) panicked: %v", upid, r)
+				}
+			}()
+			task := proxmox.NewTask(proxmox.UPID(upid), nil)
+			if task == nil || task.Node != "" || task.User != "" {
+				t.Errorf("proxmox.NewTask(%q) = %+v; want a Task with no parts parsed", upid, task)
+			}
+		}()
+	}
+	full := proxmox.NewTask("UPID:node1:00001234:0000ABCD:5F000000:qmcreate:100:root@pam:", nil)
+	if full == nil || full.Node != "node1" || full.Type != "qmcreate" || full.ID != "100" || full.User != "root@pam" {
+		t.Errorf("proxmox.NewTask(full UPID) = %+v", full)
 	}
 }

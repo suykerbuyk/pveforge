@@ -284,14 +284,12 @@ func IsAgentExecTimeoutError(err error) bool {
 // VirtualMachine.AgentExec, for this project's standing reason —
 // go-proxmox's handleResponse discards the response body entirely on
 // HTTP 500/501, which is exactly the status PVE uses to report that the
-// guest agent is not running — and for two defects specific to that
-// method: it never checks its own Post error, so every transport failure
-// surfaces as the misleading "no pid returned from agent exec command",
-// and it decodes the pid with an unchecked type assertion
-// (int(p.(float64))) that panics rather than erroring if PVE ever
-// returns a stringified pid. This package has no panic recovery
-// anywhere, the same reasoning WaitForTask applies to NewTask's own
-// off-by-one.
+// guest agent is not running. That reason stands at v0.8.2-pveforge.2.
+// Through .1 the method also had two defects of its own, both fixed at .2:
+// it ignored its own Post error, so every transport failure surfaced as
+// the misleading "no pid returned from agent exec command", and it decoded
+// the pid with an unchecked type assertion (int(p.(float64))) that would
+// panic on a stringified pid.
 //
 // An error here means the command was NOT dispatched: the agent may be
 // absent, the VM stopped, the agent still coming up, or simply
