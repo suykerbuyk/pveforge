@@ -427,11 +427,25 @@ func TestLockWait_APIUsageSaysWhenItIsInert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if u := c.Flags().Lookup("lock-wait").Usage; !strings.Contains(u, "no lock is taken and this flag has no effect") || !strings.Contains(u, "--unsafe-no-lock") {
+		// Find falls back to the nearest parent for an unknown verb, so a
+		// missing verb must fail here, by name, rather than nil-panic on the
+		// flag lookup below and abort every later test in the binary.
+		if c.Name() != verb {
+			t.Fatalf("api %s: not registered (Find resolved %q)", verb, c.CommandPath())
+		}
+		f := c.Flags().Lookup("lock-wait")
+		if f == nil {
+			t.Fatalf("api %s: has no --lock-wait flag", verb)
+		}
+		if u := f.Usage; !strings.Contains(u, "no lock is taken and this flag has no effect") || !strings.Contains(u, "--unsafe-no-lock") {
 			t.Errorf("api %s: --lock-wait usage %q does not say when it has no effect", verb, u)
 		}
 	}
-	if u := newVMSetCmd().Flags().Lookup("lock-wait").Usage; strings.Contains(u, "no effect") {
+	f := newVMSetCmd().Flags().Lookup("lock-wait")
+	if f == nil {
+		t.Fatal("vm set: has no --lock-wait flag")
+	}
+	if u := f.Usage; strings.Contains(u, "no effect") {
 		t.Errorf("vm set always locks, but its --lock-wait usage says the flag may have no effect: %q", u)
 	}
 }
