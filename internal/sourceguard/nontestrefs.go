@@ -40,7 +40,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -249,25 +248,10 @@ func NonTestReferences(scope Scope, targets []Target) (Result, error) {
 
 	res := Result{Refs: map[string][]Ref{}}
 	fset := token.NewFileSet()
-	root := filepath.Clean(scope.Root)
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if path != root && skippedDirNames[d.Name()] {
-				return filepath.SkipDir
-			}
+	walkErr := walkNonTest(scope.Root, func(path, rel string) error {
+		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil {
-			return rerr
-		}
-		rel = filepath.ToSlash(rel)
 
 		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if perr != nil {

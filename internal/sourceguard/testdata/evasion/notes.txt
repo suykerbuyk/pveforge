@@ -1,0 +1,1 @@
+//go:linkname in a file that is not Go source is not compiled, and not reported.
