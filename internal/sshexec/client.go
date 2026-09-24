@@ -169,9 +169,33 @@ type Result struct {
 // would hang against a real host. Nothing observed so far suggests one
 // does; it is recorded here because no test in this repo can settle it.
 func (c *Client) Run(ctx context.Context, cmd string) (*Result, error) {
-	session, err := c.conn.NewSession()
-	if err != nil {
-		return nil, fmt.Errorf("open ssh session: %w", err)
+	// Opening the session is a round trip too: on a half-open connection,
+	// or a server that stopped answering, NewSession blocks with no
+	// deadline of its own. So it runs beside ctx like the command does; a
+	// session that arrives after ctx ended is closed unused.
+	type opened struct {
+		session *ssh.Session
+		err     error
+	}
+	openc := make(chan opened, 1)
+	go func() {
+		s, err := c.conn.NewSession()
+		openc <- opened{s, err}
+	}()
+	var session *ssh.Session
+	select {
+	case <-ctx.Done():
+		go func() {
+			if o := <-openc; o.session != nil {
+				_ = o.session.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	case o := <-openc:
+		if o.err != nil {
+			return nil, fmt.Errorf("open ssh session: %w", o.err)
+		}
+		session = o.session
 	}
 	defer func() { _ = session.Close() }()
 

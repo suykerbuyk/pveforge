@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,16 +16,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/bootstrap"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
+	"github.com/suykerbuyk/pveforge/internal/pvefake"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
-// pveforge-vm-create-existing-tag-guard: `vm create --unique-tag X`, through
-// runRoot, over tagClusterFake — a stateful cluster whose /cluster/resources
-// lists the VMs it holds, each only once `lag` further listings have passed.
+// pveforge-vm-create-existing-tag-guard and
+// pveforge-unique-tag-containers-and-acl-holes: `vm create --unique-tag X`,
+// through runRoot, over tagClusterFake — a stateful cluster whose guests
+// (VMs and containers) are listed by root's pvesh read over a pvefake SSH
+// server, each only once `lag` further listings have passed. Its REST side
+// answers /cluster/resources with an empty list, as a token whose view
+// hides every guest would: the check must never trust that list.
 
 type tagVM struct {
+	typ     string // "qemu" or "lxc"
 	tags    string
 	visible int // listings still to pass before it is listed
 }
@@ -32,21 +41,29 @@ type tagClusterFake struct {
 	mu        sync.Mutex
 	vms       map[int]*tagVM
 	lag       int    // a created VM is listed only after this many listings
-	resources string // "" normal, or "error", "null", "404"
-	audit     bool   // the token holds VM.Audit on /vms, propagating
-	perms     string // "" normal, or "error", "404", "malformed": the rights read
+	resources string // root's read: "" normal, or "exit", "null", "garbage", "badentry", "node"
+	sshDown   bool   // root cannot be reached at all
+	hangFrom  int    // when > 0, root's read hangs from this listing on, until the test ends
+	release   chan struct{}
 	posts     int
 	listings  int
-	requests  []string
-	onCreate  func() // runs inside the create POST, before it is recorded
-	onListing func() // runs on each /cluster/resources read
+	requests  []string // REST requests
+	rootCmds  []string // commands root ran
+	onCreate  func()   // runs inside the create POST, before it is recorded
+	onListing func()   // runs on each /cluster/resources read
 }
 
 func newTagCluster(existing map[int]string) *tagClusterFake {
-	f := &tagClusterFake{vms: map[int]*tagVM{}, audit: true}
+	f := &tagClusterFake{vms: map[int]*tagVM{}}
 	for id, tags := range existing {
-		f.vms[id] = &tagVM{tags: tags}
+		f.vms[id] = &tagVM{typ: "qemu", tags: tags}
 	}
+	return f
+}
+
+// addCT adds a container carrying tags.
+func (f *tagClusterFake) addCT(id int, tags string) *tagClusterFake {
+	f.vms[id] = &tagVM{typ: "lxc", tags: tags}
 	return f
 }
 
@@ -59,7 +76,70 @@ func (f *tagClusterFake) start(t *testing.T) string {
 	tagVisibilityBound, tagVisibilityPoll = 2*time.Second, 2*time.Millisecond
 	t.Cleanup(func() { tagVisibilityBound, tagVisibilityPoll = origBound, origPoll })
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
-	return newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	origRead := tagReadTimeout
+	t.Cleanup(func() { tagReadTimeout = origRead })
+	f.release = make(chan struct{})
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(f.exec)
+	rp := newTestRosterWithSSHTarget(t, srv, fs)
+	t.Cleanup(func() { close(f.release) }) // registered after the server's own cleanup, so it runs first
+	rootAt(t, fs)
+	if f.sshDown {
+		newAccessTransport = func() bootstrap.SSHTransport {
+			return addrRewrite{inner: bootstrap.NewSSHTransport(), addr: "127.0.0.1:1"}
+		}
+	}
+	return rp
+}
+
+// sent reports how many REST requests and root commands were made.
+func (f *tagClusterFake) sent() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests) + len(f.rootCmds)
+}
+
+// exec is root's side: the one pvesh read, answered from the fake's guests.
+// Any other command fails loudly, and is recorded, so a test sees it.
+func (f *tagClusterFake) exec(cmd string) (string, string, int) {
+	f.mu.Lock()
+	f.rootCmds = append(f.rootCmds, cmd)
+	if cmd != bootstrap.ClusterGuestsCommand {
+		f.mu.Unlock()
+		return "", "unexpected command", 127
+	}
+	f.listings++
+	mode, hook, hang := f.resources, f.onListing, f.hangFrom > 0 && f.listings >= f.hangFrom
+	release := f.release
+	list := []map[string]any{}
+	for id, vm := range f.vms {
+		if vm.visible > 0 {
+			vm.visible--
+			continue
+		}
+		list = append(list, map[string]any{"id": fmt.Sprintf("%s/%d", vm.typ, id), "type": vm.typ, "vmid": id, "node": "qa-pve-01", "tags": vm.tags})
+	}
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if hang {
+		<-release // a pmxcfs that never answers
+	}
+	switch mode {
+	case "exit":
+		return "", "ipcc_send_rec[1] failed: Connection refused", 255
+	case "null":
+		return "null\n", "", 0
+	case "garbage":
+		return "not json\n", "", 0
+	case "badentry":
+		return `[{"type":"qemu","vmid":"150","tags":"x"}]`, "", 0
+	case "node":
+		return `[{"type":"node","vmid":1}]`, "", 0
+	}
+	b, _ := json.Marshal(list)
+	return string(b) + "\n", "", 0
 }
 
 func (f *tagClusterFake) count(prefix string) int {
@@ -86,57 +166,10 @@ func (f *tagClusterFake) serve(w http.ResponseWriter, r *http.Request) {
 	const base = "/api2/json"
 	path := r.URL.Path
 	switch {
-	case path == base+"/access/permissions":
-		f.mu.Lock()
-		audit, mode := f.audit, f.perms
-		f.mu.Unlock()
-		switch mode {
-		case "error":
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		case "404":
-			w.WriteHeader(http.StatusNotFound)
-			return
-		case "malformed":
-			data([]string{"not", "a", "tree"})
-			return
-		}
-		perms := map[string]int{"VM.Console": 1}
-		if audit {
-			perms["VM.Audit"] = 1
-		}
-		data(map[string]any{r.URL.Query().Get("path"): perms})
 	case path == base+"/cluster/resources":
-		f.mu.Lock()
-		f.listings++
-		mode, hook := f.resources, f.onListing
-		var list []map[string]any
-		for id, vm := range f.vms {
-			if vm.visible > 0 {
-				vm.visible--
-				continue
-			}
-			list = append(list, map[string]any{"id": fmt.Sprintf("qemu/%d", id), "type": "qemu", "vmid": id, "node": "qa-pve-01", "tags": vm.tags})
-		}
-		f.mu.Unlock()
-		if hook != nil {
-			hook()
-		}
-		switch mode {
-		case "error":
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		case "404":
-			w.WriteHeader(http.StatusNotFound)
-			return
-		case "null":
-			data(nil)
-			return
-		}
-		if list == nil {
-			list = []map[string]any{}
-		}
-		data(list)
+		// The token's view: every guest hidden (a per-VM ACL, a pool
+		// NoAccess). The check must never read this.
+		data([]any{})
 	case path == base+"/cluster/nextid":
 		id, _ := strconv.Atoi(r.URL.Query().Get("vmid"))
 		f.mu.Lock()
@@ -158,7 +191,7 @@ func (f *tagClusterFake) serve(w http.ResponseWriter, r *http.Request) {
 		f.posts++
 		// PVE stores tags ';'-joined, whatever separators the create used
 		// (UNVERIFIED against a live host).
-		f.vms[id] = &tagVM{tags: strings.Join(tagSplit.Split(strings.TrimSpace(r.PostForm.Get("tags")), -1), ";"), visible: f.lag}
+		f.vms[id] = &tagVM{typ: "qemu", tags: strings.Join(tagSplit.Split(strings.TrimSpace(r.PostForm.Get("tags")), -1), ";"), visible: f.lag}
 		f.mu.Unlock()
 		data(fmt.Sprintf("UPID:qa-pve-01:00001234:0000ABCD:5F000000:qmcreate:%d:root@pam:", id))
 	case strings.HasPrefix(path, base+"/nodes/qa-pve-01/tasks/"):
@@ -204,22 +237,31 @@ func TestUniqueTag_T2_Ambiguous(t *testing.T) {
 	f := newTagCluster(map[int]string{150: "x", 151: "x"})
 	rp := f.start(t)
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-	if code != 1 || !strings.Contains(stderr, "more than one VM") || f.posts != 0 {
+	if code != 1 || !strings.Contains(stderr, "more than one guest") || f.posts != 0 {
 		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
 	}
 }
 
-// T3, T4, T5: a listing that fails, reads as null, or answers 404 (a failed
-// read, not "no match") refuses; it is never read as "nobody has the tag".
+// T3, T4, T5 / H2: root's read failing — pvesh exiting non-zero, printing
+// null, non-JSON, an entry PVE would not print, a non-guest type — or root
+// not reachable at all, refuses; it is never read as "nobody has the tag".
 func TestUniqueTag_T3_T4_T5_AFailedListingRefuses(t *testing.T) {
-	for _, mode := range []string{"error", "null", "404"} {
+	for _, mode := range []string{"exit", "null", "garbage", "badentry", "node", "ssh-down"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newTagCluster(nil)
-			f.resources = mode
+			if mode == "ssh-down" {
+				f.sshDown = true
+			} else {
+				f.resources = mode
+			}
 			rp := f.start(t)
+			want := "cannot verify tag uniqueness"
+			if mode == "ssh-down" {
+				want = "connect as root" // refused before the tag lock is even taken (S1)
+			}
 			code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-			if code != 1 || !strings.Contains(stderr, "cannot verify tag uniqueness") || f.posts != 0 {
-				t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
+			if code != 1 || !strings.Contains(stderr, want) || f.posts != 0 {
+				t.Fatalf("exit %d, stderr %q, POSTs %d; want %q", code, stderr, f.posts, want)
 			}
 		})
 	}
@@ -234,17 +276,11 @@ func TestUniqueTag_T6_NoMatchCreates(t *testing.T) {
 	if code != 0 || stdout != "qa-pve-01: vm 101 created\n" || stderr != "" || f.posts != 1 {
 		t.Fatalf("exit %d, stdout %q, stderr %q, POSTs %d", code, stdout, stderr, f.posts)
 	}
-}
-
-// T7: a token without VM.Audit on /vms cannot see every VM, so "no match"
-// cannot be trusted: refused, no listing trusted, no create.
-func TestUniqueTag_T7_NoAuditRightsRefuses(t *testing.T) {
-	f := newTagCluster(nil)
-	f.audit = false
-	rp := f.start(t)
-	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-	if code != 1 || !strings.Contains(stderr, "cannot verify tag uniqueness") || !strings.Contains(stderr, "VM.Audit on /vms") || f.posts != 0 {
-		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
+	// Root ran the one read, for the check and for the wait, and nothing
+	// else: the root channel stays read-only.
+	want := []string{bootstrap.ClusterGuestsCommand, bootstrap.ClusterGuestsCommand}
+	if !slices.Equal(f.rootCmds, want) {
+		t.Errorf("root ran %q, want %q", f.rootCmds, want)
 	}
 }
 
@@ -370,8 +406,8 @@ func TestUniqueTag_T9_ConcurrentCreateDuringTheLagWaits(t *testing.T) {
 	}
 }
 
-// T10: without --unique-tag, two creates with the same tags both succeed,
-// and nothing is listed or checked.
+// T10 / C3: without --unique-tag, two creates with the same tags both
+// succeed, nothing is listed or checked, and root is never dialed.
 func TestUniqueTag_T10_OffByDefault(t *testing.T) {
 	f := newTagCluster(nil)
 	rp := f.start(t)
@@ -380,8 +416,8 @@ func TestUniqueTag_T10_OffByDefault(t *testing.T) {
 			t.Fatalf("create %d: exit %d, %q", id, code, stderr)
 		}
 	}
-	if f.posts != 2 || f.count("GET /api2/json/cluster/resources") != 0 || f.count("GET /api2/json/access/") != 0 {
-		t.Errorf("POSTs %d, listings %d, rights reads %d; want 2, 0, 0", f.posts, f.count("GET /api2/json/cluster/resources"), f.count("GET /api2/json/access/"))
+	if f.posts != 2 || f.count("GET /api2/json/cluster/resources") != 0 || len(f.rootCmds) != 0 {
+		t.Errorf("POSTs %d, REST listings %d, root commands %q; want 2, 0, none", f.posts, f.count("GET /api2/json/cluster/resources"), f.rootCmds)
 	}
 }
 
@@ -402,8 +438,8 @@ func TestUniqueTag_T11_MustBeOneOfTheCreatesTags(t *testing.T) {
 		f := newTagCluster(nil)
 		rp := f.start(t)
 		code, _, stderr := createTagged(rp, 101, tc.tags, "--unique-tag", tc.unique)
-		if code != 1 || !strings.Contains(stderr, tc.want) || f.count("") != 0 {
-			t.Errorf("tags=%s --unique-tag %s: exit %d, %d request(s), stderr %q", tc.tags, tc.unique, code, f.count(""), stderr)
+		if code != 1 || !strings.Contains(stderr, tc.want) || f.sent() != 0 {
+			t.Errorf("tags=%s --unique-tag %s: exit %d, %d request(s), stderr %q", tc.tags, tc.unique, code, f.sent(), stderr)
 		}
 	}
 	f := newTagCluster(nil)
@@ -425,26 +461,8 @@ func TestUniqueTag_T11_EqualsEmptyIsRefused(t *testing.T) {
 	f := newTagCluster(nil)
 	rp := f.start(t)
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag=")
-	if code != 1 || !strings.Contains(stderr, "empty tag") || f.count("") != 0 {
-		t.Fatalf("exit %d, %d request(s), stderr %q", code, f.count(""), stderr)
-	}
-}
-
-// TG3, T7b: the rights read itself failing — a 500, a 404, or an answer
-// that is not a permission tree — refuses, with no listing trusted and no
-// create: an unreadable right is never read as held.
-func TestUniqueTag_T7b_RightsReadFailureRefuses(t *testing.T) {
-	for _, mode := range []string{"error", "404", "malformed"} {
-		t.Run(mode, func(t *testing.T) {
-			f := newTagCluster(nil)
-			f.perms = mode
-			rp := f.start(t)
-			code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-			if code != 1 || !strings.Contains(stderr, "cannot verify tag uniqueness") || !strings.Contains(stderr, "rights on /vms") ||
-				f.posts != 0 || f.count("GET /api2/json/cluster/resources") != 0 {
-				t.Fatalf("exit %d, stderr %q, POSTs %d, listings %d", code, stderr, f.posts, f.count("GET /api2/json/cluster/resources"))
-			}
-		})
+	if code != 1 || !strings.Contains(stderr, "empty tag") || f.sent() != 0 {
+		t.Fatalf("exit %d, %d request(s), stderr %q", code, f.sent(), stderr)
 	}
 }
 
@@ -511,7 +529,7 @@ func TestUniqueTag_T9_AnotherVMIsNotThisOne(t *testing.T) {
 	f.lag = 1 << 30
 	f.onCreate = func() {
 		f.mu.Lock()
-		f.vms[150] = &tagVM{tags: "x"}
+		f.vms[150] = &tagVM{typ: "qemu", tags: "x"}
 		f.mu.Unlock()
 	}
 	rp := f.start(t)
@@ -558,29 +576,160 @@ func TestUniqueTag_T13_SignalDuringTheVisibilityWait(t *testing.T) {
 	}
 }
 
-// TG2, the signal landing as the bound runs out: the last poll returns
-// after the deadline with the context already cancelled. That is still an
-// interruption, never "the bound elapsed".
-func TestUniqueTag_T13_SignalAtTheBound(t *testing.T) {
-	f := newTagCluster(nil)
-	f.lag = 1 << 30
-	rp := f.start(t)
+// TG2 and D1, the signal landing as the bound runs out: a read that returns
+// only after the deadline, with the parent's context cancelled meanwhile,
+// is still an interruption, never "the bound elapsed". The lister ignores
+// its own deadline, so this holds however the read was bounded.
+func TestWaitTagVisible_SignalAtTheBound(t *testing.T) {
+	origBound := tagVisibilityBound
+	t.Cleanup(func() { tagVisibilityBound = origBound })
 	tagVisibilityBound = 50 * time.Millisecond
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	f.onListing = func() {
-		f.mu.Lock()
-		n := f.listings
-		f.mu.Unlock()
-		if n == 2 {
-			time.Sleep(150 * time.Millisecond) // past the bound, then the signal
-			cancel(interruptError{sig: syscall.SIGTERM})
+	late := listerFunc(func(context.Context) ([]pve.Guest, error) {
+		cancel(interruptError{sig: syscall.SIGTERM})
+		time.Sleep(150 * time.Millisecond) // past the bound
+		return nil, errors.New("read cut short")
+	})
+	visible, err := waitTagVisible(ctx, late, "x", 101)
+	var ie interruptError
+	if visible || !errors.As(err, &ie) {
+		t.Fatalf("waitTagVisible = %t, %v; want false and the interruption", visible, err)
+	}
+}
+
+// listerFunc adapts a func to guestLister.
+type listerFunc func(ctx context.Context) ([]pve.Guest, error)
+
+func (f listerFunc) ClusterGuests(ctx context.Context) ([]pve.Guest, error) { return f(ctx) }
+
+// hung is a root read that never answers: it returns only when its own
+// context ends, as sshexec's Run does.
+var hung = listerFunc(func(ctx context.Context) ([]pve.Guest, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+})
+
+// within runs fn and fails the test if it has not returned within d: a
+// guard against the very hang these tests are about.
+func within(t *testing.T, d time.Duration, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("still running after %s: a root read is not bounded", d)
+	}
+}
+
+// D1: the check's root read has its own deadline, and running out of it
+// refuses the create (fail closed).
+func TestCheckTagUnique_AHungReadRefusesInTime(t *testing.T) {
+	orig := tagReadTimeout
+	t.Cleanup(func() { tagReadTimeout = orig })
+	tagReadTimeout = 100 * time.Millisecond
+	within(t, 3*time.Second, func() {
+		err := checkTagUnique(context.Background(), hung, "x")
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "cannot verify tag uniqueness") {
+			t.Errorf("checkTagUnique = %v; want a refusal on the read's deadline", err)
 		}
+	})
+}
+
+// D1: each poll of the wait is bounded, by tagReadTimeout and by the time
+// left before the bound, and a poll that times out is polled past: the
+// wait ends at the bound with visible=false and NO interruption error.
+func TestWaitTagVisible_HungReadsEndAtTheBound(t *testing.T) {
+	origBound, origPoll, origRead := tagVisibilityBound, tagVisibilityPoll, tagReadTimeout
+	t.Cleanup(func() { tagVisibilityBound, tagVisibilityPoll, tagReadTimeout = origBound, origPoll, origRead })
+	tagVisibilityBound, tagVisibilityPoll = 300*time.Millisecond, 5*time.Millisecond
+	for name, readTimeout := range map[string]time.Duration{
+		"reads shorter than the bound": 40 * time.Millisecond,
+		"a read longer than the bound": time.Hour, // cut to the time left
+	} {
+		t.Run(name, func(t *testing.T) {
+			tagReadTimeout = readTimeout
+			var polls atomic.Int32
+			counting := listerFunc(func(ctx context.Context) ([]pve.Guest, error) {
+				polls.Add(1)
+				return hung(ctx)
+			})
+			within(t, 3*time.Second, func() {
+				visible, err := waitTagVisible(context.Background(), counting, "x", 101)
+				if visible || err != nil {
+					t.Errorf("waitTagVisible = %t, %v; want false and no error (a timed-out read is not an interruption)", visible, err)
+				}
+			})
+			if readTimeout < tagVisibilityBound && polls.Load() < 2 {
+				t.Errorf("%d poll(s); a timed-out read must be polled past", polls.Load())
+			}
+		})
 	}
-	code, _, stderr := runRootInterruptible(ctx, "vm", "create", "--roster", rp, "qa-pve-01", "101", "tags=x", "--unique-tag", "x")
-	if code != 143 || !strings.Contains(stderr, "the VM WAS created") {
-		t.Fatalf("exit %d, stderr %q; want 143 and the interruption", code, stderr)
+}
+
+// D1 end to end, over SSH: pmxcfs hangs. In the check, the create is
+// refused within the read's deadline, with nothing created; in the wait,
+// the create ends at the bound with its warning and exit 0.
+func TestUniqueTag_D1_AHungRootReadIsBounded(t *testing.T) {
+	f := newTagCluster(nil)
+	f.hangFrom = 1
+	rp := f.start(t)
+	tagReadTimeout = 200 * time.Millisecond
+	within(t, 5*time.Second, func() {
+		code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
+		if code != 1 || !strings.Contains(stderr, "cannot verify tag uniqueness") || f.posts != 0 {
+			t.Errorf("hung check: exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
+		}
+	})
+
+	f = newTagCluster(nil)
+	f.hangFrom = 2 // the check answers; every poll of the wait hangs
+	rp = f.start(t)
+	tagVisibilityBound, tagReadTimeout = 300*time.Millisecond, 100*time.Millisecond
+	within(t, 5*time.Second, func() {
+		code, stdout, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
+		if code != 0 || stdout != "qa-pve-01: vm 101 created\n" || !strings.HasPrefix(stderr, "warning: qa-pve-01: vm 101: tag x is not yet in PVE's cluster resource list after 300ms") {
+			t.Errorf("hung wait: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	})
+}
+
+// S1: root is reached, the password asked for and the session dialed,
+// BEFORE the tag lock is taken. With the lock held elsewhere and a
+// 20ms --lock-wait, a dial or password failure is what is reported: the
+// lock was never waited for.
+func TestUniqueTag_S1_RootIsReachedBeforeTheLock(t *testing.T) {
+	hold := func(t *testing.T, rp string) {
+		unlock, err := lock.Mutation(context.Background(), rp, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm-tag", ID: "x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = unlock() })
 	}
+	t.Run("the dial", func(t *testing.T) {
+		f := newTagCluster(nil)
+		f.sshDown = true
+		rp := f.start(t)
+		hold(t, rp)
+		code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--lock-wait", "20ms")
+		if code != 1 || !strings.Contains(stderr, "connect as root") || strings.Contains(stderr, "lock") {
+			t.Fatalf("exit %d, stderr %q; want the dial's failure, not the lock's", code, stderr)
+		}
+	})
+	t.Run("the password", func(t *testing.T) {
+		f := newTagCluster(nil)
+		srv := httptest.NewTLSServer(http.HandlerFunc(f.serve))
+		t.Cleanup(srv.Close)
+		t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+		t.Setenv(pvePasswordEnvVar, "")
+		rp := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+		hold(t, rp)
+		code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--no-ssh-key", "--lock-wait", "20ms")
+		if code != 1 || !strings.Contains(stderr, "no PVE password available") || strings.Contains(stderr, "lock") {
+			t.Fatalf("exit %d, stderr %q; want the password's failure, not the lock's", code, stderr)
+		}
+	})
 }
 
 // TG2, runRoot's own side: an error marked errVMCreatedTagWaitInterrupted is
@@ -604,7 +753,82 @@ func TestUniqueTag_T12_LockWaitBoundsTheTagLock(t *testing.T) {
 	}
 	defer func() { _ = unlock() }()
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--lock-wait", "20ms")
-	if code != 1 || !strings.Contains(stderr, "acquire the lock for tag x") || f.count("") != 0 {
-		t.Fatalf("exit %d, %d request(s), stderr %q", code, f.count(""), stderr)
+	if code != 1 || !strings.Contains(stderr, "acquire the lock for tag x") || f.sent() != 0 {
+		t.Fatalf("exit %d, %d request(s), stderr %q", code, f.sent(), stderr)
+	}
+}
+
+// C1: a container carrying the tag refuses the create, named "ct N", in any
+// letter case: the tag namespace is shared by VMs and containers.
+func TestUniqueTag_C1_AContainerCarriesTheTag(t *testing.T) {
+	for _, tags := range []string{"x", "db;X"} {
+		f := newTagCluster(nil).addCT(200, tags)
+		rp := f.start(t)
+		code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
+		if code != 1 || !strings.Contains(stderr, "already carried by ct 200") || f.posts != 0 {
+			t.Errorf("a container tagged %q: exit %d, stderr %q, POSTs %d", tags, code, stderr, f.posts)
+		}
+	}
+}
+
+// C2: a container and a VM both carrying it is ambiguous, and refused.
+func TestUniqueTag_C2_AContainerAndAVM(t *testing.T) {
+	f := newTagCluster(map[int]string{150: "x"}).addCT(200, "x")
+	rp := f.start(t)
+	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
+	if code != 1 || !strings.Contains(stderr, "more than one guest") || f.posts != 0 {
+		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
+	}
+}
+
+// H1: the fail-open case the token cannot see. The token's list hides VM
+// 150 (an ACL on /vms/150, a pool NoAccess: the fake's REST list is empty),
+// root's list shows it: refused. Neither the token's list nor its rights
+// are ever read.
+func TestUniqueTag_H1_AGuestHiddenFromTheTokenIsSeen(t *testing.T) {
+	f := newTagCluster(map[int]string{150: "x"})
+	rp := f.start(t)
+	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
+	if code != 1 || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
+		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
+	}
+	if n := f.count("GET /api2/json/cluster/resources") + f.count("GET /api2/json/access/"); n != 0 {
+		t.Errorf("the token's list or rights were read %d time(s)", n)
+	}
+}
+
+// H3: --unique-tag needs root. A target holding no SSH key is refused
+// without --no-ssh-key, before anything is sent; with it, root is reached
+// with the PVE password. --no-ssh-key without --unique-tag is refused.
+func TestUniqueTag_H3_RootAccessRules(t *testing.T) {
+	f := newTagCluster(nil)
+	srv := httptest.NewTLSServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	t.Cleanup(pve.SetTaskTimingsForTests(time.Millisecond, 5*time.Second))
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+	fs := pvefake.NewSSHServer(t)
+	fs.HandleExec(f.exec)
+	fs.AllowPassword("root", "root-pw")
+	fs.Start()
+	rootAt(t, fs)
+	rp := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01") // no [targets.ssh]
+
+	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
+	if code != 1 || !strings.Contains(stderr, "holds no SSH key: pass --no-ssh-key") || f.sent() != 0 {
+		t.Fatalf("keyless, no flag: exit %d, %d sent, stderr %q", code, f.sent(), stderr)
+	}
+	code, _, stderr = createTagged(rp, 101, "x", "--no-ssh-key")
+	if code != 1 || !strings.Contains(stderr, "--no-ssh-key only applies with --unique-tag") || f.sent() != 0 {
+		t.Fatalf("--no-ssh-key alone: exit %d, %d sent, stderr %q", code, f.sent(), stderr)
+	}
+	t.Setenv(pvePasswordEnvVar, "root-pw")
+	code, stdout, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--no-ssh-key")
+	if code != 0 || stdout != "qa-pve-01: vm 101 created\n" || f.posts != 1 {
+		t.Fatalf("keyless with --no-ssh-key: exit %d, stdout %q, stderr %q, POSTs %d", code, stdout, stderr, f.posts)
+	}
+	for _, c := range f.rootCmds {
+		if c != bootstrap.ClusterGuestsCommand {
+			t.Errorf("root ran %q", c)
+		}
 	}
 }

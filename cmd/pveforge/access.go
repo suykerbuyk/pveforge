@@ -39,33 +39,44 @@ const noSSHKeyAccessUsage = "connect as root with the PVE password (" + pvePassw
 // openRootAccess loads targetID and returns its RootAccess, dialing nothing
 // yet, and a func that closes whatever it opened.
 func openRootAccess(cmd *cobra.Command, targetID string, noSSHKey bool) (*bootstrap.RootAccess, *roster.Target, func(), error) {
+	a, t, _, closeAll, err := openRootAccessAndREST(cmd, targetID, noSSHKey)
+	return a, t, closeAll, err
+}
+
+// openRootAccessAndREST is openRootAccess that also returns the token's
+// RoutedClient it built (nil when the target holds no token), so a command
+// that needs both root and the REST client loads the roster and resolves
+// its passphrase once. A target that holds no SSH key is refused, unless
+// noSSHKey, before the passphrase is asked for.
+func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey bool) (*bootstrap.RootAccess, *roster.Target, *pve.RoutedClient, func(), error) {
 	rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	r, err := roster.Load(rosterPath)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("load roster %s: %w", rosterPath, err)
+		return nil, nil, nil, nil, fmt.Errorf("load roster %s: %w", rosterPath, err)
 	}
 	t := r.Find(targetID)
 	if t == nil {
-		return nil, nil, nil, fmt.Errorf("target %q not found in roster %s", targetID, rosterPath)
+		return nil, nil, nil, nil, fmt.Errorf("target %q not found in roster %s", targetID, rosterPath)
 	}
 	if !noSSHKey && t.SSH == nil {
-		return nil, nil, nil, fmt.Errorf("target %q holds no SSH key: pass --no-ssh-key to connect as root with the PVE password for this run", targetID)
+		return nil, nil, nil, nil, fmt.Errorf("target %q holds no SSH key: pass --no-ssh-key to connect as root with the PVE password for this run", targetID)
 	}
 	pass, err := roster.ResolvePassphraseContext(cmd.Context())
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	opts := bootstrap.AccessOptions{Addr: net.JoinHostPort(t.Host, accessSSHPort)}
 	closeREST := func() {}
+	var rest *pve.RoutedClient
 	if t.Token != nil {
 		rc, err := pve.NewRoutedClient(t, pass)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		opts.REST, opts.OwnToken, closeREST = rc, t.Token.ID, func() { _ = rc.Close() }
+		rest, opts.REST, opts.OwnToken, closeREST = rc, rc, t.Token.ID, func() { _ = rc.Close() }
 	}
 	if noSSHKey {
 		opts.Password = resolvePVEPassword
@@ -73,12 +84,12 @@ func openRootAccess(cmd *cobra.Command, targetID string, noSSHKey bool) (*bootst
 		key, err := roster.DecryptString(t.SSH.PrivateKeyEnc, pass)
 		if err != nil {
 			closeREST()
-			return nil, nil, nil, fmt.Errorf("decrypt ssh key for %q: %w", targetID, err)
+			return nil, nil, nil, nil, fmt.Errorf("decrypt ssh key for %q: %w", targetID, err)
 		}
 		opts.SSHUser, opts.PrivateKeyPEM, opts.HostKeyFingerprint = t.SSH.User, key, t.SSH.HostKeyFingerprint
 	}
 	a := bootstrap.NewRootAccess(opts, newAccessTransport())
-	return a, t, func() { _ = a.Close(); closeREST() }, nil
+	return a, t, rest, func() { _ = a.Close(); closeREST() }, nil
 }
 
 // optionalText returns a flag's value when it was given, refusing a value

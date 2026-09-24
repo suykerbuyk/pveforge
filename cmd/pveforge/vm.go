@@ -54,6 +54,7 @@ func newVMCmd() *cobra.Command {
 // test.
 func newVMCreateCmd() *cobra.Command {
 	var jsonBody, jsonFile, uniqueTag string
+	var noSSHKey bool
 
 	cmd := &cobra.Command{
 		Use:   "create <target-id> <vmid> [field=value ...]",
@@ -76,25 +77,35 @@ field=value arguments, or via --json / --json-file. Tags are not special
 part of the create itself, so the VM is never briefly untagged.
 
 --unique-tag X (opt-in; X must be one of this create's own tags) refuses
-the create if any VM in the cluster already carries X. Tags are matched
-case-insensitively, as PVE matches them: Foo and foo are one tag. An empty
-or blank X is refused. The check is made
-under a pveforge lock on the tag, taken before the VM's own lock and held
-until the new VM shows up in PVE's cluster resource list, so two pveforge
-creates with the same --unique-tag on this roster target never both
-succeed. Its limits:
-  - it fails closed: a resource list that cannot be read, or reads as
-    null, refuses the create;
-  - it needs VM.Audit on /vms (propagating), because PVE lists only the
-    VMs a token can see; without it the create is refused ("cannot verify
-    tag uniqueness");
+the create if any guest in the cluster, VM or container, already carries
+X. Tags are matched case-insensitively, as PVE matches them: Foo and foo
+are one tag. An empty or blank X is refused.
+
+The guests are listed as root over SSH (pvesh get /cluster/resources),
+not with the roster's token: PVE leaves a guest out of a token's list
+whenever the token lacks VM.Audit on that guest's own path (a NoAccess or
+any narrower role there, on the token's user or group, or a NoAccess on
+its pool), and no read a token can make shows that none was left out.
+root's list leaves out nothing. So --unique-tag needs root SSH, as user
+ensure does: the target's stored SSH key, or --no-ssh-key and the PVE
+password. That read runs nothing else as root.
+
+The check is made under a pveforge lock on the tag, taken before the VM's
+own lock and held until the new VM shows up in root's list, so two
+pveforge creates with the same --unique-tag on this roster target never
+both succeed. Its limits:
+  - it fails closed: a list that cannot be read, or that is not exactly
+    what PVE returns (null, a malformed entry, an unknown guest type),
+    refuses the create; so does a root read that takes more than 30s;
+  - tags are folded even when the datacenter's tag-style sets
+    case-sensitive=1, so pveforge then refuses more than PVE distinguishes,
+    never less;
+  - root's list is PVE's replicated cluster config: a guest on an offline
+    node is still listed, but a node without quorum may serve a stale
+    list;
   - the lock is per roster target: two targets that are nodes of one
     cluster are not serialised against each other, and neither is the
     web UI or qm;
-  - it needs VM.Audit on /vms as a whole: a NoAccess ACL on one VM
-    (/vms/VMID) hides that VM from the list while this check still passes,
-    so a tag that VM carries is not seen;
-  - only QEMU VMs are counted: an LXC container carrying X is not;
   - PVE's resource list lags; if the new VM is not listed within 30s, the
     create still succeeds and a warning says a concurrent check may miss it.
     A signal (Ctrl-C) during that wait exits 130 (143 for SIGTERM) with an
@@ -119,6 +130,8 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 				if err := uniqueTagIsOwn(uniqueTag, params); err != nil {
 					return err
 				}
+			} else if noSSHKey {
+				return errors.New("vm create: --no-ssh-key only applies with --unique-tag, whose check runs as root")
 			}
 			// Guard the sentinel, not a range: NextVMID reads pin == 0 as
 			// "no pin, auto-allocate", and auto-allocation is explicitly
@@ -132,11 +145,35 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 				return fmt.Errorf("invalid vmid %d: vm create requires an explicit positive vmid (it never auto-allocates)", vmid)
 			}
 
-			client, err := resolveRoutedClient(cmd, args[0])
-			if err != nil {
-				return err
+			// With --unique-tag, root (for the guest list) and the token's
+			// client come from one roster load and one passphrase; a
+			// target holding no SSH key is refused, without --no-ssh-key,
+			// before anything is asked for or sent.
+			var client *pve.RoutedClient
+			var root guestLister
+			if tagGuard {
+				a, _, rest, closeAll, err := openRootAccessAndREST(cmd, args[0], noSSHKey)
+				if err != nil {
+					return err
+				}
+				defer closeAll()
+				if rest == nil {
+					return fmt.Errorf("target %q holds no API token", args[0])
+				}
+				// Root is reached (the password asked for, when keyless, and
+				// the session dialed) BEFORE the tag lock is taken, so
+				// neither a prompt nor a dial is ever made holding it.
+				if err := a.Connect(cmd.Context()); err != nil {
+					return fmt.Errorf("vm create: --unique-tag: connect as root: %w", err)
+				}
+				client, root = rest, a
+			} else {
+				client, err = resolveRoutedClient(cmd, args[0])
+				if err != nil {
+					return err
+				}
+				defer func() { _ = client.Close() }()
 			}
-			defer func() { _ = client.Close() }()
 
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
@@ -155,7 +192,7 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 					return fmt.Errorf("vm create: acquire the lock for tag %s: %w", kvjson.QuoteValue(uniqueTag), err)
 				}
 				defer func() { _ = unlockTag() }()
-				if err := checkTagUnique(cmd.Context(), client, uniqueTag); err != nil {
+				if err := checkTagUnique(cmd.Context(), root, uniqueTag); err != nil {
 					return err
 				}
 			}
@@ -261,7 +298,7 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: vm %d created\n", args[0], resolved)
 			if tagGuard {
-				visible, err := waitTagVisible(cmd.Context(), client, uniqueTag, resolved)
+				visible, err := waitTagVisible(cmd.Context(), root, uniqueTag, resolved)
 				if err != nil {
 					return fmt.Errorf("vm create: vm %d on %s: %w: tag %s (%w)", resolved, args[0], errVMCreatedTagWaitInterrupted, kvjson.QuoteValue(uniqueTag), err)
 				}
@@ -274,7 +311,8 @@ Without --unique-tag, two creates with the same tags both succeed.`,
 	}
 	addRosterFlag(cmd)
 	addLockWaitFlag(cmd)
-	cmd.Flags().StringVar(&uniqueTag, "unique-tag", "", "refuse the create if any VM in the cluster already carries this tag (one of this create's own tags; needs VM.Audit on /vms)")
+	cmd.Flags().StringVar(&uniqueTag, "unique-tag", "", "refuse the create if any VM or container in the cluster already carries this tag (one of this create's own tags); the guests are listed as root over SSH")
+	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, "with --unique-tag: "+noSSHKeyAccessUsage)
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of create parameters (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of create parameters (values must be JSON strings)")
 	markMutating(cmd)
@@ -637,6 +675,13 @@ var (
 	tagVisibilityPoll  = time.Second
 )
 
+// tagReadTimeout bounds each root read of the guest list, the check's and
+// every poll of the wait's, as the REST read it replaced was bounded by
+// pve.DefaultTimeout: a half-open SSH connection or a hung pmxcfs must
+// never hold the tag's lock without end. A variable so tests can shorten
+// it.
+var tagReadTimeout = pve.DefaultTimeout
+
 // errVMCreatedTagWaitInterrupted marks a --unique-tag create whose VM WAS
 // created and whose wait for it to be listed was then interrupted by a
 // signal. Its text already says so; runRoot prints it as it is, never with
@@ -674,32 +719,30 @@ func uniqueTagIsOwn(tag string, params url.Values) error {
 	return fmt.Errorf("vm create: --unique-tag %s is not one of this create's tags (tags=%s)", kvjson.QuoteValue(tag), kvjson.QuoteValue(params.Get("tags")))
 }
 
-// tagChecker is what the --unique-tag check needs of the client.
-type tagChecker interface {
-	CanAuditAllVMs(ctx context.Context) (bool, error)
-	FindByTagFold(ctx context.Context, tag string) (*proxmox.ClusterResource, error)
+// guestLister is what the --unique-tag check and wait need: root's list of
+// every guest in the cluster (bootstrap.RootAccess.ClusterGuests).
+type guestLister interface {
+	ClusterGuests(ctx context.Context) ([]pve.Guest, error)
 }
 
-// checkTagUnique fails closed: only a real list, read by a token that can
-// see every VM, that carries no VM with tag lets the create proceed. A
-// match, an ambiguous match, a failed or null read, a 404 on the list
-// (proxmox.ErrNotFound — a failed read, not "no match") and a token that
-// cannot see every VM all refuse.
-func checkTagUnique(ctx context.Context, c tagChecker, tag string) error {
+// checkTagUnique fails closed: only root's list, read and decoded in full,
+// with no guest (VM or container) carrying tag lets the create proceed. A
+// match, an ambiguous match, and a list that failed or was not what PVE
+// returns all refuse.
+func checkTagUnique(ctx context.Context, root guestLister, tag string) error {
 	q := kvjson.QuoteValue(tag)
-	all, err := c.CanAuditAllVMs(ctx)
+	rctx, cancel := context.WithTimeout(ctx, tagReadTimeout)
+	defer cancel()
+	guests, err := root.ClusterGuests(rctx)
 	if err != nil {
-		return fmt.Errorf("vm create: cannot verify tag uniqueness for %s: read the token's rights on /vms: %w", q, err)
+		return fmt.Errorf("vm create: cannot verify tag uniqueness for %s: %w", q, err)
 	}
-	if !all {
-		return fmt.Errorf("vm create: cannot verify tag uniqueness for %s: the token lacks VM.Audit on /vms (propagating), and PVE lists only the VMs a token can see", q)
-	}
-	r, err := c.FindByTagFold(ctx, tag)
+	g, err := pve.FindGuestByTagFold(guests, tag)
 	switch {
 	case err == nil:
-		return fmt.Errorf("vm create: tag %s is already carried by vm %d; refusing to create another (--unique-tag)", q, r.VMID)
+		return fmt.Errorf("vm create: tag %s is already carried by %s %d; refusing to create another (--unique-tag)", q, g.Kind(), g.VMID)
 	case errors.Is(err, pve.ErrAmbiguousTag):
-		return fmt.Errorf("vm create: tag %s is already carried by more than one VM; refusing to create another (--unique-tag): %w", q, err)
+		return fmt.Errorf("vm create: tag %s is already carried by more than one guest; refusing to create another (--unique-tag): %w", q, err)
 	case errors.Is(err, pve.ErrNotFound):
 		return nil
 	default:
@@ -707,17 +750,25 @@ func checkTagUnique(ctx context.Context, c tagChecker, tag string) error {
 	}
 }
 
-// waitTagVisible polls FindByTagFold until it names vmid, for at most
-// tagVisibilityBound, and reports whether it did. Any other answer, a read
-// failure or another VM carrying the tag included, is polled past: the
+// waitTagVisible polls root's list until the one guest carrying tag is this
+// create's VM (vmid, a QEMU guest), for at most tagVisibilityBound, and
+// reports whether it did. Any other answer, a read failure or another
+// guest carrying the tag included, is polled past: the
 // create has already succeeded, so running out of time only warns. A
 // cancelled ctx (a signal) is the one error: the wait did not run its
 // course, and the caller must say so rather than claim the bound elapsed.
-func waitTagVisible(ctx context.Context, c tagChecker, tag string, vmid int) (bool, error) {
+//
+// Each read has its own deadline: tagReadTimeout, cut to the time left
+// before the bound. A read that runs out of time is polled past like any
+// failed read, never taken for the parent's cancellation, so a hung read
+// ends in the bound's warning, not in an interruption.
+func waitTagVisible(ctx context.Context, root guestLister, tag string, vmid int) (bool, error) {
 	deadline := time.Now().Add(tagVisibilityBound)
 	for {
-		if r, err := c.FindByTagFold(ctx, tag); err == nil && r != nil && int(r.VMID) == vmid {
-			return true, nil
+		if guests, err := readGuestsBy(ctx, root, deadline); err == nil {
+			if g, err := pve.FindGuestByTagFold(guests, tag); err == nil && g.Type == "qemu" && g.VMID == vmid {
+				return true, nil
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			return false, context.Cause(ctx)
@@ -731,4 +782,16 @@ func waitTagVisible(ctx context.Context, c tagChecker, tag string, vmid int) (bo
 		case <-time.After(min(tagVisibilityPoll, time.Until(deadline))):
 		}
 	}
+}
+
+// readGuestsBy is one poll's root read, bounded by tagReadTimeout and by
+// the wait's own deadline, whichever comes first.
+func readGuestsBy(ctx context.Context, root guestLister, deadline time.Time) ([]pve.Guest, error) {
+	by := time.Now().Add(tagReadTimeout)
+	if deadline.Before(by) {
+		by = deadline
+	}
+	rctx, cancel := context.WithDeadline(ctx, by)
+	defer cancel()
+	return root.ClusterGuests(rctx)
 }

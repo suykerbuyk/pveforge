@@ -219,17 +219,26 @@ that run, as `bootstrap --no-ssh-key` does.
 differs, so a repeat run changes nothing. `vm create` instead fails if the
 VMID is already taken, and never picks another. Two creates with the same
 tags both succeed, unless `--unique-tag X` is given (X one of the create's own
-tags): then the create is refused if any VM in the cluster already carries X,
-in any letter case (PVE matches tags case-insensitively). That check fails
-closed (a list it cannot read refuses), needs `VM.Audit` on `/vms` because
-PVE lists only the VMs a token can see, and runs under a pveforge lock on the
-tag, held until the new VM is listed. Its limits: the lock is per roster
+tags): then the create is refused if any guest in the cluster, VM or
+container, already carries X, in any letter case (PVE matches tags
+case-insensitively). The guests are listed as root over SSH (`pvesh get
+/cluster/resources`), because PVE leaves out of a token's list every guest
+the token lacks `VM.Audit` on at that guest's own path (any narrower role
+there for the token, its user or a group, or a `NoAccess` on its pool), and
+no read a token can make shows that none was left out; root's list leaves out
+nothing. So `--unique-tag` needs root SSH, as `user ensure` does: a stored SSH
+key, or `--no-ssh-key` and the PVE password; root is reached before the tag's
+lock is taken. That check fails closed (a list it cannot read, one that is not
+what PVE returns, or a root read taking over 30 seconds refuses) and runs under
+a pveforge lock on the tag, held until the new VM is in root's list. Tags are
+folded even when the datacenter's tag style is case-sensitive, so pveforge then
+refuses more than PVE distinguishes, never less. Root's list is PVE's
+replicated cluster config: a guest on an offline node is still listed, but a
+node without quorum may serve a stale list. Its limits: the lock is per roster
 target, so two targets that are nodes of one cluster, and the web UI, are not
-held off; a `NoAccess` ACL on a single `/vms/<id>` hides that VM while the
-`VM.Audit` check still passes; LXC containers carrying the tag are not
-counted; and a signal during the wait for the new VM to be listed exits
-130/143 saying the VM was created but not yet listed. `api` is a raw passthrough and
-is not idempotent.
+held off; and a signal during the wait for the new VM to be listed exits
+130/143 saying the VM was created but not yet listed. `api`
+is a raw passthrough and is not idempotent.
 
 Commands that touch a VM, node, storage or network object, or a user or
 group (`user ensure`, `group ensure`), take a per-object lock (files under `<roster>.locks/`): a mutation takes it exclusively, and a
@@ -325,9 +334,10 @@ owed to the nested PVE test harness:
   runs `/bin/echo` in the guest, which assumes a POSIX guest.
 - `vm create --unique-tag`: how far PVE's cluster resource list lags a create
   (about 10 seconds; the create waits up to 30 for its own VM to be listed,
-  then only warns), that PVE stores tags `;`-joined whatever separators were
-  used, that tags match case-insensitively (PVE's default), and that
-  `VM.Audit` on `/vms` is enough to be listed every VM.
+  then only warns), the JSON `pvesh get /cluster/resources --type vm
+  --output-format json` prints as root (read from PVE's source: `type`,
+  `vmid` and `tags` per guest, containers included), and that PVE stores tags
+  lower-cased and `;`-joined under the default tag style.
 - Library code with no command yet: full vs linked clones, VM destroy beyond
   PVE's documentation, and guest-agent command timing and encoding outside
   the rollback witness.

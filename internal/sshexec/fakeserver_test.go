@@ -39,6 +39,11 @@ type fakeServer struct {
 	// session's own goroutine while the test goroutine reads it.
 	stdinMu   sync.Mutex
 	stdinSeen []stdinRecord
+
+	// stall, when set before Start, makes the server complete the
+	// handshake and then answer no channel request until it is closed: a
+	// peer that stopped responding after the connection was made.
+	stall chan struct{}
 }
 
 // drainJoinTimeout bounds how long handleSession waits for a session's
@@ -181,6 +186,9 @@ func (fs *fakeServer) handleConn(t *testing.T, conn net.Conn) {
 	}
 	defer func() { _ = sconn.Close() }()
 	go ssh.DiscardRequests(reqs)
+	if fs.stall != nil {
+		<-fs.stall
+	}
 
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
