@@ -797,6 +797,47 @@ func TestRoutedForwarding_TagStillClaimed(t *testing.T) {
 	assertRequests(t, rec.got(), listing, listing, listing)
 }
 
+// TestRoutedForwarding_RollbackWitness pins the two arguments NodeBinding
+// cannot see. wantOutput: the guest answers "hello", so a pass-through that
+// dropped the marker (or hard-coded one) turns the "absent" case into a
+// success or the "hello" case into a failure. timeout: every dispatch is
+// refused, so the 60ms deadline must end it as WitnessNeverResponded well
+// inside the test's own 2s context; a dropped timeout falls back to the
+// two-minute default and ends on the context instead.
+func TestRoutedForwarding_RollbackWitness(t *testing.T) {
+	t.Run("wantOutput", func(t *testing.T) {
+		srv, _ := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/agent/exec") {
+				writeData(w, `{"pid":7}`)
+				return
+			}
+			writeData(w, `{"exited":1,"exitcode":0,"out-data":"hello\n"}`)
+		})
+		rc := fwdClient(t, srv)
+		if _, err := rc.RollbackWitness(context.Background(), fwdVMID, []string{"/bin/echo", "hello"}, "hello", time.Second); err != nil {
+			t.Errorf("marker present: %v", err)
+		}
+		_, err := rc.RollbackWitness(context.Background(), fwdVMID, []string{"/bin/echo", "hello"}, "absent-marker", time.Second)
+		var we *RollbackWitnessError
+		if !errors.As(err, &we) || we.Reason != WitnessMarkerMissing {
+			t.Errorf("marker absent: err = %v, want WitnessMarkerMissing", err)
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		srv, _ := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"data":null}`))
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := fwdClient(t, srv).RollbackWitness(ctx, fwdVMID, []string{"/bin/true"}, "", 60*time.Millisecond)
+		var we *RollbackWitnessError
+		if !errors.As(err, &we) || we.Reason != WitnessNeverResponded {
+			t.Errorf("err = %v, want WitnessNeverResponded from the 60ms deadline", err)
+		}
+	})
+}
+
 // TestRoutedForwarding_WaitForAgentExec pins the poll loop's six arguments.
 // pollInterval and timeout are adjacent time.Durations, so swapping them
 // compiles: it would turn a short poll under a long deadline into one poll
@@ -1110,7 +1151,7 @@ type bindingCase struct {
 	want   []string
 }
 
-// TestRoutedForwarding_NodeBinding pins how each of the 29 node-resolving
+// TestRoutedForwarding_NodeBinding pins how each of the 30 node-resolving
 // pass-throughs picks its node. The other 10 take no node at all.
 //
 // Two different node sources exist, and each has its own wrong answer:
@@ -1119,7 +1160,7 @@ type bindingCase struct {
 //     can wrongly substitute c.target.Node, or c.target.ID, for it. Every one of
 //     these cases uses a caller node that differs from the target's node, so
 //     either substitution moves the request.
-//   - The 14 TARGET-BOUND methods take no node and bind c.target.Node. Their
+//   - The 15 TARGET-BOUND methods take no node and bind c.target.Node. Their
 //     bodies can wrongly use a literal node name, or c.target.ID. The target's
 //     node, id and host are mutually distinct, and none of them is the likeliest
 //     literal, "qa-pve-01".
@@ -1367,6 +1408,22 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 				return err
 			}, []string{"GET /nodes/qa-pve-04/qemu/5151/agent/exec-status?pid=9"}},
 		}},
+		{"RollbackWitness", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				_, err := rc.RollbackWitness(ctx, fwdVMID, []string{"/bin/echo", "w1"}, "", time.Second)
+				return err
+			}, []string{
+				"POST /nodes/qa-pve-03/qemu/4242/agent/exec command=%2Fbin%2Fecho&command=w1&input-data=",
+				"GET /nodes/qa-pve-03/qemu/4242/agent/exec-status?pid=7",
+			}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				_, err := rc.RollbackWitness(ctx, fwdVMID2, []string{"/bin/echo", "w2"}, "", 2*time.Second)
+				return err
+			}, []string{
+				"POST /nodes/qa-pve-04/qemu/5151/agent/exec command=%2Fbin%2Fecho&command=w2&input-data=",
+				"GET /nodes/qa-pve-04/qemu/5151/agent/exec-status?pid=7",
+			}},
+		}},
 		{"AgentInterfaces", []bindingCase{
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				_, err := rc.AgentInterfaces(ctx, fwdVMID)
@@ -1469,8 +1526,8 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 		}},
 	}
 
-	if len(methods) != 29 {
-		t.Fatalf("node-binding table covers %d methods, want all 29 node-resolving pass-throughs", len(methods))
+	if len(methods) != 30 {
+		t.Fatalf("node-binding table covers %d methods, want all 30 node-resolving pass-throughs", len(methods))
 	}
 	for _, m := range methods {
 		t.Run(m.name, func(t *testing.T) {
@@ -1628,6 +1685,7 @@ var routedClientSeam = map[string]seamEntry{
 	"AgentExec":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"AgentExecStatus":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"WaitForAgentExec":           {tests: []string{"TestRoutedForwarding_WaitForAgentExec", "TestRoutedForwarding_NodeBinding"}},
+	"RollbackWitness":            {tests: []string{"TestRoutedForwarding_RollbackWitness", "TestRoutedForwarding_NodeBinding"}},
 	"AgentInterfaces":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"VMNetMACs":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"APIDocTree":                 {tests: []string{"TestRoutedForwarding_APIDocTree"}},
@@ -1814,7 +1872,7 @@ func TestRoutedForwarding_NodeBindingRowsCallTheirOwnMethod(t *testing.T) {
 		}
 		return false
 	})
-	if rows != 29 {
-		t.Errorf("found %d node-binding rows, want 29", rows)
+	if rows != 30 {
+		t.Errorf("found %d node-binding rows, want 30", rows)
 	}
 }
