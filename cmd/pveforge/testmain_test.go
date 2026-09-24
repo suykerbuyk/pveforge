@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/suykerbuyk/pveforge/internal/netguard"
+	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
@@ -25,6 +26,12 @@ import (
 // because that client already took its own Clone() of the global at
 // construction. Nothing may construct a client before this point.
 //
+// It also lowers the scrypt work factor production's roster.EncryptString
+// writes to fixtureWorkFactor (roster.SetScryptWorkFactorForTests), so a
+// command under test that encrypts into a roster — bootstrap's persist —
+// costs ~30ms, not ~1s (~10s under -race). Nothing here asserts the KDF's
+// parameters: internal/roster/kdf_guard_test.go pins production's 18.
+//
 // Install in order and tear down in reverse. The teardown is written out
 // longhand rather than deferred ON PURPOSE: os.Exit does not run deferred
 // functions, so a `defer restore()` here would silently never fire.
@@ -40,6 +47,7 @@ func TestMain(m *testing.M) {
 
 	restoreDial := netguard.Install()
 	restoreSSHGuard := sshexec.SetDialGuardForTests(netguard.Guard)
+	restoreWorkFactor := roster.SetScryptWorkFactorForTests(fixtureWorkFactor)
 
 	code := m.Run()
 
@@ -51,6 +59,7 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 
+	restoreWorkFactor()
 	restoreSSHGuard()
 	restoreDial()
 

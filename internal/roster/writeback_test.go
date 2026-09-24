@@ -62,7 +62,7 @@ func TestWriteTokenAuth_FirstBootstrap_PreservesOtherTarget(t *testing.T) {
 	err := WriteTokenAuth(path, "qa-pve-02", TokenWrite{
 		TokenID:         "pveforge@pve!automation",
 		SecretPlaintext: []byte("tok-secret-value"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteTokenAuth: %v", err)
 	}
@@ -133,7 +133,7 @@ node = "qa-pve-01"
 	err := WriteTokenAuth(path, "qa-pve-01", TokenWrite{
 		TokenID:         "pveforge@pve!automation",
 		SecretPlaintext: []byte("new-secret"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteTokenAuth (rotation): %v", err)
 	}
@@ -187,7 +187,7 @@ node = "qa-pve-01"
 		User:                "root",
 		PublicKey:           "ssh-ed25519 AAAA... pveforge@qa-pve-01",
 		PrivateKeyPlaintext: []byte("ssh-priv-key-material"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
@@ -251,7 +251,7 @@ node = "qa-pve-01"
 	err := WriteTokenAuth(path, "qa-pve-01", TokenWrite{
 		TokenID:         "pveforge@pve!automation",
 		SecretPlaintext: []byte("new-token-secret"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteTokenAuth: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestWriteTokenAuth_UnknownTarget(t *testing.T) {
 	err := WriteTokenAuth(path, "does-not-exist", TokenWrite{
 		TokenID:         "x",
 		SecretPlaintext: []byte("y"),
-	}, "pw")
+	}, NewPassphrase("pw"))
 	if err == nil {
 		t.Fatal("expected error for unknown target id")
 	}
@@ -306,7 +306,7 @@ node = "n1"
 	err := WriteTokenAuth(path, "anything", TokenWrite{
 		TokenID:         "x",
 		SecretPlaintext: []byte("y"),
-	}, "pw")
+	}, NewPassphrase("pw"))
 	if err == nil {
 		t.Fatal("expected error for target block missing id")
 	}
@@ -362,7 +362,7 @@ func TestWriteSSHAuth_QuotesSpecialCharsInPublicKey(t *testing.T) {
 		User:                "root",
 		PublicKey:           `ssh-ed25519 AAAA... comment "with quotes"`,
 		PrivateKeyPlaintext: []byte("k"),
-	}, "pw")
+	}, NewPassphrase("pw"))
 	if err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestWriteTokenAuth_FirstTarget_PreservesLaterTargetBytes(t *testing.T) {
 	err := WriteTokenAuth(path, "qa-pve-01", TokenWrite{
 		TokenID:         "pveforge@pve!automation",
 		SecretPlaintext: []byte("tok-secret-value"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteTokenAuth: %v", err)
 	}
@@ -452,7 +452,7 @@ node = "pve-10"
 	err := WriteTokenAuth(path, "pve-1", TokenWrite{
 		TokenID:         "pveforge@pve!automation",
 		SecretPlaintext: []byte("tok-secret-value"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteTokenAuth: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestWriteSSHAuth_WritesHostKeyFingerprint(t *testing.T) {
 		PublicKey:           "ssh-ed25519 AAAA... pveforge@qa-pve-01",
 		HostKeyFingerprint:  "SHA256:abcdefg1234567890",
 		PrivateKeyPlaintext: []byte("ssh-priv-key-material"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestWriteSSHAuth_RotationPreservesHostKeyFingerprint(t *testing.T) {
 		PublicKey:           "ssh-ed25519 AAAA... old",
 		HostKeyFingerprint:  "SHA256:original-fingerprint",
 		PrivateKeyPlaintext: []byte("old-key"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteSSHAuth (initial): %v", err)
 	}
@@ -521,7 +521,7 @@ func TestWriteSSHAuth_RotationPreservesHostKeyFingerprint(t *testing.T) {
 		PublicKey:           "ssh-ed25519 AAAA... new",
 		HostKeyFingerprint:  "SHA256:rotated-fingerprint",
 		PrivateKeyPlaintext: []byte("new-key"),
-	}, "test-passphrase")
+	}, NewPassphrase("test-passphrase"))
 	if err != nil {
 		t.Fatalf("WriteSSHAuth (rotation): %v", err)
 	}
@@ -1107,7 +1107,7 @@ node = "n2"
 	err := WriteTokenAuth(path, "dup", TokenWrite{
 		TokenID:         "x",
 		SecretPlaintext: []byte("y"),
-	}, "pw")
+	}, NewPassphrase("pw"))
 	if err == nil {
 		t.Fatal("expected error for ambiguous duplicate target id")
 	}

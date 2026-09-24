@@ -72,15 +72,21 @@ An imported target holds a token but no SSH key, so a later plain
 			// The passphrase before the secret: with stdin piped it can
 			// only come from the environment, and a missing one must not
 			// cost the piped secret.
-			passphrase, err := roster.ResolvePassphraseContext(cmd.Context())
-			if err != nil {
-				return err
-			}
-			secret, err := readImportedSecret(importStdin())
+			rawPassphrase, err := roster.ResolvePassphraseContext(cmd.Context())
 			if err != nil {
 				return err
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+			if err != nil {
+				return err
+			}
+			// And proven before the secret is read, for the same reason: a
+			// mistyped passphrase must not cost the piped secret either.
+			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
+			if err != nil {
+				return err
+			}
+			secret, err := readImportedSecret(importStdin())
 			if err != nil {
 				return err
 			}

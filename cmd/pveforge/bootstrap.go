@@ -72,7 +72,13 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			passphrase, err := roster.ResolvePassphraseContext(cmd.Context())
+			rawPassphrase, err := roster.ResolvePassphraseContext(cmd.Context())
+			if err != nil {
+				return err
+			}
+			// Before the PVE password is asked for: a mistyped roster
+			// passphrase must not cost a second prompt, let alone a dial.
+			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
 			if err != nil {
 				return err
 			}
@@ -123,6 +129,25 @@ func newBootstrapCmd() *cobra.Command {
 	// a secret). The worst case sets the tier, as for `roster init --force`.
 	markDestructive(cmd)
 	return cmd
+}
+
+// proveRosterPassphrase proves pass against the roster at path for a
+// command about to encrypt a secret into it (roster.ProvePassphrase), so a
+// wrong passphrase is refused before any prompt, lock or network call that
+// follows. Only a verdict about the passphrase stops the command here — a
+// wrong one, or a roster none of whose secrets can be read to check it
+// against. A roster that cannot be loaded at all is left to the command
+// itself, which reports it in its own terms, and whose writes prove the
+// passphrase again under the roster's lock.
+func proveRosterPassphrase(path, targetID, pass string) (roster.Passphrase, error) {
+	p, err := roster.ProvePassphrase(path, targetID, pass)
+	if errors.Is(err, roster.ErrWrongPassphrase) || errors.Is(err, roster.ErrNoReadableSecret) {
+		return roster.Passphrase{}, err
+	}
+	if err != nil {
+		return roster.NewPassphrase(pass), nil
+	}
+	return p, nil
 }
 
 // resolvePVEPassword reads the PAM/realm login password used once, for

@@ -68,9 +68,14 @@ func reseedSSHUnderAnotherPassphrase(t *testing.T, path string, opts Options) {
 	}
 	if err := roster.WriteSSHAuth(path, opts.TargetID, roster.SSHWrite{
 		User: "root", PublicKey: kp.AuthorizedKeyLine, HostKeyFingerprint: "SHA256:abc", PrivateKeyPlaintext: kp.PrivateKeyPEM,
-	}, "a-different-passphrase"); err != nil {
+	}, opts.Passphrase); err != nil {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
+	r, err := roster.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resealUnder(t, path, r.Find(opts.TargetID).SSH.PrivateKeyEnc, kp.PrivateKeyPEM, "a-different-passphrase")
 }
 
 func keylessTransport(session *fakeSession) *fakeTransport {

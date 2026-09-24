@@ -175,7 +175,9 @@ type Options struct {
 	Grants []Grant
 
 	RosterPath string
-	Passphrase string
+	// Passphrase is the roster's, proven against the roster (Run proves
+	// it again under its lock, free when the proof still stands).
+	Passphrase roster.Passphrase
 }
 
 // Result reports what Run did. Run returns a non-nil *Result together with
@@ -325,6 +327,15 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	addr := fmt.Sprintf("%s:%d", opts.Host, opts.SSHPort)
 	fullTokenID := opts.TokenOwner + "!" + opts.TokenID
 
+	// The roster passphrase must open what the roster already holds, or a
+	// secret written under it would split the roster. The CLI proved it
+	// before prompting for anything else; this re-check — after the state
+	// checks above, which decrypt nothing and so must not depend on the
+	// passphrase, and before the first decrypt or dial — is free when that
+	// proof stands, and it is the decrypt loadExistingSSHAuth then reuses.
+	if err := opts.Passphrase.Prove(opts.RosterPath, opts.TargetID); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
 	existing, err := loadExistingSSHAuth(opts)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
@@ -543,7 +554,7 @@ func validateOptions(opts *Options) error {
 		return fmt.Errorf("bootstrap: token id is required")
 	case opts.RosterPath == "":
 		return fmt.Errorf("bootstrap: roster path is required")
-	case opts.Passphrase == "":
+	case opts.Passphrase.IsZero():
 		return fmt.Errorf("bootstrap: roster passphrase is required")
 	}
 	return nil
@@ -610,7 +621,7 @@ type existingSSHAuth struct {
 // own code never produced, and re-bootstrapping (rather than reconnecting
 // with an unpinned keypair) is the safer default.
 //
-// Deliberately decrypts ONLY tg.SSH.PrivateKeyEnc via roster.DecryptString
+// Deliberately decrypts ONLY tg.SSH.PrivateKeyEnc (opts.Passphrase.Decrypt)
 // — never tg.Resolve, which unconditionally also decrypts Token.SecretEnc
 // (see roster.Target.Resolve). This call has no use for the token secret,
 // and a target can have both auth types persisted; an unrelated
@@ -631,7 +642,7 @@ func loadExistingSSHAuth(opts Options) (*existingSSHAuth, error) {
 	if tg.SSH == nil || tg.SSH.HostKeyFingerprint == "" {
 		return nil, nil
 	}
-	privateKeyPEM, err := roster.DecryptString(tg.SSH.PrivateKeyEnc, opts.Passphrase)
+	privateKeyPEM, err := opts.Passphrase.Decrypt(tg.SSH.PrivateKeyEnc)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt existing ssh keypair for %q: %w", opts.TargetID, err)
 	}
@@ -1076,7 +1087,7 @@ type ImportOptions struct {
 	// orphaned (still live on PVE, held by no roster).
 	Replace    bool
 	RosterPath string
-	Passphrase string
+	Passphrase roster.Passphrase
 }
 
 // Import puts a token minted outside pveforge into the roster, but only
@@ -1156,6 +1167,13 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 			return nil, fmt.Errorf("import token %s: the roster would refuse the write, so nothing was validated or written: %w", opts.TargetID, err)
 		}
 	}
+	// The passphrase must open what the roster already holds, or the token
+	// would be sealed under a key the rest of the roster cannot share.
+	// Before the validator's network call; free when the command proved it
+	// already, or when the held token above just decrypted under it.
+	if err := opts.Passphrase.Prove(opts.RosterPath, opts.TargetID); err != nil {
+		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+	}
 	sameToken := held.ID == opts.TokenID && held.DecryptErr == nil && held.Secret == opts.Secret
 	if held.ID != "" && !sameToken && !opts.Replace {
 		return nil, fmt.Errorf("import token %s: %w: %s; pass --replace to replace the roster's copy (the held token is not revoked, and stays live on PVE)", opts.TargetID, ErrTokenAlreadyHeld, kvjson.QuoteValue(held.ID))
@@ -1187,6 +1205,9 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	if err := writeTokenAuthFn(opts.RosterPath, opts.TargetID, roster.TokenWrite{TokenID: opts.TokenID, SecretPlaintext: []byte(opts.Secret)}, opts.Passphrase); err != nil {
 		return res, fmt.Errorf("import token %s: write the token to the roster: %w", opts.TargetID, err)
 	}
+	// The write's proof serves this read only if the file holds exactly the
+	// bytes it sealed (a proof is keyed on the armored text); anything else
+	// on disk is really decrypted.
 	back, err := loadHeldToken(bopts)
 	if err != nil || back.ID != opts.TokenID || back.DecryptErr != nil || back.Secret != opts.Secret {
 		return res, fmt.Errorf("import token %s: the roster did not read back the token just written (check it with pveforge roster validate)", opts.TargetID)

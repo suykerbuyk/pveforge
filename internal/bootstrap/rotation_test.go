@@ -31,6 +31,29 @@ type seeded struct {
 	key  []byte
 }
 
+// resealUnder replaces the secret armored in the roster file at path with
+// plain encrypted under pass, editing the file's bytes directly. The roster
+// writers refuse to split a roster (roster.ErrWrongPassphrase), so a test
+// that needs one — a secret the run's passphrase cannot open — builds it
+// by hand.
+func resealUnder(t *testing.T, path, armored string, plain []byte, pass string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(data, []byte(armored)) != 1 {
+		t.Fatalf("the secret to reseal is not in %s exactly once", path)
+	}
+	sealed, err := roster.EncryptString(plain, pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.Replace(data, []byte(armored), []byte(sealed), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func seedRoster(t *testing.T, tokenID, tokenPassphrase string) seeded {
 	t.Helper()
 	path := newTestRoster(t, "")
@@ -48,11 +71,15 @@ func seedRoster(t *testing.T, tokenID, tokenPassphrase string) seeded {
 		t.Fatalf("WriteSSHAuth: %v", err)
 	}
 	if tokenID != "" {
-		if tokenPassphrase == "" {
-			tokenPassphrase = opts.Passphrase
-		}
-		if err := roster.WriteTokenAuth(path, opts.TargetID, roster.TokenWrite{TokenID: tokenID, SecretPlaintext: []byte("held-secret")}, tokenPassphrase); err != nil {
+		if err := roster.WriteTokenAuth(path, opts.TargetID, roster.TokenWrite{TokenID: tokenID, SecretPlaintext: []byte("held-secret")}, opts.Passphrase); err != nil {
 			t.Fatalf("WriteTokenAuth: %v", err)
+		}
+		if tokenPassphrase != "" {
+			r, err := roster.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resealUnder(t, path, r.Find(opts.TargetID).Token.SecretEnc, []byte("held-secret"), tokenPassphrase)
 		}
 	}
 	return seeded{path: path, opts: opts, key: kp.PrivateKeyPEM}
@@ -82,7 +109,7 @@ func persistedSecret(t *testing.T, s seeded) string {
 	if tok == nil {
 		t.Fatal("no token persisted")
 	}
-	b, err := roster.DecryptString(tok.SecretEnc, s.opts.Passphrase)
+	b, err := roster.DecryptString(tok.SecretEnc, "roster-pass")
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -570,7 +597,7 @@ func TestRun_R6gb_DryRunFailureAbortsBeforeTokenCommands(t *testing.T) {
 // append would duplicate the key) aborts before any token command.
 func TestRun_R6gdup_RealDryRunRefusesAnUnwritableLayout(t *testing.T) {
 	s := seedRoster(t, "", "")
-	armored, err := roster.EncryptString([]byte("held-secret"), s.opts.Passphrase)
+	armored, err := roster.EncryptString([]byte("held-secret"), "roster-pass")
 	if err != nil {
 		t.Fatal(err)
 	}

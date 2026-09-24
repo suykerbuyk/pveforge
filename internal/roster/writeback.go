@@ -37,11 +37,16 @@ type SSHWrite struct {
 //
 // This is the only place bootstrap code should ever touch the roster's
 // token fields — it never hand-assembles TOML text itself.
-func WriteTokenAuth(path, targetID string, w TokenWrite, passphrase string) error {
+//
+// passphrase is proven against the roster under its file lock before
+// anything is written (Passphrase.prove): a passphrase that does not open a
+// secret the roster already holds is ErrWrongPassphrase, and the file is
+// left untouched.
+func WriteTokenAuth(path, targetID string, w TokenWrite, passphrase Passphrase) error {
 	if w.TokenID == "" {
 		return fmt.Errorf("write token auth for %q: token id is required", targetID)
 	}
-	secretEnc, err := EncryptString(w.SecretPlaintext, passphrase)
+	secretEnc, err := EncryptString(w.SecretPlaintext, passphrase.s)
 	if err != nil {
 		return fmt.Errorf("encrypt token secret for %q: %w", targetID, err)
 	}
@@ -49,17 +54,22 @@ func WriteTokenAuth(path, targetID string, w TokenWrite, passphrase string) erro
 		{key: "id", value: w.TokenID},
 		{key: "secret_enc", value: secretEnc, literal: true},
 	}
-	return spliceSubtable(path, targetID, "token", fields)
+	if err := spliceSubtable(path, targetID, "token", fields, passphrase); err != nil {
+		return err
+	}
+	passphrase.remember(secretEnc, w.SecretPlaintext)
+	return nil
 }
 
 // WriteSSHAuth encrypts w.PrivateKeyPlaintext and splices a [targets.ssh]
 // block for the target identified by targetID into the roster at path.
-// Same in-place-vs-append and non-clobbering behavior as WriteTokenAuth.
-func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase string) error {
+// Same in-place-vs-append, non-clobbering and passphrase-proving behavior
+// as WriteTokenAuth.
+func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase Passphrase) error {
 	if w.User == "" {
 		return fmt.Errorf("write ssh auth for %q: user is required", targetID)
 	}
-	keyEnc, err := EncryptString(w.PrivateKeyPlaintext, passphrase)
+	keyEnc, err := EncryptString(w.PrivateKeyPlaintext, passphrase.s)
 	if err != nil {
 		return fmt.Errorf("encrypt ssh private key for %q: %w", targetID, err)
 	}
@@ -69,7 +79,11 @@ func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase string) error {
 		{key: "host_key_fingerprint", value: w.HostKeyFingerprint},
 		{key: "private_key_enc", value: keyEnc, literal: true},
 	}
-	return spliceSubtable(path, targetID, "ssh", fields)
+	if err := spliceSubtable(path, targetID, "ssh", fields, passphrase); err != nil {
+		return err
+	}
+	passphrase.remember(keyEnc, w.PrivateKeyPlaintext)
+	return nil
 }
 
 // AppendTarget appends a new [[targets]] block for t to the roster at path,
@@ -459,8 +473,11 @@ func quoteTOMLBasicString(s string) string {
 }
 
 // spliceSubtable performs the full locked read-modify-write cycle for one
-// [targets.<subKey>] block.
-func spliceSubtable(path, targetID, subKey string, fields []field) error {
+// [targets.<subKey>] block, whose fields hold a secret encrypted under
+// passphrase: it proves passphrase against the roster as read under the
+// lock, so a secret another process wrote since ProvePassphrase is judged
+// too, and a proof still standing costs no derivation.
+func spliceSubtable(path, targetID, subKey string, fields []field, passphrase Passphrase) error {
 	lock := flock.New(path + ".lock")
 	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -476,6 +493,13 @@ func spliceSubtable(path, targetID, subKey string, fields []field) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read roster %s: %w", path, err)
+	}
+	current, err := Decode(data)
+	if err != nil {
+		return fmt.Errorf("read roster %s: %w", path, err)
+	}
+	if err := passphrase.prove(current, targetID); err != nil {
+		return fmt.Errorf("write %s for %q: %w", subKey, targetID, err)
 	}
 
 	newData, err := applySubtableSplice(data, targetID, subKey, fields)
