@@ -250,7 +250,12 @@ it up with the UPID printed at dispatch:
 pveforge locks, that releases the lock before the task finishes.
 
 A task id nested inside an object (rather than returned as the bare
-payload) is not recognized and is not waited on.`, pve.TaskWaitCeiling)
+payload) is not recognized and is not waited on.
+
+A path at or below /access (users, groups, tokens, ACLs, roles, realms,
+passwords) is refused before anything is sent, however it is spelled: the
+roster's token never writes principals or ACLs. Use user ensure, group
+ensure and acl grant, which write them as root over SSH, or pveum.`, pve.TaskWaitCeiling)
 
 // validateAPIWaitFlags rejects wait-flag combinations that have no honest
 // meaning, before anything is dispatched. timeoutSet is whether

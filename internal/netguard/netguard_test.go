@@ -318,7 +318,7 @@ func TestInstall_ArmsAndRestoresDefaultTransport(t *testing.T) {
 
 // TestInstall_PreservesTheTransportFieldsPveDependsOn pins an interaction
 // that is easy to break and whose breakage would surface a long way from
-// here: internal/pve/client.go:103 Clone()s this global for its InsecureTLS
+// here: newHTTPClient (internal/pve/client.go) Clone()s this global for its InsecureTLS
 // path, and internal/pve/client_test.go's
 // TestNewClient_InsecureTLS_PreservesProxyFromEnvironment requires the result
 // to carry a non-nil Proxy.

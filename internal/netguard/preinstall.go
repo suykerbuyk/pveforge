@@ -20,8 +20,8 @@ import (
 // first time someone adds one.
 //
 // pve.NewClient(InsecureTLS: true) is the one that matters most: it Clone()s
-// http.DefaultTransport at CONSTRUCTION time (internal/pve/client.go:103, and
-// go-proxmox's ensureTransport does the same), so a client built before
+// http.DefaultTransport at CONSTRUCTION time (newHTTPClient in internal/pve/client.go, whose
+// client go-proxmox shares), so a client built before
 // Install carries the PRISTINE dialer and is invisible to Seam A forever
 // after — no swap performed later can reach it.
 var dialerSeedCalls = map[string]bool{

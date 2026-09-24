@@ -143,6 +143,9 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newDiscoverCmd())
 	root.AddCommand(newAPICmd())
 	root.AddCommand(newExecCmd())
+	root.AddCommand(newUserCmd())
+	root.AddCommand(newGroupCmd())
+	root.AddCommand(newACLCmd())
 	root.AddCommand(newSchemaCmd())
 	return root
 }

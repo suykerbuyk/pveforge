@@ -50,6 +50,12 @@ pveforge locks, that releases the lock before the task finishes.
 A task id nested inside an object (rather than returned as the bare
 payload) is not recognized and is not waited on.
 
+.PP
+A path at or below /access (users, groups, tokens, ACLs, roles, realms,
+passwords) is refused before anything is sent, however it is spelled: the
+roster's token never writes principals or ACLs. Use user ensure, group
+ensure and acl grant, which write them as root over SSH, or pveum.
+
 
 .SH OPTIONS
 \fB--data\fP=[]

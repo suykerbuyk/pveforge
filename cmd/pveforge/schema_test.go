@@ -107,6 +107,25 @@ func TestNewSchemaCmd_KnownCommandMutationLevels(t *testing.T) {
 		t.Errorf("exec mutation = %q, want %q", execCmd.Mutation, mutationDestructive)
 	}
 
+	// 6a: the Ensures are reversible, routine changes; a grant is
+	// destructive (what a widened grant was used for cannot be undone).
+	for _, c := range []struct {
+		path []string
+		want string
+	}{
+		{[]string{"user", "ensure"}, mutationMutating},
+		{[]string{"group", "ensure"}, mutationMutating},
+		{[]string{"acl", "grant"}, mutationDestructive},
+	} {
+		got, ok := findRootPath(t, schema, c.path...)
+		if !ok {
+			t.Fatalf("%v not found in schema", c.path)
+		}
+		if got.Mutation != c.want {
+			t.Errorf("%v mutation = %q, want %q", c.path, got.Mutation, c.want)
+		}
+	}
+
 	schemaCmd, ok := findSubcommand(schema, "schema")
 	if !ok {
 		t.Fatal("schema not found in schema")

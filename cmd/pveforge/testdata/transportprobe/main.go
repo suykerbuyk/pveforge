@@ -70,7 +70,7 @@ func roundTrips(u string) error {
 // viaDefaultTransport matches net/http.DefaultTransport. The global is a
 // RoundTripper, so this opens a connection while naming neither Client nor
 // Transport — the Sel is DefaultTransport, which the Transport target does
-// not match. internal/pve/client.go:103 clones this same global in-boundary.
+// not match. newHTTPClient (internal/pve/client.go) clones this same global in-boundary.
 func viaDefaultTransport(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(req)
 }
