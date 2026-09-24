@@ -719,11 +719,12 @@ func TestCreateSnapshot_ReservedNameHoldsWhenCurrentLooksLikeASnapshot(t *testin
 }
 
 // TestCreateSnapshot_ServerErrorBodyIsVisible is the regression test for
-// the design reason CreateSnapshot writes through RawRequest rather than
-// go-proxmox's own VirtualMachine.NewSnapshot: go-proxmox's
-// handleResponse discards the response body entirely on HTTP 500/501
-// (proxmox.go:446-449), which is exactly the status PVE uses for most
-// create-time rejections. PVE's own text must reach the caller.
+// a design reason CreateSnapshot writes through RawRequest rather than
+// go-proxmox's own VirtualMachine.NewSnapshot: go-proxmox's error for an
+// HTTP 500/501 has only the status line as its text (through
+// v0.8.2-pveforge.0 handleResponse discarded the body outright), and 500
+// is the status PVE uses for most create-time rejections. PVE's own text
+// must reach the caller.
 func TestCreateSnapshot_ServerErrorBodyIsVisible(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -1701,7 +1702,7 @@ func TestNewerSnapshots_TargetAbsentFromValidListIsNotFound(t *testing.T) {
 // TestCreateSnapshot_ServerErrorBodyIsVisible for the rollback POST: a 500
 // from PVE's rollback endpoint fails the call, and PVE's own text reaches
 // the caller — the reason the POST goes through RawRequest rather than
-// go-proxmox's body-discarding handleResponse. Mutant killed: the POST's
+// go-proxmox, whose error text is only the status line. Mutant killed: the POST's
 // error branch replaced by `return nil`, which reported a rejected rollback
 // as a successful one.
 func TestRollback_ServerErrorBodyIsVisible(t *testing.T) {

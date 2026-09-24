@@ -78,8 +78,9 @@ func isPseudoEntryName(name string) bool {
 // Goes through c.pc.Get rather than RawRequest — this is a plain read, and
 // reads in this package go through go-proxmox while writes go through
 // RawRequest (see rawrequest.go's own doc comment for why the write path
-// is separate; the 500/501 body-discarding bug that forces it only matters
-// where PVE's diagnostic text is the point).
+// is separate; go-proxmox's error text being only the HTTP status line,
+// which is what forces it, only matters where PVE's diagnostic text is the
+// point).
 //
 // Decodes into go-proxmox's own *proxmox.VirtualMachineSnapshot for the
 // read side only. That struct carries an unexported client field plus
@@ -234,11 +235,12 @@ func (e *ErrReservedSnapshotName) Error() string {
 // VirtualMachine.NewSnapshot, for two independent reasons: NewSnapshot
 // (virtual_machine.go:868) posts only {"snapname": name} and has no
 // parameter for vmstate or description at all, so it structurally cannot
-// send the one parameter this function considers load-bearing; and it
-// routes through handleResponse (proxmox.go:446-449), which discards the
-// response body entirely on HTTP 500/501 — the statuses PVE uses for most
-// create-time rejections — the same swallow every other mutating
-// primitive in this package already routes around.
+// send the one parameter this function considers load-bearing; and its
+// error for a non-2xx — 500 being the status PVE uses for most create-time
+// rejections — has only the HTTP status line as its text, whose reason
+// phrase HTTP/2 erases (through v0.8.2-pveforge.0 handleResponse
+// discarded the body outright), where RawRequest's error carries PVE's own
+// text, as for every other mutating primitive in this package.
 //
 // The order of operations matters and is not incidental:
 //
@@ -577,8 +579,8 @@ func (c *Client) NewerSnapshots(ctx context.Context, node string, vmid int, targ
 //  2. NewerSnapshots — refuse with *ErrNotNewestSnapshot if non-empty,
 //     WITHOUT calling PVE's rollback endpoint at all.
 //  3. POST .../snapshot/{name}/rollback through RawRequest (not go-proxmox's
-//     VirtualMachineSnapshot.Rollback, which routes through the
-//     body-discarding handleResponse), then WaitForTask on the returned UPID.
+//     VirtualMachineSnapshot.Rollback, whose error text is only the HTTP
+//     status line), then WaitForTask on the returned UPID.
 //
 // There is no post-verify beyond WaitForTask's own exit-status check
 // (*TaskFailedError), deliberately. The only list-observable trace of a

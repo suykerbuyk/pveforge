@@ -22,12 +22,15 @@ import (
 // Deliberately NOT built on go-proxmox's own VirtualMachine.Clone
 // (virtual_machine.go:572), for two independent reasons:
 //
-//  1. It routes through v.client.Post, and go-proxmox's handleResponse
-//     (proxmox.go:446-449) discards the response body entirely on HTTP
-//     500/501 — exactly the statuses PVE uses for a clone-time rejection
-//     (a newid collision, an incompatible storage target, a missing
-//     snapshot name). Losing that text would defeat the whole reason this
-//     project carries its own raw write path (RawRequest's doc comment).
+//  1. It routes through v.client.Post. Through v0.8.2-pveforge.0
+//     go-proxmox's handleResponse discarded the response body on HTTP
+//     500/501, the statuses PVE uses for a clone-time rejection (a newid
+//     collision, an incompatible storage target, a missing snapshot
+//     name); since .1 it keeps it in a *proxmox.StatusError, but that
+//     error's text is still only the status line, whose reason phrase
+//     HTTP/2 erases, while RawRequest's error carries PVE's own text. And
+//     Post JSON-encodes the parameters, where RawRequest form-encodes them
+//     like every other write path here (RawRequest's doc comment).
 //  2. Whenever params.NewID == 0 it calls v.client.Cluster(ctx) +
 //     cluster.NextID(ctx) internally — an incidental extra /cluster/status
 //     round trip. This project always pre-resolves the target VMID (via

@@ -13,14 +13,15 @@ import (
 // Regression tests for pveforge-read-guards-unverifiable (P1 of
 // pveforge-read-status-swallow). go-proxmox's handleResponse decodes a
 // {"data":null} body into the target's zero value with a nil error — for a
-// 200, and on today's pin also for 404/502/503/504/595-599 — so a read that
-// PVE never actually answered looks like a real, empty answer. Every guard
-// under test turns such a payload into ErrUnverifiableRead.
+// 200, and before pveforge-status-error-pin-bump also for
+// 404/502/503/504/595-599 — so a read that PVE never actually answered
+// looks like a real, empty answer. Every guard under test turns such a
+// payload into ErrUnverifiableRead.
 //
-// Fixtures deliberately serve 200 {"data":null} rather than a 595: once
-// pveforge-status-error-pin-bump lands, a non-2xx becomes a transport error
-// before any of these guards runs, and a guard test built on one would stay
-// green with its guard deleted. The single exception is the cause-agnostic
+// Fixtures deliberately serve 200 {"data":null} rather than a 595: since
+// pveforge-status-error-pin-bump, a non-2xx is a *proxmox.StatusError
+// before any of these guards runs, and a guard test built on one would
+// stay green with its guard deleted. The single exception is the cause-agnostic
 // headline replay of the measured incident,
 // TestOrphanVolumes_Swallowed595SharedStatusRefuses.
 

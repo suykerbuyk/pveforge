@@ -52,13 +52,16 @@ func (c *Client) SetVMConfigField(ctx context.Context, node string, vmid int, fi
 // guarantee the caller asked for — see that method's own doc comment.
 //
 // This makes its own HTTP request rather than going through go-proxmox's
-// Client.Req / VirtualMachine.Config(Sync): go-proxmox's handleResponse
-// discards the response body entirely on HTTP 500/501
-// (`return errors.New(res.Status)`, body never read) — and that is
-// exactly the status Proxmox uses for the root-only-field rejection this
-// project is built around (verified: HTTP 500, "only root can set 'args'
-// config"). Going through go-proxmox for this call would mean that text
-// could never be surfaced. Everything else on Client (reads, ListNodes)
+// Client.Req / VirtualMachine.Config(Sync). Through v0.8.2-pveforge.0
+// go-proxmox's handleResponse discarded the response body on HTTP 500/501
+// (`return errors.New(res.Status)`, body never read), and 500 is exactly
+// the status Proxmox uses for the root-only-field rejection this project
+// is built around (verified: HTTP 500, "only root can set 'args'
+// config"). Since .1 it returns a *proxmox.StatusError that keeps the
+// body, but that error's text is still only the status line, whose reason
+// phrase HTTP/2 erases, where this method's error carries PVE's text —
+// which sshexec.IsRootOnlyWriteError matches; and go-proxmox JSON-encodes
+// the write, where this form-encodes it. Everything else on Client (reads, ListNodes)
 // keeps using go-proxmox unchanged; only this one write path is raw.
 //
 // On a non-2xx response, the error includes the response body TRIMMED but

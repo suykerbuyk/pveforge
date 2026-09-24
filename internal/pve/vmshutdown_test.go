@@ -110,8 +110,9 @@ func TestShutdownVM_RequiresNode(t *testing.T) {
 
 // TestShutdownVM_PropagatesPVEErrorText is the RawRequest-not-go-proxmox
 // justification (hazard D) made observable: PVE answers a shutdown-time
-// rejection with HTTP 500, the exact status go-proxmox's handleResponse
-// throws the body away on, so the diagnostic text surviving here is the
+// rejection with HTTP 500, whose body go-proxmox's handleResponse threw
+// away through v0.8.2-pveforge.0 and since .1 keeps out of its error text
+// (the status line only), so the diagnostic text surviving here is the
 // evidence that this primitive does not route through it.
 func TestShutdownVM_PropagatesPVEErrorText(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {

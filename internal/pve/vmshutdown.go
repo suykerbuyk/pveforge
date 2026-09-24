@@ -63,12 +63,12 @@ import (
 //
 // Goes through RawRequest rather than go-proxmox's own
 // VirtualMachine.Shutdown (virtual_machine.go:402), for the same reason
-// CreateVM, StopVM, and DestroyVM do: go-proxmox's handleResponse
-// (proxmox.go:446-449) discards the response body entirely on HTTP
-// 500/501 — exactly the statuses PVE uses for a shutdown-time rejection (a
-// VM that is locked by a backup, a VM that isn't running) — and this
-// project's raw write path exists precisely so that diagnostic text
-// reaches the caller verbatim.
+// StopVM and DestroyVM do: PVE answers a shutdown-time rejection (a VM
+// that is locked by a backup, a VM that isn't running) with a 500, and
+// that diagnostic text must reach the caller verbatim. go-proxmox's error
+// for a non-2xx, a *proxmox.StatusError since v0.8.2-pveforge.1 (through
+// .0 the body of a 500/501 was discarded outright), has only the HTTP
+// status line as its text, whose reason phrase HTTP/2 erases.
 //
 // Returns the UPID of the PVE task the shutdown call kicks off — a
 // graceful shutdown is always asynchronous on PVE's side, since it waits

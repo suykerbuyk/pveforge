@@ -25,14 +25,15 @@ import (
 // the caller is expected to hand this straight to WaitForTask.
 //
 // Goes through RawRequest — this project's own raw-HTTP write path — for
-// the same reason RawRequest and vmconfig.go's SetVMConfigFieldCAS do:
-// go-proxmox's handleResponse discards the response body entirely on HTTP
-// 500/501, which is exactly the status PVE tends to use for a create-time
-// rejection (a vmid collision, an invalid parameter, an out-of-space
-// storage target). Losing that text here would defeat the entire reason
-// this project has its own raw write path: PVE's own diagnostic text is
-// supposed to reach the caller unparsed and verbatim (RawRequest's own
-// doc comment).
+// the same reasons RawRequest and vmconfig.go's SetVMConfigFieldCAS do
+// (RawRequest's own doc comment): go-proxmox's error for a non-2xx, a
+// *proxmox.StatusError since v0.8.2-pveforge.1, has only the HTTP status
+// line as its text, whose reason phrase HTTP/2 erases, while RawRequest's
+// error carries PVE's own text — and 500 is the status PVE tends to use
+// for a create-time rejection (a vmid collision, an invalid parameter, an
+// out-of-space storage target), whose text is supposed to reach the
+// caller unparsed and verbatim; and go-proxmox JSON-encodes the create
+// parameters, where RawRequest form-encodes them.
 func (c *Client) CreateVM(ctx context.Context, node string, vmid int, params url.Values) (string, error) {
 	if node == "" {
 		return "", fmt.Errorf("create vm %d: node is required", vmid)

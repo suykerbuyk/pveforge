@@ -104,12 +104,13 @@ func TestCreateVM_RequiresNode(t *testing.T) {
 }
 
 // TestCreateVM_ServerErrorBodyIsVisible is a real regression test proving
-// the RawRequest-based approach avoids go-proxmox's own body-swallowing
-// bug on HTTP 500/501 (handleResponse's `return errors.New(res.Status)`,
-// body never read) — the whole design reason CreateVM goes through
-// RawRequest rather than go-proxmox's own VM-create call. It checks the
-// response BODY text is present in the returned error, not just the HTTP
-// status.
+// the RawRequest-based approach puts PVE's text for an HTTP 500/501 in the
+// returned error, where go-proxmox's error text is only the status line
+// (and through v0.8.2-pveforge.0 handleResponse's
+// `return errors.New(res.Status)` never read the body at all) — a design
+// reason CreateVM goes through RawRequest rather than go-proxmox's own
+// VM-create call. It checks the response BODY text is present in the
+// returned error, not just the HTTP status.
 func TestCreateVM_ServerErrorBodyIsVisible(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
