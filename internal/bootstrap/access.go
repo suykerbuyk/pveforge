@@ -117,7 +117,10 @@ func (a *RootAccess) root(ctx context.Context) (SSHSession, error) {
 }
 
 // pveum runs one command as root and returns its stdout: a pveum command,
-// or ClusterGuests' one pvesh read. It is RootAccess's only command runner.
+// or ClusterGuests' one pvesh read. The only other commands root runs are
+// the role list (allRolePrivs, through runJSONArray) and the inventory's
+// getent (rootOSAccounts), which need the raw result; the sites that take
+// the session are pinned by TestRootSession_OnlyAtItsSites.
 func (a *RootAccess) pveum(ctx context.Context, cmd string) (string, error) {
 	s, err := a.root(ctx)
 	if err != nil {
@@ -168,6 +171,11 @@ func (a *RootAccess) ListUsers(ctx context.Context) ([]pve.AccessUser, error) {
 			return users, err
 		}
 	}
+	return a.rootUsers(ctx)
+}
+
+// rootUsers reads every user, with their groups, as root.
+func (a *RootAccess) rootUsers(ctx context.Context) ([]pve.AccessUser, error) {
 	out, err := a.pveum(ctx, "pveum user list --full 1 --output-format json")
 	if err != nil {
 		return nil, err
@@ -464,6 +472,9 @@ func (a *RootAccess) allRolePrivs(ctx context.Context) (map[string][]string, err
 	}
 	out := make(map[string][]string, len(roles))
 	for _, r := range roles {
+		if _, dup := out[r.RoleID]; dup {
+			return nil, fmt.Errorf("role list: role %s is listed twice: %w", r.RoleID, pve.ErrUnverifiableRead)
+		}
 		privs, err := parseRolePrivs(r.Privs)
 		if err != nil {
 			return nil, fmt.Errorf("role %s: %w", r.RoleID, err)
@@ -520,11 +531,7 @@ func (a *RootAccess) checkGroupNotSelf(ctx context.Context, groupID string) erro
 			return fmt.Errorf("%w: group %s holds %s, which owns the roster's token %s", ErrSelfGrant, groupID, u, a.opts.OwnToken)
 		}
 	}
-	out, err := a.pveum(ctx, "pveum user list --full 1 --output-format json")
-	if err != nil {
-		return err
-	}
-	users, err := pve.ParseAccessUsers([]byte(out))
+	users, err := a.rootUsers(ctx)
 	if err != nil {
 		return err
 	}

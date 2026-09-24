@@ -20,7 +20,9 @@ import (
 // `pveforge user ensure`, `group ensure` and `acl grant` (task
 // pveforge-pveum-user-group-acl-ops, 6a): principals and ACLs, written as
 // root over SSH with pveum so the roster's token never needs User.Modify or
-// Permissions.Modify. See bootstrap.RootAccess for the transport.
+// Permissions.Modify. See bootstrap.RootAccess for the transport. And
+// `access inventory` (task pveforge-pveum-inventory-read, 6b): the same
+// lists, read as root, joined with the node's accounts.
 
 // newAccessTransport is the SSH transport the access commands dial root
 // with; a test replaces it.
@@ -37,18 +39,20 @@ var escalatingList = strings.Join(bootstrap.EscalatingPrivileges, ", ")
 const noSSHKeyAccessUsage = "connect as root with the PVE password (" + pvePasswordEnvVar + ", else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key"
 
 // openRootAccess loads targetID and returns its RootAccess, dialing nothing
-// yet, and a func that closes whatever it opened.
-func openRootAccess(cmd *cobra.Command, targetID string, noSSHKey bool) (*bootstrap.RootAccess, *roster.Target, func(), error) {
-	a, t, _, closeAll, err := openRootAccessAndREST(cmd, targetID, noSSHKey)
+// yet, and a func that closes whatever it opened. tokenView gives it the
+// roster token's REST view and identity, for the Ensures' reads and the
+// self checks; without it the token's secret is never decrypted.
+func openRootAccess(cmd *cobra.Command, targetID string, noSSHKey, tokenView bool) (*bootstrap.RootAccess, *roster.Target, func(), error) {
+	a, t, _, closeAll, err := openRootAccessAndREST(cmd, targetID, noSSHKey, tokenView)
 	return a, t, closeAll, err
 }
 
 // openRootAccessAndREST is openRootAccess that also returns the token's
-// RoutedClient it built (nil when the target holds no token), so a command
-// that needs both root and the REST client loads the roster and resolves
-// its passphrase once. A target that holds no SSH key is refused, unless
-// noSSHKey, before the passphrase is asked for.
-func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey bool) (*bootstrap.RootAccess, *roster.Target, *pve.RoutedClient, func(), error) {
+// RoutedClient it built (nil when the target holds no token, or tokenView
+// is false), so a command that needs both root and the REST client loads
+// the roster and resolves its passphrase once. A target that holds no SSH
+// key is refused, unless noSSHKey, before the passphrase is asked for.
+func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenView bool) (*bootstrap.RootAccess, *roster.Target, *pve.RoutedClient, func(), error) {
 	rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -71,7 +75,7 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey bool) (
 	opts := bootstrap.AccessOptions{Addr: net.JoinHostPort(t.Host, accessSSHPort)}
 	closeREST := func() {}
 	var rest *pve.RoutedClient
-	if t.Token != nil {
+	if tokenView && t.Token != nil {
 		rc, err := pve.NewRoutedClient(t, pass)
 		if err != nil {
 			return nil, nil, nil, nil, err
@@ -191,7 +195,7 @@ pveforge out of the target.`,
 			if err != nil {
 				return err
 			}
-			access, t, closeAll, err := openRootAccess(cmd, targetID, noSSHKey)
+			access, t, closeAll, err := openRootAccess(cmd, targetID, noSSHKey, true)
 			if err != nil {
 				return err
 			}
@@ -275,7 +279,7 @@ are set on its users (user ensure --group).`,
 			if err != nil {
 				return err
 			}
-			access, _, closeAll, err := openRootAccess(cmd, targetID, noSSHKey)
+			access, _, closeAll, err := openRootAccess(cmd, targetID, noSSHKey, true)
 			if err != nil {
 				return err
 			}
@@ -354,7 +358,7 @@ outside pveforge.`,
 			if err != nil {
 				return err
 			}
-			access, _, closeAll, err := openRootAccess(cmd, args[0], noSSHKey)
+			access, _, closeAll, err := openRootAccess(cmd, args[0], noSSHKey, true)
 			if err != nil {
 				return err
 			}
@@ -388,5 +392,75 @@ outside pveforge.`,
 	// what is done with it cannot be undone; an escalating role hands out
 	// root-equivalence.
 	markDestructive(cmd)
+	return cmd
+}
+
+func newAccessCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "access", Short: "Read PVE's users, groups and ACLs (as root over SSH)"}
+	cmd.AddCommand(newAccessInventoryCmd())
+	return cmd
+}
+
+// accessInventoryResult is access inventory's output: the target, then the
+// inventory's own fields.
+type accessInventoryResult struct {
+	Target string `json:"target"`
+	*bootstrap.AccessInventory
+}
+
+func newAccessInventoryCmd() *cobra.Command {
+	var noSSHKey bool
+	cmd := &cobra.Command{
+		Use:   "inventory <target-id>",
+		Short: "List every user, group and ACL entry, and each @pam user's account on the node",
+		Long: `List every PVE user, group and ACL entry on a target, read as root over SSH
+with pveum, never with the roster's API token: a token's view is filtered by
+its privileges, and a shorter list would look complete. Nothing is written.
+
+  - users: each user's realm, state, groups, and the ACL entries it holds,
+    both those naming it and, marked "via", those of each group it is in.
+    A @pam user is looked up on the node (getent passwd): os_account_status
+    is "found", with the account, or "absent"; any other realm is "not-pam".
+  - groups: each group's members (null when PVE's answer did not list them:
+    unknown, not none) and the ACL entries naming it.
+  - acls: every ACL entry, API tokens' included; a token appears only here.
+
+Every ACL entry whose role confers an escalating privilege (` + escalatingList + `)
+lists those privileges under "escalating". Effective permissions (paths,
+propagation and roles combined) are not computed: see pveum user permissions.
+
+A user's groups, and so the entries marked "via", come from the user list's
+groups field, which every user must carry, cross-checked against each
+group's members both ways: if the two lists disagree, or a field is
+missing, the inventory fails rather than show a user holding less than it
+does. The node's accounts are looked up with getent passwd, for @pam users
+only; an account no PVE user names is not listed. A name getent would read
+as a UID (digits, optionally after '+') cannot be looked up by name: it is
+"unchecked". The roster's API token is not used or decrypted.
+
+The lists are read one after another with no lock held: a change made while
+they are read, by pveforge or anyone else, can show half-applied.`,
+		Args: cobra.ExactArgs(1),
+	}
+	resolveFormat := addOutputFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		format, err := resolveFormat()
+		if err != nil {
+			return err
+		}
+		access, _, closeAll, err := openRootAccess(cmd, args[0], noSSHKey, false)
+		if err != nil {
+			return err
+		}
+		defer closeAll()
+		inv, err := access.Inventory(cmd.Context())
+		if err != nil {
+			return err
+		}
+		return kvjson.Render(cmd.OutOrStdout(), format, accessInventoryResult{Target: args[0], AccessInventory: inv})
+	}
+	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	addRosterFlag(cmd)
+	markSafe(cmd)
 	return cmd
 }

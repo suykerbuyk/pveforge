@@ -85,8 +85,10 @@ func Render(w io.Writer, f Format, v interface{}) error {
 		if err := json.Indent(&pretty, compact, "", "  "); err != nil {
 			return fmt.Errorf("render: indent: %w", err)
 		}
-		pretty.WriteByte('\n')
-		_, err := w.Write(pretty.Bytes())
+		// encoding/json escapes C0 and U+2028/9 but writes DEL and C1 raw;
+		// escaped here as kv does, the text is still valid JSON decoding
+		// to the same value, and a terminal never receives a raw C1.
+		_, err := io.WriteString(w, escapeC1(pretty.String())+"\n")
 		return err
 	case KV:
 		return renderKV(w, compact)
@@ -218,7 +220,7 @@ func quoteString(s string) string {
 
 // escapeC1 replaces every rune in U+007F-U+009F with its \u00XX JSON
 // escape. It is applied only to JSON text (a quoted string, or a nested
-// value's compact JSON), where those runes can occur only inside string
+// value's compact JSON, or Render's indented JSON), where those runes can occur only inside string
 // literals, so the result is still valid JSON that decodes to the same
 // value, and no line splitter finds a break in it.
 func escapeC1(s string) string {

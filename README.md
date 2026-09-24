@@ -45,6 +45,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `exec <target> -- <command>` | Run a command with the target's API token in its environment |
 | `user ensure`, `group ensure` | Create a PVE user or group, or bring it to the state asked for (as root over SSH) |
 | `acl grant` | Grant a role on a path to a user, group or token (as root over SSH) |
+| `access inventory` | List every user, group and ACL entry, and each `@pam` user's account on the node (read as root over SSH) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
 | `vm snapshot list` / `create` / `delete` / `rollback` | List, create and delete a VM's snapshots; roll back to the newest one and prove the guest came back |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
@@ -88,7 +89,7 @@ not.
 |---|---|
 | `PVEFORGE_ROSTER` | Roster path, when `--roster` is not given |
 | `PVEFORGE_ROSTER_PASSPHRASE` | The roster passphrase; without it, a terminal prompt (never for `roster import-token`, whose stdin is the token secret). Removed from `exec`'s command's environment |
-| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password, and root's password for `user ensure`, `group ensure` and `acl grant` with `--no-ssh-key`; without it, a terminal prompt. Removed from `exec`'s command's environment |
+| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password, and root's password for `user ensure`, `group ensure`, `acl grant` and `access inventory` with `--no-ssh-key`; without it, a terminal prompt. Removed from `exec`'s command's environment |
 | `PVEFORGE_PVE_AUTHORIZATION` | Set by `exec` in its command's environment, never read by pveforge: the `Authorization` header value `PVEAPIToken=<token id>=<secret>` |
 
 ## Bootstrap
@@ -208,6 +209,22 @@ that run, as `bootstrap --no-ssh-key` does.
   `acl grant`, or either against changes made outside pveforge. Review with
   `pveum acl list` after changing a group's grants.
 - Nothing here deletes a user or group or revokes a grant: use `pveum`.
+- `access inventory` lists every user, group and ACL entry, read as root
+  (never with the token, whose view is filtered by its privileges and can be
+  a shorter list that looks complete; the token is not even decrypted).
+  Each user carries the ACL entries naming it and, marked `via`, those of
+  each group it is in. Those groups come from the user list's `groups`
+  field, which every user must carry, cross-checked both ways against each
+  group's members: if the lists disagree, the inventory fails rather than
+  show a user holding less than it does. API tokens appear only in the
+  top-level `acls`. Every entry whose role confers an escalating privilege
+  lists them under `escalating`.
+- Each `@pam` user is looked up on the node with `getent passwd`, run as
+  root: `os_account_status` is `found`, `absent`, `not-pam`, or `unchecked`
+  for a name getent would read as a UID (digits, optionally after `+`).
+  Accounts on the node that no PVE user names are not listed. Effective
+  permissions are not computed (`pveum user permissions` does that), and
+  the lists are read without a lock, one after another.
 - pveforge never writes PVE's `/access` API with the roster's token. Every
   request it makes passes through one HTTP transport that refuses any method
   but GET or HEAD on `/access` or below it, before the request is sent; that

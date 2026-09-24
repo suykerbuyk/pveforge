@@ -684,3 +684,26 @@ func TestParseJSONFields_StillRefusesNull(t *testing.T) {
 		t.Fatal("ParseJSONFields accepted a null value")
 	}
 }
+
+// S2: -o json never writes DEL or a C1 control raw; each is a \u00XX
+// escape, and the output still decodes to the same value.
+func TestRender_JSON_EscapesDELAndC1(t *testing.T) {
+	in := "a\u007fb\u0085c\u009bd\u0080e"
+	var buf bytes.Buffer
+	if err := Render(&buf, JSON, map[string]string{"comment": in}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.ContainsFunc(out, isC1) {
+		t.Errorf("raw DEL or C1 in %q", out)
+	}
+	for _, esc := range []string{`\u007f`, `\u0085`, `\u009b`, `\u0080`} {
+		if !strings.Contains(out, esc) {
+			t.Errorf("%s missing from %q", esc, out)
+		}
+	}
+	var back map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &back); err != nil || back["comment"] != in {
+		t.Errorf("decodes to %q, %v; want %q", back["comment"], err, in)
+	}
+}

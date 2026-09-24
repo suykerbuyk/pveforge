@@ -15,9 +15,9 @@ func TestParseAccessUsers(t *testing.T) {
 	]`))
 	want := []AccessUser{
 		{UserID: "root@pam", Enabled: true},
-		{UserID: "alice@pve", Comment: "ops", Email: "a@example.com", Groups: []string{"ops", "dev"}},
-		{UserID: "bob@pve", Enabled: true, Groups: []string{"dev"}},
-		{UserID: "carol@pve", Enabled: true},
+		{UserID: "alice@pve", Comment: "ops", Email: "a@example.com", Groups: []string{"ops", "dev"}, GroupsListed: true},
+		{UserID: "bob@pve", Enabled: true, Groups: []string{"dev"}, GroupsListed: true},
+		{UserID: "carol@pve", Enabled: true, GroupsListed: true},
 	}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseAccessUsers = %+v, %v\nwant %+v", got, err, want)
@@ -32,18 +32,22 @@ func TestParseAccess_RefusesWhatItCannotDecideOn(t *testing.T) {
 		parse func([]byte) error
 		raw   string
 	}{
-		"users null":            {usersErr, `null`},
-		"users object":          {usersErr, `{"userid":"a@pve"}`},
-		"users null entry":      {usersErr, `[null]`},
-		"user without id":       {usersErr, `[{"enable":1}]`},
-		"user without enable":   {usersErr, `[{"userid":"a@pve"}]`},
-		"user enable 2":         {usersErr, `[{"userid":"a@pve","enable":2}]`},
-		"user groups a number":  {usersErr, `[{"userid":"a@pve","enable":1,"groups":3}]`},
-		"groups null":           {groupsErr, `null`},
-		"group without id":      {groupsErr, `[{"comment":"x"}]`},
-		"acl without propagate": {aclErr, `[{"path":"/","roleid":"R","type":"user","ugid":"a@pve"}]`},
-		"acl unknown type":      {aclErr, `[{"path":"/","roleid":"R","type":"role","ugid":"a@pve","propagate":0}]`},
-		"acl without ugid":      {aclErr, `[{"path":"/","roleid":"R","type":"user","propagate":0}]`},
+		"users null":             {usersErr, `null`},
+		"users object":           {usersErr, `{"userid":"a@pve"}`},
+		"users null entry":       {usersErr, `[null]`},
+		"user without id":        {usersErr, `[{"enable":1}]`},
+		"user without enable":    {usersErr, `[{"userid":"a@pve"}]`},
+		"user enable 2":          {usersErr, `[{"userid":"a@pve","enable":2}]`},
+		"user groups a number":   {usersErr, `[{"userid":"a@pve","enable":1,"groups":3}]`},
+		"user listed twice":      {usersErr, `[{"userid":"a@pve","enable":1},{"userid":"a@pve","enable":0}]`},
+		"user group twice":       {usersErr, `[{"userid":"a@pve","enable":1,"groups":"ops,dev,ops"}]`},
+		"user group twice, list": {usersErr, `[{"userid":"a@pve","enable":1,"groups":["ops","ops"]}]`},
+		"groups null":            {groupsErr, `null`},
+		"group listed twice":     {groupsErr, `[{"groupid":"ops"},{"groupid":"ops","users":""}]`},
+		"group without id":       {groupsErr, `[{"comment":"x"}]`},
+		"acl without propagate":  {aclErr, `[{"path":"/","roleid":"R","type":"user","ugid":"a@pve"}]`},
+		"acl unknown type":       {aclErr, `[{"path":"/","roleid":"R","type":"role","ugid":"a@pve","propagate":0}]`},
+		"acl without ugid":       {aclErr, `[{"path":"/","roleid":"R","type":"user","propagate":0}]`},
 	} {
 		if err := c.parse([]byte(c.raw)); !errors.Is(err, ErrUnverifiableRead) {
 			t.Errorf("%s: err = %v, want an unverifiable read", name, err)
