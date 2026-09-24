@@ -1692,6 +1692,8 @@ var routedClientSeam = map[string]seamEntry{
 	"GetNode":                    {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetNodes":                   {tests: []string{"TestRoutedClient_TypedReadForwarding"}},
 	"FindByTag":                  {tests: []string{"TestRoutedForwarding_FindByTag", "TestRoutedClient_FindByTag_Forwards"}},
+	"CanAuditAllVMs":             {tests: []string{"TestRoutedForwarding_CanAuditAllVMs"}},
+	"FindByTagFold":              {tests: []string{"TestRoutedForwarding_FindByTagFold"}},
 	"GetVM":                      {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetVMs":                     {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetStorage":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},

@@ -1,18 +1,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	proxmox "github.com/suykerbuyk/go-proxmox"
 
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 func newVMCmd() *cobra.Command {
@@ -47,7 +53,7 @@ func newVMCmd() *cobra.Command {
 // create payload — explicitly out of scope. "Occupied" is the whole
 // test.
 func newVMCreateCmd() *cobra.Command {
-	var jsonBody, jsonFile string
+	var jsonBody, jsonFile, uniqueTag string
 
 	cmd := &cobra.Command{
 		Use:   "create <target-id> <vmid> [field=value ...]",
@@ -67,7 +73,34 @@ Create parameters are raw PVE fields (cores, memory, net0, ipconfig0,
 scsi0, agent, tags, ...), given exactly like ` + "`vm set`" + `: as
 field=value arguments, or via --json / --json-file. Tags are not special
 — pass tags=... as a create parameter and PVE applies them atomically as
-part of the create itself, so the VM is never briefly untagged.`,
+part of the create itself, so the VM is never briefly untagged.
+
+--unique-tag X (opt-in; X must be one of this create's own tags) refuses
+the create if any VM in the cluster already carries X. Tags are matched
+case-insensitively, as PVE matches them: Foo and foo are one tag. An empty
+or blank X is refused. The check is made
+under a pveforge lock on the tag, taken before the VM's own lock and held
+until the new VM shows up in PVE's cluster resource list, so two pveforge
+creates with the same --unique-tag on this roster target never both
+succeed. Its limits:
+  - it fails closed: a resource list that cannot be read, or reads as
+    null, refuses the create;
+  - it needs VM.Audit on /vms (propagating), because PVE lists only the
+    VMs a token can see; without it the create is refused ("cannot verify
+    tag uniqueness");
+  - the lock is per roster target: two targets that are nodes of one
+    cluster are not serialised against each other, and neither is the
+    web UI or qm;
+  - it needs VM.Audit on /vms as a whole: a NoAccess ACL on one VM
+    (/vms/VMID) hides that VM from the list while this check still passes,
+    so a tag that VM carries is not seen;
+  - only QEMU VMs are counted: an LXC container carrying X is not;
+  - PVE's resource list lags; if the new VM is not listed within 30s, the
+    create still succeeds and a warning says a concurrent check may miss it.
+    A signal (Ctrl-C) during that wait exits 130 (143 for SIGTERM) with an
+    error saying the VM WAS created and the wait was interrupted before it
+    was listed: the tag's lock was released early.
+Without --unique-tag, two creates with the same tags both succeed.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			params, err := vmCreateParams(args[2:], jsonBody, jsonFile)
@@ -78,6 +111,14 @@ part of the create itself, so the VM is never briefly untagged.`,
 			vmid, err := strconv.Atoi(args[1])
 			if err != nil {
 				return fmt.Errorf("invalid vmid %q: %w", args[1], err)
+			}
+			// The guard is on when the flag is GIVEN, whatever its value: an
+			// empty or blank --unique-tag is refused, never read as "off".
+			tagGuard := cmd.Flags().Changed("unique-tag")
+			if tagGuard {
+				if err := uniqueTagIsOwn(uniqueTag, params); err != nil {
+					return err
+				}
 			}
 			// Guard the sentinel, not a range: NextVMID reads pin == 0 as
 			// "no pin, auto-allocate", and auto-allocation is explicitly
@@ -100,6 +141,23 @@ part of the create itself, so the VM is never briefly untagged.`,
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
 				return err
+			}
+
+			// --unique-tag: the tag's lock, taken BEFORE the VM's (lock order
+			// is always tag, then vm), held across the check, the create and
+			// the visibility wait, so no other pveforge create with this
+			// --unique-tag on this target can pass its check in between. Its
+			// key is the tag case-folded, as PVE matches tags: "Foo" and
+			// "foo" are one tag, so they are one lock.
+			if tagGuard {
+				unlockTag, err := lock.Mutation(cmd.Context(), rosterPath, lock.ObjectKey{TargetID: args[0], Kind: "vm-tag", ID: strings.ToLower(uniqueTag)})
+				if err != nil {
+					return fmt.Errorf("vm create: acquire the lock for tag %s: %w", kvjson.QuoteValue(uniqueTag), err)
+				}
+				defer func() { _ = unlockTag() }()
+				if err := checkTagUnique(cmd.Context(), client, uniqueTag); err != nil {
+					return err
+				}
 			}
 
 			// The pin path of NextVMID: returns the requested vmid
@@ -202,11 +260,21 @@ part of the create itself, so the VM is never briefly untagged.`,
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: vm %d created\n", args[0], resolved)
+			if tagGuard {
+				visible, err := waitTagVisible(cmd.Context(), client, uniqueTag, resolved)
+				if err != nil {
+					return fmt.Errorf("vm create: vm %d on %s: %w: tag %s (%w)", resolved, args[0], errVMCreatedTagWaitInterrupted, kvjson.QuoteValue(uniqueTag), err)
+				}
+				if !visible {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: vm %d: tag %s is not yet in PVE's cluster resource list after %s; a --unique-tag check made now may not see this VM\n", args[0], resolved, kvjson.QuoteValue(uniqueTag), tagVisibilityBound)
+				}
+			}
 			return nil
 		},
 	}
 	addRosterFlag(cmd)
 	addLockWaitFlag(cmd)
+	cmd.Flags().StringVar(&uniqueTag, "unique-tag", "", "refuse the create if any VM in the cluster already carries this tag (one of this create's own tags; needs VM.Audit on /vms)")
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of create parameters (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of create parameters (values must be JSON strings)")
 	markMutating(cmd)
@@ -558,4 +626,109 @@ func vmCreateParams(kvArgs []string, jsonBody, jsonFile string) (url.Values, err
 		params.Add(p.Field, p.Value)
 	}
 	return params, nil
+}
+
+// tagVisibilityBound and tagVisibilityPoll bound how long a --unique-tag
+// create waits, still holding the tag's lock, for its new VM to appear in
+// /cluster/resources (pvestatd-cached, about 10s behind; UNVERIFIED against
+// a live host). Variables so tests can shorten them.
+var (
+	tagVisibilityBound = 30 * time.Second
+	tagVisibilityPoll  = time.Second
+)
+
+// errVMCreatedTagWaitInterrupted marks a --unique-tag create whose VM WAS
+// created and whose wait for it to be listed was then interrupted by a
+// signal. Its text already says so; runRoot prints it as it is, never with
+// its generic "may or may not have been applied", and exits 128+signum,
+// like its other interrupt exemptions.
+var errVMCreatedTagWaitInterrupted = errors.New("the VM WAS created; the wait for PVE to list it was interrupted before it was, and the tag's lock was released early, so a --unique-tag check made now may not see it")
+
+// tagSplit is how PVE separates the values of a tags= parameter.
+var tagSplit = regexp.MustCompile(`[;,\s]+`)
+
+// pveTagRE is PVE's tag format (pve-common's pve-tag: ASCII, case-
+// insensitive). --unique-tag is held to it, so the case-folded lock key
+// (strings.ToLower) and the case-insensitive match (strings.EqualFold)
+// agree exactly; a tag outside it PVE refuses anyway.
+var pveTagRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_+.-]*$`)
+
+// uniqueTagIsOwn checks --unique-tag before any request: not empty or
+// blank, never containing PVE's ';' separator, in PVE's tag format, and one
+// of the create's own tags= (matched case-insensitively, as PVE does).
+func uniqueTagIsOwn(tag string, params url.Values) error {
+	if strings.TrimSpace(tag) == "" {
+		return fmt.Errorf("vm create: --unique-tag was given an empty tag; name one of this create's tags, or leave the flag out")
+	}
+	if strings.Contains(tag, proxmox.TagSeperator) {
+		return fmt.Errorf("vm create: --unique-tag %s contains PVE's tag separator %q", kvjson.QuoteValue(tag), proxmox.TagSeperator)
+	}
+	if !pveTagRE.MatchString(tag) {
+		return fmt.Errorf("vm create: --unique-tag %s is not a PVE tag (letters, digits, '_', '-', '+' and '.', not starting with '-', '+' or '.')", kvjson.QuoteValue(tag))
+	}
+	for _, t := range tagSplit.Split(params.Get("tags"), -1) {
+		if strings.EqualFold(t, tag) {
+			return nil
+		}
+	}
+	return fmt.Errorf("vm create: --unique-tag %s is not one of this create's tags (tags=%s)", kvjson.QuoteValue(tag), kvjson.QuoteValue(params.Get("tags")))
+}
+
+// tagChecker is what the --unique-tag check needs of the client.
+type tagChecker interface {
+	CanAuditAllVMs(ctx context.Context) (bool, error)
+	FindByTagFold(ctx context.Context, tag string) (*proxmox.ClusterResource, error)
+}
+
+// checkTagUnique fails closed: only a real list, read by a token that can
+// see every VM, that carries no VM with tag lets the create proceed. A
+// match, an ambiguous match, a failed or null read, a 404 on the list
+// (proxmox.ErrNotFound — a failed read, not "no match") and a token that
+// cannot see every VM all refuse.
+func checkTagUnique(ctx context.Context, c tagChecker, tag string) error {
+	q := kvjson.QuoteValue(tag)
+	all, err := c.CanAuditAllVMs(ctx)
+	if err != nil {
+		return fmt.Errorf("vm create: cannot verify tag uniqueness for %s: read the token's rights on /vms: %w", q, err)
+	}
+	if !all {
+		return fmt.Errorf("vm create: cannot verify tag uniqueness for %s: the token lacks VM.Audit on /vms (propagating), and PVE lists only the VMs a token can see", q)
+	}
+	r, err := c.FindByTagFold(ctx, tag)
+	switch {
+	case err == nil:
+		return fmt.Errorf("vm create: tag %s is already carried by vm %d; refusing to create another (--unique-tag)", q, r.VMID)
+	case errors.Is(err, pve.ErrAmbiguousTag):
+		return fmt.Errorf("vm create: tag %s is already carried by more than one VM; refusing to create another (--unique-tag): %w", q, err)
+	case errors.Is(err, pve.ErrNotFound):
+		return nil
+	default:
+		return fmt.Errorf("vm create: cannot verify tag uniqueness for %s: %w", q, err)
+	}
+}
+
+// waitTagVisible polls FindByTagFold until it names vmid, for at most
+// tagVisibilityBound, and reports whether it did. Any other answer, a read
+// failure or another VM carrying the tag included, is polled past: the
+// create has already succeeded, so running out of time only warns. A
+// cancelled ctx (a signal) is the one error: the wait did not run its
+// course, and the caller must say so rather than claim the bound elapsed.
+func waitTagVisible(ctx context.Context, c tagChecker, tag string, vmid int) (bool, error) {
+	deadline := time.Now().Add(tagVisibilityBound)
+	for {
+		if r, err := c.FindByTagFold(ctx, tag); err == nil && r != nil && int(r.VMID) == vmid {
+			return true, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return false, context.Cause(ctx)
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, context.Cause(ctx)
+		case <-time.After(min(tagVisibilityPoll, time.Until(deadline))):
+		}
+	}
 }

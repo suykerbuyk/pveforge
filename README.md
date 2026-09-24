@@ -217,7 +217,18 @@ that run, as `bootstrap --no-ssh-key` does.
 
 `vm set` and the `network` commands read the object first and write only what
 differs, so a repeat run changes nothing. `vm create` instead fails if the
-VMID is already taken, and never picks another. `api` is a raw passthrough and
+VMID is already taken, and never picks another. Two creates with the same
+tags both succeed, unless `--unique-tag X` is given (X one of the create's own
+tags): then the create is refused if any VM in the cluster already carries X,
+in any letter case (PVE matches tags case-insensitively). That check fails
+closed (a list it cannot read refuses), needs `VM.Audit` on `/vms` because
+PVE lists only the VMs a token can see, and runs under a pveforge lock on the
+tag, held until the new VM is listed. Its limits: the lock is per roster
+target, so two targets that are nodes of one cluster, and the web UI, are not
+held off; a `NoAccess` ACL on a single `/vms/<id>` hides that VM while the
+`VM.Audit` check still passes; LXC containers carrying the tag are not
+counted; and a signal during the wait for the new VM to be listed exits
+130/143 saying the VM was created but not yet listed. `api` is a raw passthrough and
 is not idempotent.
 
 Commands that touch a VM, node, storage or network object, or a user or
@@ -312,6 +323,11 @@ owed to the nested PVE test harness:
   snapshot with RAM state, and how soon the guest agent answers the
   rollback's witness (`--witness-timeout`, default 2m). The default witness
   runs `/bin/echo` in the guest, which assumes a POSIX guest.
+- `vm create --unique-tag`: how far PVE's cluster resource list lags a create
+  (about 10 seconds; the create waits up to 30 for its own VM to be listed,
+  then only warns), that PVE stores tags `;`-joined whatever separators were
+  used, that tags match case-insensitively (PVE's default), and that
+  `VM.Audit` on `/vms` is enough to be listed every VM.
 - Library code with no command yet: full vs linked clones, VM destroy beyond
   PVE's documentation, and guest-agent command timing and encoding outside
   the rollback witness.
