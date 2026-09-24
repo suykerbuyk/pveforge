@@ -1,0 +1,57 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-completion-zsh - Generate the autocompletion script for zsh
+
+
+.SH SYNOPSIS
+\fBpveforge completion zsh [flags]\fP
+
+
+.SH DESCRIPTION
+Generate the autocompletion script for the zsh shell.
+
+.PP
+If shell completion is not already enabled in your environment you will need
+to enable it.  You can execute the following once:
+
+.EX
+echo "autoload -U compinit; compinit" >> ~/.zshrc
+.EE
+
+.PP
+To load completions in your current shell session:
+
+.EX
+source <(pveforge completion zsh)
+.EE
+
+.PP
+To load completions for every new session, execute once:
+
+.SS Linux:
+.EX
+pveforge completion zsh > "${fpath[1]}/_pveforge"
+.EE
+
+.SS macOS:
+.EX
+pveforge completion zsh > $(brew --prefix)/share/zsh/site-functions/_pveforge
+.EE
+
+.PP
+You will need to start a new shell for this setup to take effect.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for zsh
+
+.PP
+\fB--no-descriptions\fP[=false]
+	disable completion descriptions
+
+
+.SH SEE ALSO
+\fBpveforge-completion(1)\fP

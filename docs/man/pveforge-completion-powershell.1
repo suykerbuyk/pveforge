@@ -1,0 +1,37 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-completion-powershell - Generate the autocompletion script for powershell
+
+
+.SH SYNOPSIS
+\fBpveforge completion powershell [flags]\fP
+
+
+.SH DESCRIPTION
+Generate the autocompletion script for powershell.
+
+.PP
+To load completions in your current shell session:
+
+.EX
+pveforge completion powershell | Out-String | Invoke-Expression
+.EE
+
+.PP
+To load completions for every new session, add the output of the above command
+to your powershell profile.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for powershell
+
+.PP
+\fB--no-descriptions\fP[=false]
+	disable completion descriptions
+
+
+.SH SEE ALSO
+\fBpveforge-completion(1)\fP

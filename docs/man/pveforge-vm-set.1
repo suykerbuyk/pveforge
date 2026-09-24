@@ -1,0 +1,88 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-vm-set - Set or delete one or more VM config fields
+
+
+.SH SYNOPSIS
+\fBpveforge vm set <target-id> <vmid> [field=value ...] [--delete field ...] [flags]\fP
+
+
+.SH DESCRIPTION
+Set one or more VM config fields, via at most one of:
+  - trailing field=value positional arguments
+  - --json '{"field":"value",...}'
+  - --json-file path/to/fields.json
+
+.PP
+--delete field (repeatable) removes field from the VM's config entirely,
+through PVE's own delete parameter. That is not the same as field= (or
+"field":"" in JSON), which writes an empty value and leaves the key present.
+In --json/--json-file, a null value ("field":null) also deletes the key.
+--delete may be used alone or together with one input mode; a field may not
+be both set and deleted. Deletes are applied after the writes.
+
+.PP
+Fields are applied in order (positional: as given; JSON: sorted by key).
+Applying stops at the first failure — earlier fields in the same
+invocation have already been applied and are not rolled back.
+
+.PP
+The whole batch is applied as one idempotent-mutation-engine cycle
+(internal/idempotent.VMFieldsEnsure), serialized against every other
+pveforge-managed mutation on this VM for its full duration
+(internal/lock.Mutation) — never two concurrent pveforge mutations on the
+same VM in flight at once. A field already at its wanted value is left
+untouched (no write attempted) and prints no confirmation line; output is
+a summary of only the fields that actually changed, printed once the
+whole batch resolves rather than streamed as each field applies. If the
+writes succeed but the VM's config cannot be re-read afterwards, a
+one-line warning is printed on stderr, stdout is unchanged and the exit
+status is still 0.
+
+.PP
+Output: one line per field written, "<target>: <field>=<value>", then one
+per field deleted, "<target>: delete=<field>". A field already absent prints
+nothing, like a field already at its value.
+
+.PP
+On a running VM, a change PVE cannot apply live is stored as pending and
+taken at the VM's next cold boot. After the batch, vm set asks PVE which of
+its own changes are pending and prints one stderr notice per such field
+("notice: <target>: vm N: <field> is pending: …", or "delete=<field> is
+pending"); stdout is unchanged and the exit status stays 0. A cloud-init
+setting (ciuser, sshkeys, ipconfigN, …) is saved at once but reaches the
+guest only when the VM's cloud-init drive is regenerated at its next start:
+for those, vm set asks PVE which of its own changes are not yet on the
+drive and prints one stderr notice each. If a check itself fails, one
+warning line says so.
+
+
+.SH OPTIONS
+\fB--delete\fP=[]
+	remove this config key entirely (PVE's delete parameter), rather than writing it empty; repeatable
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for set
+
+.PP
+\fB--json\fP=""
+	JSON object of field=value pairs (values must be JSON strings)
+
+.PP
+\fB--json-file\fP=""
+	path to a JSON file of field=value pairs (values must be JSON strings)
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-vm(1)\fP

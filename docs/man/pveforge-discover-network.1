@@ -1,0 +1,30 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-discover-network - Describe a network interface's schema, per PVE's own API-doc tree
+
+
+.SH SYNOPSIS
+\fBpveforge discover network <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Describe a network interface's schema, per PVE's own API-doc tree
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for network
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-discover(1)\fP
