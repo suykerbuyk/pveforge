@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
@@ -958,6 +959,21 @@ func parseGrant(spec string) (Grant, error) {
 	return g, nil
 }
 
+// PVEConfigWriteTimeout bounds a root command that writes PVE's cluster
+// configuration (pveum user, group, acl and token writes), in place of
+// sshexec.CommandTimeout: PVE waits up to 10s for the cluster-config lock
+// (cfs_lock) and then allows 60s under it before aborting, so a healthy but
+// slow write can take ~70s. 90s adds room for pveum's own start and
+// pmxcfs's sync. Past it the outcome is unknown, never "failed". One write
+// runs under an earlier bound: the cleanup remove of a fresh token, which
+// cleanupCtx caps at cleanupTimeout (30s).
+var PVEConfigWriteTimeout = 90 * time.Second
+
+// configWrite is ctx for one cluster-config write: PVEConfigWriteTimeout.
+func configWrite(ctx context.Context) context.Context {
+	return sshexec.WithCommandTimeout(ctx, PVEConfigWriteTimeout)
+}
+
 // grantACL grants g to the token identified by fullTokenID
 // (userid!tokenname), stating the whole grant: path, role and an explicit
 // --propagate 0|1 (pveum's default is 1). The exact `pveum acl modify` flag
@@ -970,7 +986,7 @@ func grantACL(ctx context.Context, session SSHSession, fullTokenID string, g Gra
 	}
 	cmd := fmt.Sprintf("pveum acl modify %s --tokens %s --roles %s --propagate %d",
 		sshexec.ShellQuote(g.Path), sshexec.ShellQuote(fullTokenID), sshexec.ShellQuote(g.Role), propagate)
-	res, err := session.Run(ctx, cmd)
+	res, err := session.Run(configWrite(ctx), cmd)
 	if err != nil {
 		return fmt.Errorf("run pveum acl modify: %w", err)
 	}

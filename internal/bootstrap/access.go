@@ -40,6 +40,10 @@ type RootAccess struct {
 	opts      AccessOptions
 	transport SSHTransport
 	session   SSHSession
+	// password is opts.Password's answer, once asked (ResolveCredentials,
+	// or the first dial).
+	password         string
+	passwordResolved bool
 }
 
 // AccessOptions configures a RootAccess.
@@ -91,17 +95,33 @@ func (a *RootAccess) Connect(ctx context.Context) error {
 	return err
 }
 
+// ResolveCredentials asks for the password now, when the session is
+// keyless, and keeps it for the dial, which stays lazy: nothing is dialed.
+// A caller about to take a pveforge lock calls this first, so a prompt
+// never happens holding the lock, while a run with nothing to change still
+// never connects as root. With a stored key there is nothing to ask.
+func (a *RootAccess) ResolveCredentials(ctx context.Context) error {
+	if a.opts.Password == nil || a.passwordResolved {
+		return nil
+	}
+	pw, err := a.opts.Password(ctx)
+	if err != nil {
+		return err
+	}
+	a.password, a.passwordResolved = pw, true
+	return nil
+}
+
 // root returns the session, dialing it on first use.
 func (a *RootAccess) root(ctx context.Context) (SSHSession, error) {
 	if a.session != nil {
 		return a.session, nil
 	}
 	if a.opts.Password != nil {
-		pw, err := a.opts.Password(ctx)
-		if err != nil {
+		if err := a.ResolveCredentials(ctx); err != nil {
 			return nil, err
 		}
-		s, _, err := a.transport.DialWithPassword(ctx, a.opts.Addr, "root", pw, "")
+		s, _, err := a.transport.DialWithPassword(ctx, a.opts.Addr, "root", a.password, "")
 		if err != nil {
 			return nil, fmt.Errorf("connect as root with the password: %w", err)
 		}
@@ -116,19 +136,30 @@ func (a *RootAccess) root(ctx context.Context) (SSHSession, error) {
 	return s, nil
 }
 
-// pveum runs one command as root and returns its stdout: a pveum command,
-// or ClusterGuests' one pvesh read. The only other commands root runs are
-// the role list (allRolePrivs, through runJSONArray) and the inventory's
-// getent (rootOSAccounts), which need the raw result; the sites that take
-// the session are pinned by TestRootSession_OnlyAtItsSites.
-func (a *RootAccess) pveum(ctx context.Context, cmd string) (string, error) {
+// rootRun runs one command as root and returns its raw result, the exit
+// status included. It is RootAccess's only command runner: the one place a
+// command reaches the root session (TestRootAccess_B5_OneCommandRunner),
+// so every root command is bounded by sshexec.CommandTimeout unless ctx
+// carries its own (pveumWrite's). Callers that must read a non-zero exit
+// themselves (getent's 2) use it directly; everything else uses pveum.
+func (a *RootAccess) rootRun(ctx context.Context, cmd string) (RunResult, error) {
 	s, err := a.root(ctx)
 	if err != nil {
-		return "", err
+		return RunResult{}, err
 	}
 	res, err := s.Run(ctx, cmd)
 	if err != nil {
-		return "", fmt.Errorf("run %s: %w", firstWords(cmd), err)
+		return RunResult{}, fmt.Errorf("run %s: %w", firstWords(cmd), err)
+	}
+	return res, nil
+}
+
+// pveum runs one command as root and returns its stdout: a pveum command,
+// or ClusterGuests' one pvesh read. It is rootRun plus the exit check.
+func (a *RootAccess) pveum(ctx context.Context, cmd string) (string, error) {
+	res, err := a.rootRun(ctx, cmd)
+	if err != nil {
+		return "", err
 	}
 	if res.ExitCode != 0 {
 		return "", fmt.Errorf("%s exited %d: %s", firstWords(cmd), res.ExitCode, strings.TrimSpace(res.Stderr))
@@ -152,6 +183,33 @@ func (a *RootAccess) ClusterGuests(ctx context.Context) ([]pve.Guest, error) {
 		return nil, fmt.Errorf("list the cluster's guests as root: %w", err)
 	}
 	return pve.ParseClusterGuests([]byte(out))
+}
+
+// ErrRootWriteOutcomeUnknown: a root write (pveum user, group or acl) ran
+// past its deadline. It may or may not have been applied.
+var ErrRootWriteOutcomeUnknown = errors.New("the root write's outcome is unknown: it may or may not have been applied; re-running is safe, since the command reads PVE's state before it writes and PVE merges a repeated grant")
+
+// pveumWrite runs one root write of PVE's cluster configuration, bounded
+// by PVEConfigWriteTimeout. A write that was sent and then ran out of time,
+// its own bound or the caller's deadline, has an unknown outcome, and the
+// error says so (ErrRootWriteOutcomeUnknown), never that it failed. One
+// that was never sent (the session did not open: sshexec.ErrNoCommandSent)
+// is a plain failure: it is known not to have been applied.
+func (a *RootAccess) pveumWrite(ctx context.Context, cmd string) error {
+	_, err := a.pveum(configWrite(ctx), cmd)
+	if writeOutcomeUnknown(err) {
+		return fmt.Errorf("%w: %w", ErrRootWriteOutcomeUnknown, err)
+	}
+	return err
+}
+
+// writeOutcomeUnknown reports whether a root write's error leaves its
+// outcome unknown: it ran out of time after the command was sent.
+func writeOutcomeUnknown(err error) bool {
+	if err == nil || errors.Is(err, sshexec.ErrNoCommandSent) {
+		return false
+	}
+	return errors.Is(err, sshexec.ErrCommandTimedOut) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // refusedByToken reports whether a REST read failed because the token may
@@ -210,8 +268,7 @@ func (a *RootAccess) AddUser(ctx context.Context, spec idempotent.UserSpec) erro
 	if len(spec.Groups) > 0 {
 		cmd += " --groups " + sshexec.ShellQuote(strings.Join(spec.Groups, ","))
 	}
-	_, err := a.pveum(ctx, cmd)
-	return err
+	return a.pveumWrite(ctx, cmd)
 }
 
 // ModifyUser updates a user as root. The enable flag is always sent (an
@@ -222,8 +279,7 @@ func (a *RootAccess) ModifyUser(ctx context.Context, spec idempotent.UserSpec) e
 	if len(spec.Groups) > 0 {
 		cmd += " --groups " + sshexec.ShellQuote(strings.Join(spec.Groups, ",")) + " --append 1"
 	}
-	_, err := a.pveum(ctx, cmd)
-	return err
+	return a.pveumWrite(ctx, cmd)
 }
 
 // userFlags renders a UserSpec's --enable, --comment and --email.
@@ -248,14 +304,12 @@ func (a *RootAccess) AddGroup(ctx context.Context, groupID string, comment *stri
 	if comment != nil {
 		cmd += " --comment " + sshexec.ShellQuote(*comment)
 	}
-	_, err := a.pveum(ctx, cmd)
-	return err
+	return a.pveumWrite(ctx, cmd)
 }
 
 // ModifyGroup sets a group's comment as root.
 func (a *RootAccess) ModifyGroup(ctx context.Context, groupID, comment string) error {
-	_, err := a.pveum(ctx, "pveum group modify "+sshexec.ShellQuote(groupID)+" --comment "+sshexec.ShellQuote(comment))
-	return err
+	return a.pveumWrite(ctx, "pveum group modify "+sshexec.ShellQuote(groupID)+" --comment "+sshexec.ShellQuote(comment))
 }
 
 // ---- the ACL grant ----
@@ -404,6 +458,13 @@ func (a *RootAccess) GrantACL(ctx context.Context, req GrantRequest) (*GrantOutc
 	var applied []string
 	for i, g := range want {
 		if err := a.aclModify(ctx, req.Principal, g); err != nil {
+			if errors.Is(err, ErrRootWriteOutcomeUnknown) {
+				before := "none before it was applied"
+				if len(applied) > 0 {
+					before = "already applied before it: " + strings.Join(applied, "; ")
+				}
+				return nil, fmt.Errorf("grant %d of %d (%s on %s) timed out and may or may not have been applied, %s: %w", i+1, len(want), g.Role, g.Path, before, err)
+			}
 			done := "none was applied"
 			if len(applied) > 0 {
 				done = "already applied: " + strings.Join(applied, "; ")
@@ -459,7 +520,8 @@ func (a *RootAccess) rolePrivs(ctx context.Context, want []Grant) (map[string][]
 
 // allRolePrivs reads the role list as root: every role's privileges.
 func (a *RootAccess) allRolePrivs(ctx context.Context) (map[string][]string, error) {
-	s, err := a.root(ctx)
+	const cmd = "pveum role list --output-format json"
+	stdout, err := a.pveum(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +529,7 @@ func (a *RootAccess) allRolePrivs(ctx context.Context) (map[string][]string, err
 		RoleID string  `json:"roleid"`
 		Privs  *string `json:"privs"`
 	}
-	if err := runJSONArray(ctx, s, "pveum role list --output-format json", &roles); err != nil {
+	if err := decodeJSONArray(cmd, stdout, &roles); err != nil {
 		return nil, err
 	}
 	out := make(map[string][]string, len(roles))
@@ -617,7 +679,6 @@ func (a *RootAccess) aclModify(ctx context.Context, p Principal, g Grant) error 
 		propagate = 1
 	}
 	flag := map[string]string{"user": "--users", "group": "--groups", "token": "--tokens"}[p.Kind]
-	_, err := a.pveum(ctx, fmt.Sprintf("pveum acl modify %s %s %s --roles %s --propagate %d",
+	return a.pveumWrite(ctx, fmt.Sprintf("pveum acl modify %s %s %s --roles %s --propagate %d",
 		sshexec.ShellQuote(g.Path), flag, sshexec.ShellQuote(p.ID), sshexec.ShellQuote(g.Role), propagate))
-	return err
 }

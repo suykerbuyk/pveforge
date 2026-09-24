@@ -5,7 +5,18 @@ import (
 	"encoding/base64"
 	"fmt"
 	"path"
+	"time"
 )
+
+// writeFileTimeout bounds one WriteFile, in place of CommandTimeout: the
+// write's own work plus the payload's transfer, which is size-dependent.
+// The payload travels as one argument, so Linux's MAX_ARG_STRLEN (128 KiB)
+// caps it; at 1s per 32 KiB (a conservative 32 KiB/s link) the bound tops
+// out near 34s. The write may land on shared storage (a snippets directory
+// on NFS or CIFS), where a hung server is exactly what the bound is for.
+func writeFileTimeout(cmdBytes int) time.Duration {
+	return CommandTimeout + time.Duration(cmdBytes/(32<<10))*time.Second
+}
 
 // WriteFile writes content to remotePath on the remote host, creating any
 // missing parent directories and setting mode (an octal permission string
@@ -74,7 +85,7 @@ func (c *Client) WriteFile(ctx context.Context, remotePath string, content []byt
 		ShellQuote(tmpPath), ShellQuote(remotePath),
 	)
 
-	res, err := c.Run(ctx, cmd)
+	res, err := c.Run(WithCommandTimeout(ctx, writeFileTimeout(len(cmd))), cmd)
 	if err != nil {
 		return fmt.Errorf("write file %s: %w", remotePath, err)
 	}

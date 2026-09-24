@@ -217,6 +217,12 @@ pveforge out of the target.`,
 					joins, err = access.CheckGroupJoin(ctx, userID, add, allowEscalating)
 					return err
 				}}
+			// The password, when keyless, is asked for before the user's
+			// lock is taken; the dial stays lazy, so a run with nothing to
+			// change still never connects as root.
+			if err := access.ResolveCredentials(cmd.Context()); err != nil {
+				return err
+			}
 			key := lock.ObjectKey{TargetID: targetID, Kind: "user", ID: userID}
 			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
 			if err != nil {
@@ -285,6 +291,10 @@ are set on its users (user ensure --group).`,
 			}
 			defer closeAll()
 			op := &idempotent.GroupEnsure{Client: access, GroupID: groupID, Comment: comment}
+			// As for user ensure: the password before the lock, the dial lazy.
+			if err := access.ResolveCredentials(cmd.Context()); err != nil {
+				return err
+			}
 			key := lock.ObjectKey{TargetID: targetID, Kind: "group", ID: groupID}
 			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
 			if err != nil {

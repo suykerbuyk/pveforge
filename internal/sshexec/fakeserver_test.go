@@ -44,6 +44,26 @@ type fakeServer struct {
 	// handshake and then answer no channel request until it is closed: a
 	// peer that stopped responding after the connection was made.
 	stall chan struct{}
+
+	// asyncExec, when set before Start, runs handleExec beside the
+	// session's request loop instead of inline, so requests the client
+	// sends while a command runs (a "signal") are read, and recorded in
+	// events with the session's close ("signal:KILL", then "close").
+	asyncExec bool
+	eventsMu  sync.Mutex
+	events    []string
+}
+
+func (fs *fakeServer) event(e string) {
+	fs.eventsMu.Lock()
+	defer fs.eventsMu.Unlock()
+	fs.events = append(fs.events, e)
+}
+
+func (fs *fakeServer) eventLog() []string {
+	fs.eventsMu.Lock()
+	defer fs.eventsMu.Unlock()
+	return append([]string(nil), fs.events...)
 }
 
 // drainJoinTimeout bounds how long handleSession waits for a session's
@@ -248,6 +268,36 @@ func (fs *fakeServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			}
 		}
 	}()
+
+	if fs.asyncExec {
+		for req := range reqs {
+			switch req.Type {
+			case "exec":
+				cmd := string(req.Payload[4:])
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
+				go func() {
+					stdout, stderr, code := fs.handleExec(cmd)
+					_, _ = ch.Write([]byte(stdout))
+					_, _ = ch.Stderr().Write([]byte(stderr))
+					_, _ = ch.SendRequest("exit-status", false, exitStatusPayload(code))
+					_ = ch.Close()
+				}()
+			case "signal":
+				fs.event("signal:" + string(req.Payload[4:]))
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
+			default:
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+			}
+		}
+		fs.event("close") // the client closed the channel: no more requests
+		return
+	}
 
 	for req := range reqs {
 		switch req.Type {

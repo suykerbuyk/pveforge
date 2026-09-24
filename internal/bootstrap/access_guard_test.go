@@ -31,6 +31,8 @@ var (
 	tgtModifyGroup = sourceguard.Target{AnyQualifier: true, Name: "ModifyGroup"}
 	tgtGrantACL    = sourceguard.Target{AnyQualifier: true, Name: "GrantACL"}
 	tgtPveum       = sourceguard.Target{AnyQualifier: true, Name: "pveum"}
+	tgtPveumWrite  = sourceguard.Target{AnyQualifier: true, Name: "pveumWrite"}
+	tgtRootRun     = sourceguard.Target{AnyQualifier: true, Name: "rootRun"}
 	tgtACLModify   = sourceguard.Target{AnyQualifier: true, Name: "aclModify"}
 	tgtCheckJoin   = sourceguard.Target{AnyQualifier: true, Name: "CheckGroupJoin"}
 	tgtUserEnsure  = sourceguard.Target{ImportPath: "github.com/suykerbuyk/pveforge/internal/idempotent", Name: "UserEnsure"}
@@ -38,7 +40,7 @@ var (
 	tgtClusterGst  = sourceguard.Target{AnyQualifier: true, Name: "ClusterGuests"}
 
 	rootWriterTargets = []sourceguard.Target{tgtAddUser, tgtModifyUser, tgtAddGroup, tgtModifyGroup, tgtGrantACL,
-		tgtPveum, tgtACLModify, tgtCheckJoin, tgtUserEnsure, tgtGroupEnsure, tgtClusterGst}
+		tgtPveum, tgtPveumWrite, tgtRootRun, tgtACLModify, tgtCheckJoin, tgtUserEnsure, tgtGroupEnsure, tgtClusterGst}
 )
 
 var rootWriterSites = []struct {
@@ -54,8 +56,11 @@ var rootWriterSites = []struct {
 	{"cmd/pveforge/access.go", tgtCheckJoin, 1},
 	{"cmd/pveforge/access.go", tgtUserEnsure, 1},
 	{"cmd/pveforge/access.go", tgtGroupEnsure, 1},
-	{"internal/bootstrap/access.go", tgtPveum, 9},
-	{"cmd/pveforge/vm.go", tgtClusterGst, 2}, // the check and the visibility wait
+	{"internal/bootstrap/access.go", tgtPveum, 6},      // five reads (guests, users, groups, ACLs, roles) and pveumWrite
+	{"internal/bootstrap/access.go", tgtRootRun, 1},    // pveum's own call
+	{"internal/bootstrap/inventory.go", tgtRootRun, 1}, // getent, which reads its own exit 2
+	{"internal/bootstrap/access.go", tgtPveumWrite, 5}, // the five writers
+	{"cmd/pveforge/vm.go", tgtClusterGst, 2},           // the check and the visibility wait
 	{"internal/bootstrap/access.go", tgtACLModify, 1},
 }
 
@@ -108,7 +113,9 @@ func TestRootAccessWriters_OnlyAtTheirSites(t *testing.T) {
 // another one in either file, fails here.
 func TestRootSession_OnlyAtItsSites(t *testing.T) {
 	tgt := sourceguard.Target{AnyQualifier: true, Name: "root"}
-	sites := map[string]int{"internal/bootstrap/access.go": 3, "internal/bootstrap/inventory.go": 1}
+	// access.go: Connect, and rootRun, the one command runner (B5), which
+	// the role list and the inventory's getent now go through too.
+	sites := map[string]int{"internal/bootstrap/access.go": 2}
 	scope := sourceguard.Scope{Root: "../.."}
 	for f := range sites {
 		scope.AllowFiles = append(scope.AllowFiles, f)
