@@ -21,7 +21,8 @@
   "Datastore.Audit": 0
  },
  "/storage/pveforge-harness": {
-  "Datastore.AllocateSpace": 0
+  "Datastore.AllocateSpace": 0,
+  "Datastore.Audit": 0
  },
  "/vms/690": {
   "Pool.Audit": 0,

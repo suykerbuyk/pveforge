@@ -21,6 +21,7 @@
   "SDN.Use"
  ],
  "PveforgeHarnessSpace": [
-  "Datastore.AllocateSpace"
+  "Datastore.AllocateSpace",
+  "Datastore.Audit"
  ]
 }
