@@ -28,6 +28,8 @@ const (
 	d5User     = "pveforge-harness@pve"
 	d5Token    = "pveforge-harness@pve!build"
 	d5SSHHost  = "ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com "
+	// d5SSHArgs is how every root read must be sent, as the fake ssh logs it.
+	d5SSHArgs = "-o BatchMode=yes -o ConnectTimeout=15 root@qa-pve-02.lab.quantum.com "
 )
 
 var d5V4Paths = []string{"/", "/vms", "/vms/105", "/vms/101", "/vms/600", "/nodes", "/nodes/qa-pve-02", "/storage", "/storage/local-lvm", "/storage/qa-dev-01-image-pool", "/sdn/zones/localnetwork/vmbr0/100", "/access", "/pool"}
@@ -107,6 +109,9 @@ func d5WorldAt(t *testing.T, phase string) d5World {
 	w := d5World{
 		"true": "",
 		"pvesh get /nodes/qa-pve-02/storage/pveforge-harness/status --output-format json": `{"active":1,"enabled":1,"type":"zfspool"}`,
+		// datacenter.cfg with no user-tag-access set: user-allow defaults to
+		// free, and there are no registered tags.
+		"pvesh get /cluster/options --output-format json": `{"keyboard":"en-us"}`,
 	}
 	if at >= 1 {
 		for name, privs := range d5Roles(t) {
@@ -426,7 +431,8 @@ func checkD5(t *testing.T, c d5Case, r d5Result) {
 func d5GreenCases(t *testing.T) []d5Case {
 	tokenWorld := d5TokenWorld(t, "pre")
 	return []d5Case{
-		{name: "p0", script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), wantPass: 14},
+		{name: "p0", script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), wantPass: 16},
+		{name: "p0, user-allow list naming the tag", script: "verify-root.sh", phase: "p0", world: d5WithOptions(t, `{"user-tag-access":{"user-allow":"list","user-allow-list":["other","pveforge-harness"]}}`), wantPass: 16},
 		{name: "roles", script: "verify-root.sh", phase: "roles", world: d5WorldAt(t, "roles"), wantPass: 4},
 		{name: "owner", script: "verify-root.sh", phase: "owner", world: d5WorldAt(t, "owner"), wantPass: 6},
 		{name: "granted", script: "verify-root.sh", phase: "granted", world: d5WorldAt(t, "granted"), wantPass: 6},
@@ -437,6 +443,13 @@ func d5GreenCases(t *testing.T) []d5Case {
 		{name: "token pre", script: "verify-token.sh", phase: "pre", token: tokenWorld, wantPass: 2 + 2*4 + 2 + 3 + 2},
 		{name: "token post", script: "verify-token.sh", phase: "post", token: d5TokenWorld(t, "post"), wantPass: 2 + 2*4 + 2 + 3 + 2},
 	}
+}
+
+// d5WithOptions is the p0 world with the given /cluster/options answer.
+func d5WithOptions(t *testing.T, options string) d5World {
+	w := d5WorldAt(t, "p0")
+	w["pvesh get /cluster/options --output-format json"] = options
+	return w
 }
 
 // d5TokenWorld is the token side's answers, keyed like the fake pveforge.
@@ -472,6 +485,13 @@ func TestD5Verify_Green(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			r := runD5(t, c)
 			checkD5(t, c, r)
+			// Every root read goes out non-interactive, key-based: S0's whole
+			// purpose is lost if one call drops BatchMode.
+			for _, l := range strings.Split(strings.TrimSpace(r.sshLog), "\n") {
+				if l != "" && !strings.HasPrefix(l, d5SSHArgs) {
+					t.Errorf("an ssh call without BatchMode or the pinned host: %q", l)
+				}
+			}
 			if !strings.Contains(r.result, "RESULT phase=") {
 				t.Errorf("no RESULT line:\n%s", r.result)
 			}
@@ -490,8 +510,8 @@ func TestD5Verify_Green(t *testing.T) {
 				if !strings.Contains(r.result, "pinned key type: (ECDSA)") && !strings.Contains(r.stderr, "(ECDSA)") {
 					t.Logf("result:\n%s", r.result)
 				}
-				if first := strings.SplitN(r.sshLog, "\n", 2)[0]; first != "true" {
-					t.Errorf("the first ssh command was %q; the BatchMode check must come first", first)
+				if first := strings.SplitN(r.sshLog, "\n", 2)[0]; first != d5SSHArgs+"true" {
+					t.Errorf("the first ssh call was %q; the BatchMode check must come first", first)
 				}
 			}
 		})
@@ -511,16 +531,17 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		want                         []string
 	}
 	const (
-		acl    = "pveum acl list --output-format json"
-		roles  = "pveum role list --output-format json"
-		users  = "pveum user list --output-format json"
-		groups = "pveum group list --output-format json"
-		pools  = "pvesh get /pools --output-format json"
-		pool   = "pvesh get /pools --poolid pveforge-harness --output-format json"
-		store  = "pvesh get /nodes/qa-pve-02/storage/pveforge-harness/status --output-format json"
-		tokens = "pveum user token list " + d5User + " --output-format json"
-		ttree  = "pveum user token permissions " + d5User + " build --output-format json"
-		utree  = "pveum user permissions " + d5User + " --output-format json"
+		acl     = "pveum acl list --output-format json"
+		roles   = "pveum role list --output-format json"
+		users   = "pveum user list --output-format json"
+		groups  = "pveum group list --output-format json"
+		pools   = "pvesh get /pools --output-format json"
+		pool    = "pvesh get /pools --poolid pveforge-harness --output-format json"
+		store   = "pvesh get /nodes/qa-pve-02/storage/pveforge-harness/status --output-format json"
+		options = "pvesh get /cluster/options --output-format json"
+		tokens  = "pveum user token list " + d5User + " --output-format json"
+		ttree   = "pveum user token permissions " + d5User + " build --output-format json"
+		utree   = "pveum user permissions " + d5User + " --output-format json"
 	)
 	v4 := func(p string) string {
 		return "pveum user token permissions " + d5User + " build --path " + p + " --output-format json"
@@ -532,6 +553,10 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "P3 the user exists", phase: "p0", worldAt: "p0", mutate: map[string]string{users: `. + [{"userid":"pveforge-harness@pve","enable":1,"expire":0}]`}, want: []string{"P3"}},
 		{name: "P4 a row for the user exists", phase: "p0", worldAt: "p0", mutate: map[string]string{acl: `. + [` + userRow + `]`}, want: []string{"P4"}},
 		{name: "P5 storage inactive", phase: "p0", worldAt: "p0", mutate: map[string]string{store: `.active = 0`}, want: []string{"P5"}},
+		{name: "P6 the tag is registered (privileged)", phase: "p0", worldAt: "p0", mutate: map[string]string{options: `. + {"registered-tags":["pveforge-harness"]}`}, want: []string{"P6"}},
+		{name: "P6 user-allow none", phase: "p0", worldAt: "p0", mutate: map[string]string{options: `. + {"user-tag-access":{"user-allow":"none","user-allow-list":["pveforge-harness"]}}`}, want: []string{"P6"}},
+		{name: "P6 user-allow list without the tag", phase: "p0", worldAt: "p0", mutate: map[string]string{options: `. + {"user-tag-access":{"user-allow":"list","user-allow-list":["other"]}}`}, want: []string{"P6"}},
+		{name: "P6 user-allow existing", phase: "p0", worldAt: "p0", mutate: map[string]string{options: `. + {"user-tag-access":{"user-allow":"existing"}}`}, want: []string{"P6"}},
 		{name: "K1 the pinned key is not served", phase: "p0", worldAt: "p0", keyscanTypes: []string{"ed25519"}, want: []string{"K1"}},
 		{name: "K1 pin is another key", phase: "p0", worldAt: "p0", pin: "SHA256:someone-else", want: []string{"K1"}},
 		{name: "V0 a harness role widened", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "PveforgeHarnessIso" then .privs = "Datastore.Audit,Datastore.AllocateTemplate" else . end)`}, want: []string{"V0"}},
@@ -539,6 +564,9 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "L1b a harness role marked special", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "PveforgeHarnessNet" then .special = 1 else . end)`}, want: []string{"L1b"}},
 		{name: "L1b privs as an array", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "PveforgeHarnessNet" then .privs = ["SDN.Use"] else . end)`}, want: []string{"V0", "L1b"}},
 		{name: "O1 the pool has a member", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-02"}]`}, want: []string{"O1"}},
+		{name: "O2 the user expires", phase: "owner", worldAt: "owner", mutate: map[string]string{users: `map(if .userid == "pveforge-harness@pve" then .expire = 1893456000 else . end)`}, want: []string{"O2"}},
+		{name: "O1 two pools answered", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `. + [{"poolid":"pveforge-harness","members":[]}]`}, want: []string{"O1"}},
+		{name: "O1 another pool answered", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `map(.poolid = "other-pool")`}, want: []string{"O1"}},
 		{name: "O2 the user disabled", phase: "owner", worldAt: "owner", mutate: map[string]string{users: `map(if .userid == "pveforge-harness@pve" then .enable = 0 else . end)`}, want: []string{"O2"}},
 		{name: "O3 the user already holds a row", phase: "owner", worldAt: "owner", mutate: map[string]string{acl: `. + [` + userRow + `]`}, want: []string{"O3"}},
 		{name: "V1u a user row propagates", phase: "granted", worldAt: "granted", mutate: map[string]string{acl: `map(if .ugid == "pveforge-harness@pve" and .path == "/storage/local" then .propagate = 1 else . end)`}, want: []string{"V1u"}},
@@ -554,6 +582,9 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "V5 the user's tree widened (token)", phase: "token", worldAt: "token", mutate: map[string]string{utree: `.["/storage/local"] += {"Datastore.AllocateTemplate":0}`}, want: []string{"V5"}},
 		{name: "V4 the token holds something at /", phase: "token", worldAt: "token", mutate: map[string]string{v4("/"): `{"/":{"VM.Audit":1}}`}, want: []string{"V4"}},
 		{name: "V4 a bare {} answer", phase: "token", worldAt: "token", mutate: map[string]string{v4("/storage/local-lvm"): `{}`}, want: []string{"V4"}},
+		{name: "V7 two pools answered", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `. + [{"poolid":"pveforge-harness","members":[]}]`}, want: []string{"V7"}},
+		{name: "V7 another pool answered", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `map(.poolid = "other-pool")`}, want: []string{"V7"}},
+		{name: "V4 an extra path in the answer", phase: "token", worldAt: "token", mutate: map[string]string{v4("/"): `{"/":{},"/vms":{}}`}, want: []string{"V4"}},
 		{name: "V7 a foreign member", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-02"}]`}, want: []string{"V7"}},
 		{name: "V7 a storage member", phase: "post", worldAt: "post", mutate: map[string]string{pool: `.[0].members += [{"type":"storage","storage":"local"}]`}, want: []string{"V7"}},
 		{name: "V7 a member missing (post)", phase: "post", worldAt: "post", mutate: map[string]string{pool: `.[0].members |= map(select(.vmid != 691))`}, want: []string{"V7"}},
@@ -570,6 +601,7 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "V7t-node a member elsewhere", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-01"},{"type":"qemu","vmid":691,"node":"qa-pve-02"},{"type":"qemu","vmid":692,"node":"qa-pve-02"}]}]`}, want: []string{"V7t-node"}},
 		{name: "V7t a storage member", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-02"},{"type":"qemu","vmid":691,"node":"qa-pve-02"},{"type":"qemu","vmid":692,"node":"qa-pve-02"},{"type":"storage","storage":"local","node":"qa-pve-02"}]}]`}, want: []string{"V7t"}},
 		{name: "K1 no pin for qa-pve-02", phase: "p0", worldAt: "p0", pin: "-", want: []string{"K1"}},
+		{name: "Z0 an extra path in the answer", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/permissions path=/storage/local-lvm": `{"/storage/local-lvm":{},"/x":{}}`}, want: []string{"Z0"}},
 		{name: "Z0 a bare {} for a path held nothing on", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/permissions path=/storage/local-lvm": `{}`}, want: []string{"Z0"}},
 		{name: "a failed token read is red, and so is its check", script: "verify-token.sh", phase: "pre", tokenRC: map[string]int{"get /access/acl": 1}, want: []string{"fetch", "V1t"}},
 		{name: "a failed root read is red, and so are its checks", phase: "token", worldAt: "token", sshRC: map[string]int{tokens: 1}, want: []string{"fetch", "V2"}},
@@ -609,7 +641,7 @@ func TestD5Verify_RefusalsAndTheBatchModeGate(t *testing.T) {
 		c       d5Case
 		wantLog string // exact ssh log; "-" = not checked
 	}{
-		{c: d5Case{name: "root ssh not key-based", script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), sshRC: map[string]int{"true": 255}, wantCode: 1, wantPass: 0, wantRed: []string{"S0"}, wantErr: "need non-interactive, key-based root ssh"}, wantLog: "true\n"},
+		{c: d5Case{name: "root ssh not key-based", script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), sshRC: map[string]int{"true": 255}, wantCode: 1, wantPass: 0, wantRed: []string{"S0"}, wantErr: "need non-interactive, key-based root ssh"}, wantLog: d5SSHArgs + "true\n"},
 		{c: d5Case{name: "no HARNESS_EVIDENCE", script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), noEvidenceVar: true, wantCode: 2, wantPass: 0, wantErr: "HARNESS_EVIDENCE must name a new directory"}, wantLog: ""},
 		{c: d5Case{name: "evidence directory exists", script: "verify-root.sh", phase: "roles", world: d5WorldAt(t, "roles"), evidenceExists: true, wantCode: 2, wantPass: 0, wantErr: "evidence is never overwritten"}, wantLog: ""},
 		{c: d5Case{name: "unknown phase", script: "verify-root.sh", phase: "t0", world: d5WorldAt(t, "p0"), wantCode: 2, wantPass: 0, wantErr: "usage"}, wantLog: ""},
@@ -664,6 +696,11 @@ func d5Commands(t *testing.T, file string) (remote, local []string, text string)
 		if rest, ok := strings.CutPrefix(l, d5SSHHost); ok {
 			if len(rest) < 2 || (rest[0] != '\'' && rest[0] != '"') || rest[len(rest)-1] != rest[0] {
 				t.Fatalf("%s: remote command not quoted as one argument: %s", file, l)
+			}
+			// An interactive bash or zsh history-expands ! even inside double
+			// quotes; only single quotes protect it.
+			if rest[0] == '"' && strings.Contains(rest, "!") {
+				t.Errorf("%s: a ! inside a double-quoted remote command is history-expanded by an interactive shell: %s", file, l)
 			}
 			remote = append(remote, rest[1:len(rest)-1])
 			continue
@@ -746,6 +783,12 @@ func TestD5Sequence_MatchesTheFixtures(t *testing.T) {
 	if boot == "" {
 		t.Fatal("no bootstrap line")
 	}
+	if !strings.HasSuffix(boot, ` -o json > "$E/g4-bootstrap.json"`) {
+		t.Errorf("the bootstrap line does not end with a quoted evidence redirect: %s", boot)
+	}
+	if !strings.Contains(text, `echo "E=$E"`) {
+		t.Error("G0 does not print the evidence path for the operator's G4 terminal")
+	}
 	for _, flag := range []string{"bootstrap qa-pve-02-harness ", "--roster ~/.config/pveforge/harness-outer.toml ", "--node qa-pve-02 ", "--no-ssh-key ", "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
 		if !strings.Contains(boot, flag) {
 			t.Errorf("bootstrap line lacks %q", flag)
@@ -796,8 +839,14 @@ func TestD5Sequence_MatchesTheFixtures(t *testing.T) {
 
 func TestD5Revert_UndoesTheSequenceInOrder(t *testing.T) {
 	roles, rows := d5Roles(t), d5Rows(t)
-	remote, _, _ := d5Commands(t, "revert.md")
-	del := regexp.MustCompile(`^pveum acl delete (\S+) --(users|tokens) '?([^' ]+)'? --roles (\S+)$`)
+	remote, _, text := d5Commands(t, "revert.md")
+	// A partial D5 has its own row: which R-steps to run for each gate reached.
+	for _, row := range []string{"| G0 ", "| G1 ", "| G2 ", "| G3 ", "| G4 `discarded` ", "| G4 `unverified`, G4 `minted`, or G5 "} {
+		if !strings.Contains(text, row) {
+			t.Errorf("revert.md has no row for %q", row)
+		}
+	}
+	del := regexp.MustCompile(`^pveum acl delete (\S+) --(users|tokens) "?([^" ]+)"? --roles (\S+)$`)
 	var gotRows []string
 	step := map[string]int{}
 	for i, c := range remote {

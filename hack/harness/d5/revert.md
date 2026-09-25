@@ -3,8 +3,32 @@
 Undoes `sequence.md`, in this order: PVE refuses to delete a pool that still
 has members, and deleting the user before its token strands the token's secret
 in `/etc/pve/priv/token.cfg`. Each command is run by hand, one at a time; stop
-at the first failure. The token id is single-quoted inside the remote command
-because `!` is history expansion in an interactive shell.
+at the first failure. Each remote command is one single-quoted argument: an
+interactive bash or zsh expands `!` (history expansion) even inside double
+quotes, so `"…!build…"` fails there with "event not found", while inside
+single quotes nothing is expanded. On qa-pve-02 the command runs under a
+non-interactive `sh -c`, which does no history expansion, so the token id can
+sit in double quotes inside it.
+
+## Which steps to run: it depends on how far D5 got
+
+An R-step fails on an object that does not exist (a role, pool or user never
+made, a token never minted, an ACL row never granted), so run only the steps
+for what the run actually made. Find the last gate that went green; for a gate
+that failed partway, also check each object with a read before deleting it
+(`pveum role list`, `pvesh get /pools`, `pveum user list`, `pveum acl list`,
+`pveum user token list pveforge-harness@pve`) and skip what is absent.
+
+| Last gate reached | What exists | Run |
+|---|---|---|
+| G0 (reads only) | nothing but the P0 baseline | nothing |
+| G1 (steps 1-4) | some or all of the four roles | R6 for each role present |
+| G2 (steps 5-6) | the roles; the pool and/or the user | R4 if the user exists, R5 if the pool exists, R6 |
+| G3 (steps 7-10) | the above, and some or all of the user's four rows | R2 user rows present, R4, R5, R6 |
+| G4 `discarded` | the above; no token (bootstrap removed its fresh one) | R2 user rows, R4, R5, R6; R7 if a token-less stub target was left in the roster |
+| G4 `unverified`, G4 `minted`, or G5 | everything, the token and its four rows included | R0-R7 in order |
+
+Then R-V in every case but G0.
 
 ## R0: the harness VMs
 
@@ -16,10 +40,10 @@ down VMs from an earlier run is a fresh operator ask, or root's hand
 ## R1-R2: the eight ACL rows
 
 ```
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com "pveum acl delete /pool/pveforge-harness --tokens 'pveforge-harness@pve!build' --roles PveforgeHarness"
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com "pveum acl delete /storage/pveforge-harness --tokens 'pveforge-harness@pve!build' --roles PveforgeHarnessSpace"
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com "pveum acl delete /storage/local --tokens 'pveforge-harness@pve!build' --roles PveforgeHarnessIso"
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com "pveum acl delete /sdn/zones/localnetwork/vmbr0 --tokens 'pveforge-harness@pve!build' --roles PveforgeHarnessNet"
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --tokens "pveforge-harness@pve!build" --roles PveforgeHarness'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --tokens "pveforge-harness@pve!build" --roles PveforgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --tokens "pveforge-harness@pve!build" --roles PveforgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --tokens "pveforge-harness@pve!build" --roles PveforgeHarnessNet'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarness'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarnessSpace'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --users pveforge-harness@pve --roles PveforgeHarnessIso'

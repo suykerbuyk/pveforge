@@ -23,13 +23,17 @@ Run everything from the repository root.
 
 ```
 E=~/.config/pveforge/harness-evidence/d5/$(date -u +%Y%m%dT%H%M%SZ)
+echo "E=$E"
 ```
+
+Record the printed `E=…` line with the G0 evidence. The operator's terminal at
+G4 is a different shell, so the operator sets `E` to that exact value there.
 
 ## G0: step 0, read-only
 
 ```
 install -d -m 700 ~/.config/pveforge
-HARNESS_EVIDENCE=$E/g0 D5_PIN_ROSTER=pveforge.toml hack/harness/d5/verify-root.sh p0
+HARNESS_EVIDENCE="$E"/g0 D5_PIN_ROSTER=pveforge.toml hack/harness/d5/verify-root.sh p0
 ```
 
 The FIRST thing it does is `ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com true`:
@@ -57,7 +61,7 @@ ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add PveforgeHarn
 Each must exit 0; record each status. Then:
 
 ```
-HARNESS_EVIDENCE=$E/g1 hack/harness/d5/verify-root.sh roles
+HARNESS_EVIDENCE="$E"/g1 hack/harness/d5/verify-root.sh roles
 ```
 
 V0 (the four roles are exactly the pinned definitions), V0b (every other custom
@@ -71,7 +75,7 @@ STOP. Evidence: `$E/g1/`.
 ```
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum pool add pveforge-harness --comment "pveforge nested harness (D5)"'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum user add pveforge-harness@pve --enable 1 --expire 0 --comment "pveforge harness token owner; no password"'
-HARNESS_EVIDENCE=$E/g2 hack/harness/d5/verify-root.sh owner
+HARNESS_EVIDENCE="$E"/g2 hack/harness/d5/verify-root.sh owner
 ```
 
 The user gets no password: it only owns the token. O1 (the pool exists, no
@@ -89,7 +93,7 @@ ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /pool/pvef
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /storage/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarnessSpace --propagate 0'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /storage/local --users pveforge-harness@pve --roles PveforgeHarnessIso --propagate 0'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles PveforgeHarnessNet --propagate 0'
-HARNESS_EVIDENCE=$E/g3 hack/harness/d5/verify-root.sh granted
+HARNESS_EVIDENCE="$E"/g3 hack/harness/d5/verify-root.sh granted
 ```
 
 V1u (the user's four rows are exactly the pinned ones), V1b (every other row is
@@ -106,11 +110,13 @@ read from `PVEFORGE_PVE_PASSWORD` or a terminal prompt. It never reaches an
 agent. The secret of the new token stays inside pveforge.
 
 `roster init` does not create the directory (G0 did), and refuses an existing
-file: check `~/.config/pveforge/harness-outer.toml` is absent first.
+file: check `~/.config/pveforge/harness-outer.toml` is absent first. First set
+`E` in this terminal to the value G0 printed (`E=…`), so the result lands with
+the other gates' evidence.
 
 ```
 pveforge roster init ~/.config/pveforge/harness-outer.toml
-pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml --host qa-pve-02.lab.quantum.com --node qa-pve-02 --insecure-tls --pve-user root@pam --no-ssh-key --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:PveforgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:PveforgeHarnessSpace:Datastore.AllocateSpace:0' --grant '/storage/local:PveforgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:PveforgeHarnessNet:SDN.Use:0' -o json > $E/g4-bootstrap.json
+pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml --host qa-pve-02.lab.quantum.com --node qa-pve-02 --insecure-tls --pve-user root@pam --no-ssh-key --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:PveforgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:PveforgeHarnessSpace:Datastore.AllocateSpace:0' --grant '/storage/local:PveforgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:PveforgeHarnessNet:SDN.Use:0' -o json > "$E/g4-bootstrap.json"
 ```
 
 Its stdout carries no secret. The gate: `token_outcome` is `minted`,
@@ -134,8 +140,8 @@ Implementor-run. `verify-token.sh` needs the harness roster's passphrase in
 `PVEFORGE_BIN`, the absolute path of the pveforge binary.
 
 ```
-HARNESS_EVIDENCE=$E/g5-root hack/harness/d5/verify-root.sh token
-HARNESS_EVIDENCE=$E/g5-token hack/harness/d5/verify-token.sh pre
+HARNESS_EVIDENCE="$E"/g5-root hack/harness/d5/verify-root.sh token
+HARNESS_EVIDENCE="$E"/g5-token hack/harness/d5/verify-token.sh pre
 ```
 
 Root side: V0, V0b, V1 (all 8 rows), V1b, V1c, V2 (privsep), V2b (the owner is

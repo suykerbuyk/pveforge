@@ -6,7 +6,8 @@
 # Usage: HARNESS_EVIDENCE=<new dir> verify-root.sh <phase>
 #   p0       step 0: non-interactive root ssh works (checked FIRST; steps 1-10
 #            need it), nothing named for the harness exists yet, the storage
-#            is active, and qa-pve-02's pinned host key (from D5_PIN_ROSTER's
+#            is active, the datacenter lets the token set the harness tag,
+#            and qa-pve-02's pinned host key (from D5_PIN_ROSTER's
 #            qa-pve-02 target) is one of the keys the host serves. When all
 #            pass, the P0 baseline (ACL list, roles, users, groups, pools) is
 #            written once to ~/.config/pveforge/harness-outer.p0, never
@@ -77,6 +78,17 @@ no_harness_pool() { jq -e --arg p "$D5_POOL" '[.[] | select(.poolid == $p)] == [
 no_harness_user() { jq -e --arg u "$D5_USER" '[.[] | select(.userid == $u)] == []' "$(ev users)"; }
 no_harness_rows() { jq -e --arg u "$D5_USER" --arg t "$D5_TOKEN" '[.[] | select(.ugid == $u or .ugid == $t)] == []' "$(ev acl)"; }
 storage_active() { jq -e '.active == 1' "$(ev storage)"; }
+# P6: the token will be allowed to set the harness tag, by PVE's own rule
+# (pve-guest-common GuestHelpers.pm, assert_tag_permissions and
+# get_allowed_tags): the tag is not in registered-tags, and user-tag-access's
+# user-allow is 'free' (the default) or, unless 'none', lists the tag.
+# 'existing' cannot hold here: no VM carries the tag before the build.
+tag_allowed() {
+	jq -e --arg t pveforge-harness '
+		((.["registered-tags"] // []) | any(.[]; . == $t) | not)
+		and ((.["user-tag-access"] // {}) as $u | ($u["user-allow"] // "free") as $a
+			| $a == "free" or ($a != "none" and (($u["user-allow-list"] // []) | any(.[]; . == $t))))' "$(ev options)"
+}
 pin_served() { # the pin is one of the served keys' fingerprints; says which
 	local pin
 	pin=$(pinned_fingerprint "$D5_PIN_ROSTER")
@@ -149,11 +161,13 @@ p0)
 	fetch groups 'pveum group list --output-format json'
 	fetch pools 'pvesh get /pools --output-format json'
 	fetch storage "pvesh get /nodes/$D5_NODE/storage/$D5_STORAGE/status --output-format json"
+	fetch options 'pvesh get /cluster/options --output-format json'
 	d5_check "P1 no $D5_ROLE_PREFIX role" no_harness_role
 	d5_check "P2 no pool $D5_POOL" no_harness_pool
 	d5_check "P3 no user $D5_USER" no_harness_user
 	d5_check "P4 no ACL row for $D5_USER or its token" no_harness_rows
 	d5_check "P5 storage $D5_STORAGE active on $D5_NODE" storage_active
+	d5_check "P6 the token may set tag pveforge-harness (datacenter user-tag-access)" tag_allowed
 	d5_check "fetch keyscan" keyscan
 	d5_check "K1 the pinned host key is one qa-pve-02 serves" pin_served
 	if [ "$D5_FAIL" = 0 ]; then
