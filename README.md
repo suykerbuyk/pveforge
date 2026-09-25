@@ -421,7 +421,11 @@ use one). The outer cluster's root password is never in the blob.
   memory and replaces itself with `<cmd>`, the values in its environment only:
   never on disk, never in argv. The identity variables are removed from that
   environment, and a secret whose name is already set refuses to run rather
-  than override it.
+  than override it. So is every variable through which an environment runs
+  code in a bash child before its first line: exported functions
+  (`BASH_FUNC_*`, which bash imports under any name, `declare` and `unset`
+  included, so no check inside a script can survive one), `SHELLOPTS`,
+  `BASHOPTS`, `BASH_ENV`, `ENV` and `PS4`. Everything else passes unchanged.
 - `unlock.sh seal` encrypts a new env file — read from stdin, or prompted for
   with no echo on a terminal — to every recipient. `unlock.sh reseal`
   re-encrypts the current secrets to the current recipients. `unlock.sh status`

@@ -315,6 +315,24 @@ func TestChildEnv(t *testing.T) {
 	}
 }
 
+// Every variable through which the environment runs code in a bash child is
+// dropped, each on its own; look-alike names pass unchanged.
+func TestChildEnv_DropsShellCodeVariables(t *testing.T) {
+	keep := []string{"PATH=/bin", "HOME=/h", "PVEFORGE_BIN=/opt/pveforge", "BASH_FUNCS=x", "MY_BASH_FUNC_y=x", "ENVIRONMENT=x", "PS1=x", "PS4X=x", "XENV=x", "BASH_XTRACEFD=9"}
+	for _, drop := range []string{
+		"BASH_FUNC_declare%%=() {  :; }", "BASH_FUNC_unset%%=() {  :; }", "BASH_FUNC_x%%=", "BASH_FUNC_=",
+		"SHELLOPTS=xtrace", "BASHOPTS=extdebug", "BASH_ENV=/tmp/x", "ENV=/tmp/x", "PS4=$(id)", "SHELLOPTS=",
+	} {
+		env, err := ChildEnv(append(append([]string{}, keep...), drop), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(env, keep) {
+			t.Errorf("with %q: env = %q, want %q", drop, env, keep)
+		}
+	}
+}
+
 // --- the commands --------------------------------------------------------
 
 func TestRun_ExecsWithTheSecretsInTheEnvironmentOnly(t *testing.T) {
