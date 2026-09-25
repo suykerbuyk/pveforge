@@ -126,7 +126,12 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
   run, a different value is refused before anything is dialed. The keyless
   root commands (`user ensure`, `group ensure`, `acl grant`, `access
   inventory` and `vm create --unique-tag`, each with `--no-ssh-key`) take the
-  same flag.
+  same flag; a target that holds a pin is checked against it on every
+  connection, `--no-ssh-key` included, and the flag may only repeat it. The
+  pin is compared with the key type pveforge's SSH client negotiates: ECDSA
+  when the host serves one, as PVE does by default. Pinning the host's
+  ED25519 key there is refused (fail-closed), and the error names the type it
+  got; `ssh-keyscan <host> | ssh-keygen -lf -` lists every type served.
 - Re-running `bootstrap` with different grants, or a different owner, can
   replace, revoke or orphan the held token. `--help` describes each case.
   **The command's own output and its stderr warnings are the record of what

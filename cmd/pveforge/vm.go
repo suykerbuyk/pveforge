@@ -137,6 +137,8 @@ the exit status is still 0: the create task succeeded.`,
 				}
 			} else if noSSHKey {
 				return errors.New("vm create: --no-ssh-key only applies with --unique-tag, whose check runs as root")
+			} else if cmd.Flags().Changed("host-key-fingerprint") {
+				return errors.New("vm create: --host-key-fingerprint only applies with --unique-tag, whose check runs as root over SSH")
 			}
 			// Guard the sentinel, not a range: NextVMID reads pin == 0 as
 			// "no pin, auto-allocate", and auto-allocation is explicitly

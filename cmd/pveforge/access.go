@@ -37,9 +37,9 @@ const accessSSHPort = "22"
 // text can never drift from the list the checks use.
 var escalatingList = strings.Join(bootstrap.EscalatingPrivileges, ", ")
 
-const hostKeyFingerprintAccessUsage = "the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: with --no-ssh-key the password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; with a stored key it must equal the pinned one, or nothing is dialed"
+const hostKeyFingerprintAccessUsage = "the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
 
-const noSSHKeyAccessUsage = "connect as root with the PVE password (" + pvePasswordEnvVar + ", else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key"
+const noSSHKeyAccessUsage = "connect as root with the PVE password (" + pvePasswordEnvVar + ", else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key"
 
 // openRootAccess loads targetID and returns its RootAccess, dialing nothing
 // yet, and a func that closes whatever it opened. tokenView gives it the
@@ -71,8 +71,12 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 	if !noSSHKey && t.SSH == nil {
 		return nil, nil, nil, nil, fmt.Errorf("target %q holds no SSH key: pass --no-ssh-key to connect as root with the PVE password for this run", targetID)
 	}
-	// The operator's pin, checked before the passphrase is asked for and
-	// before anything is dialed.
+	// The pin every connection is checked against, settled before the
+	// passphrase is asked for and before anything is dialed. A target that
+	// holds a pinned host key is pinned to it for every connection, the
+	// password ones (--no-ssh-key) included: the flag may repeat that pin,
+	// never replace it. Only a target that holds none takes the flag's pin,
+	// or else trusts the host key on first use.
 	pin, err := cmd.Flags().GetString("host-key-fingerprint")
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -81,9 +85,12 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 		if err := sshexec.CheckFingerprint(pin); err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint: %w", err)
 		}
-		if !noSSHKey && pin != t.SSH.HostKeyFingerprint {
+	}
+	if t.SSH != nil && t.SSH.HostKeyFingerprint != "" {
+		if pin != "" && pin != t.SSH.HostKeyFingerprint {
 			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint %s is not the host key target %q is pinned to (%s); nothing was dialed", pin, targetID, t.SSH.HostKeyFingerprint)
 		}
+		pin = t.SSH.HostKeyFingerprint
 	}
 	pass, err := roster.ResolvePassphraseContext(cmd.Context())
 	if err != nil {

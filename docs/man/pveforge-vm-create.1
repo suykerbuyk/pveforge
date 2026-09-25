@@ -83,7 +83,7 @@ the exit status is still 0: the create task succeeded.
 
 .PP
 \fB--host-key-fingerprint\fP=""
-	with --unique-tag: the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: with --no-ssh-key the password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; with a stored key it must equal the pinned one, or nothing is dialed
+	with --unique-tag: the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves.
 
 .PP
 \fB--json\fP=""
@@ -99,7 +99,7 @@ the exit status is still 0: the create task succeeded.
 
 .PP
 \fB--no-ssh-key\fP[=false]
-	with --unique-tag: connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key
+	with --unique-tag: connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key
 
 .PP
 \fB--roster\fP=""

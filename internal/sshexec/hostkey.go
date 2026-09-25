@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -67,8 +68,21 @@ func PinnedHostKeyCallback(wantFingerprint string) (ssh.HostKeyCallback, error) 
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		got := ssh.FingerprintSHA256(key)
 		if got != wantFingerprint {
-			return fmt.Errorf("host key mismatch for %s: got %s, want %s (possible MITM, or the host was rebuilt/rekeyed — reconcile deliberately, do not silently re-pin)", hostname, got, wantFingerprint)
+			return fmt.Errorf("host key mismatch for %s: got %s %s, want %s; pveforge compares the key type it negotiates (ECDSA when the host serves one), so a pin of another type the host also serves is refused too (possible MITM, or the host was rebuilt/rekeyed, or the pin is of another key type — reconcile deliberately, do not silently re-pin)", hostname, keyTypeName(key.Type()), got, wantFingerprint)
 		}
 		return nil
 	}, nil
+}
+
+// keyTypeName is a host key type as ssh-keygen -l names it.
+func keyTypeName(t string) string {
+	switch {
+	case t == ssh.KeyAlgoED25519:
+		return "ED25519"
+	case strings.HasPrefix(t, "ecdsa-sha2-"):
+		return "ECDSA"
+	case t == ssh.KeyAlgoRSA:
+		return "RSA"
+	}
+	return t
 }

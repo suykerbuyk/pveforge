@@ -31,7 +31,7 @@ Bootstrap a target from PAM/realm username+password to a fully token-authenticat
 
 .PP
 \fB--host-key-fingerprint\fP=""
-	the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: the password connection (the key install's, or --no-ssh-key's) must present that key, checked before the password is sent, instead of trusting the host key on first use. For a target that already holds a pinned key, a different value is refused before any connection
+	the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: the password connection (the key install's, or --no-ssh-key's) must present that key, checked before the password is sent, instead of trusting the host key on first use. For a target that already holds a pinned key, a different value is refused before any connection. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves.
 
 .PP
 \fB--insecure-tls\fP[=false]
