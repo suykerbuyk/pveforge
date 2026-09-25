@@ -1,0 +1,35 @@
+# The Proxmox VE automated-installation answer file for one nested node,
+# rendered by prepare-iso.sh into ~/.config/pveforge/harness-build/ (never
+# committed rendered). Each placeholder is replaced by a value already
+# checked against its pattern; the root password is only ever its SHA-512
+# crypt hash.
+# `proxmox-auto-install-assistant validate-answer` is the authority on the
+# schema (the NIC filter, interface-name pinning).
+
+[global]
+keyboard = "@KEYBOARD@"
+country = "@COUNTRY@"
+fqdn = "@FQDN@"
+mailto = "@MAILTO@"
+timezone = "@TIMEZONE@"
+root-password-hashed = "@ROOT_PASSWORD_HASHED@"
+root-ssh-keys = ["@ROOT_SSH_KEY@"]
+reboot-on-error = false
+
+[network]
+source = "from-answer"
+cidr = "@CIDR@"
+dns = "@DNS@"
+gateway = "@GATEWAY@"
+# The NIC build.sh gives this node, by the address it sets on net0.
+filter.ID_NET_NAME_MAC = "*@MAC_HEX@"
+
+[network.interface-name-pinning]
+enabled = true
+
+[network.interface-name-pinning.mapping]
+"@MAC@" = "nic0"
+
+[disk-setup]
+filesystem = "ext4"
+disk-list = ["sda"]

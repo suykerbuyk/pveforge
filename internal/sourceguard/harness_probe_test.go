@@ -57,6 +57,10 @@ type probeSpec struct {
 	kill map[string]map[int]string // key -> call number -> signal sent to the probe
 	args []string
 	env  map[string]string
+	// script is the harness script run, relative to hack/harness (default
+	// probe.sh); bashArgs go to bash before it.
+	script   string
+	bashArgs []string
 	// setup prepares $HOME before the run; stubs are scripts put first in
 	// PATH, by name.
 	setup func(t *testing.T, home string)
@@ -64,6 +68,8 @@ type probeSpec struct {
 	// block is a key whose first call waits until onBlock has returned.
 	block   string
 	onBlock func(t *testing.T, b blocked)
+	// stdin, when set, is the script's standard input.
+	stdin string
 	// out is where stdout and stderr go: "" (captured), "pipe" (one pipe,
 	// as "2>&1 | head" gives; the test can close its reading end) or "pty"
 	// (a terminal; the test can hang it up).
@@ -142,7 +148,11 @@ func (r probeResult) writes() []string {
 
 func runProbe(t *testing.T, s probeSpec) probeResult {
 	t.Helper()
-	probe, err := filepath.Abs(filepath.Join(harnessDir, "probe.sh"))
+	script := s.script
+	if script == "" {
+		script = "probe.sh"
+	}
+	probe, err := filepath.Abs(filepath.Join(harnessDir, script))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +254,7 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", append([]string{probe}, s.args...)...)
+	cmd := exec.CommandContext(ctx, "bash", append(append(append([]string{}, s.bashArgs...), probe), s.args...)...)
 	cmd.Dir = work
 	cmd.WaitDelay = 5 * time.Second
 	// Its own process group: a signal the fake sends to its group never
@@ -293,6 +303,9 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 		defer hangup()
 	default:
 		t.Fatalf("out %q", s.out)
+	}
+	if s.stdin != "" {
+		cmd.Stdin = strings.NewReader(s.stdin)
 	}
 	res := probeResult{home: home}
 	if err := cmd.Start(); err != nil {
