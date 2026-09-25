@@ -42,6 +42,8 @@ var noParallel = []struct{ pkg, why string }{
 	{"internal/lock", "pollInterval and defaultWait, which the lock-wait tests shorten"},
 	{"internal/netguard", "its own recorder (installed, violations, expecting, observedDials), which its tests reset"},
 	{"internal/pvefake", "DrainJoinTimeout, the RecordStdin mode's drain bound, which TestSSHServer_BoundedDrainRecordsTruncation lowers"},
+	{"internal/harnesssecrets", "the execve, isTerminal and readSecret seams; t.Setenv"},
+	{"cmd/pveforge-harness-secrets", "t.Setenv, and child processes whose HOME and TMPDIR each test points at its own directory"},
 }
 
 // parallelAllowed lists the packages whose tests touch no process-global

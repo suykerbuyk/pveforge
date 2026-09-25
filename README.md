@@ -90,6 +90,9 @@ not.
 | `PVEFORGE_ROSTER` | Roster path, when `--roster` is not given |
 | `PVEFORGE_ROSTER_PASSPHRASE` | The roster passphrase; without it, a terminal prompt (never for `roster import-token`, whose stdin is the token secret). Removed from `exec`'s command's environment |
 | `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password, and root's password for `user ensure`, `group ensure`, `acl grant` and `access inventory` with `--no-ssh-key`; without it, a terminal prompt. Removed from `exec`'s command's environment |
+| `PVEFORGE_HARNESS_AGE_IDENTITY_FILE` | Not read by pveforge. The nested-harness secrets helper (`hack/harness/unlock.sh`): a file holding one consumer's private age identity, mode 0600 or 0400, owned by the user; see "Harness secrets". Removed from `unlock.sh run`'s command's environment |
+| `PVEFORGE_HARNESS_AGE_IDENTITY` | Not read by pveforge. The same identity's content, for a CI runner's secret store; exactly one of the two may be set. Removed from `unlock.sh run`'s command's environment |
+| `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD` | Not read by pveforge. Set by `unlock.sh run` from the sealed secrets: the nested harness nodes' test root password, which the harness passes to `bootstrap` as `PVEFORGE_PVE_PASSWORD` for a nested node only |
 | `PVEFORGE_PVE_AUTHORIZATION` | Set by `exec` in its command's environment, never read by pveforge: the `Authorization` header value `PVEAPIToken=<token id>=<secret>` |
 
 ## Bootstrap
@@ -399,6 +402,59 @@ owed to the nested PVE test harness:
   beyond `args` are root-only.
 
 pveforge has been exercised on PVE 9.2.11 only. It has no VM migration support.
+
+## Harness secrets
+
+The nested test harness (`hack/harness/`) keeps its two secrets — the harness
+roster passphrase (`PVEFORGE_ROSTER_PASSPHRASE`) and the nested nodes' test
+root password (`PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD`) — in
+`hack/harness/secrets.age`, age ciphertext committed to the repository, sealed
+to the public recipients in `hack/harness/recipients.txt`. Each consumer (the
+operator, each CI runner) has its own private age identity, which is never
+committed. No password manager is required; keep a backup of your identity
+wherever you keep such things (any offline medium, or a password manager if you
+use one). The outer cluster's root password is never in the blob.
+
+- `hack/harness/unlock.sh run [--] <cmd> [args…]` decrypts the secrets in
+  memory and replaces itself with `<cmd>`, the values in its environment only:
+  never on disk, never in argv. The identity variables are removed from that
+  environment, and a secret whose name is already set refuses to run rather
+  than override it.
+- `unlock.sh seal` encrypts a new env file — read from stdin, or prompted for
+  with no echo on a terminal — to every recipient. `unlock.sh reseal`
+  re-encrypts the current secrets to the current recipients. `unlock.sh status`
+  shows the recipients and, with an identity set, the variable names; never a
+  value.
+- The identity comes from exactly one of `PVEFORGE_HARNESS_AGE_IDENTITY_FILE`
+  (a file of mode 0600 or 0400, owned by you) and
+  `PVEFORGE_HARNESS_AGE_IDENTITY` (its content). Both, neither, or an empty one
+  is refused.
+- The env file is `NAME=value` lines (plus `#` comments and blank lines),
+  parsed without a shell: the value is the rest of the line, verbatim. Only
+  `PVEFORGE_ROSTER_PASSPHRASE` and `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD` are
+  accepted — age does not authenticate who sealed a blob, so this list is what
+  stops a committed blob from setting anything else in a CI command's
+  environment. Adding a name is a code change.
+
+**Enabling a CI runner** (a one-time human act): `age-keygen -o runner.key`;
+store the key's content in the runner's secret store as
+`PVEFORGE_HARNESS_AGE_IDENTITY`, then delete the local file; add its `age1…`
+line to `recipients.txt` as `<recipient> # ci-runner-<name>`; run
+`unlock.sh reseal` with your own identity; commit both files. Before any
+`reseal`, a human must review the `recipients.txt` diff line by line: a
+recipient someone else committed would otherwise be sealed to, and its holder
+could decrypt the secrets from then on. Harness runs
+happen only on a self-hosted runner in the lab, on protected branches or a
+manual trigger, never for pull requests from forks.
+
+**Revoking a consumer.** Removing a recipient does **not** revoke that key's
+access to older copies of `secrets.age` in git history: whoever holds it can
+still decrypt every blob it was ever sealed to. Revocation is therefore:
+remove the recipient, **rotate the values**, then `reseal` and commit. Rotating
+the harness roster passphrase means a new harness roster and a re-run of
+`pveforge bootstrap` for the harness token, because pveforge has no command to
+change a roster's passphrase today; rotating the nested password means
+re-provisioning the nested nodes with a new one.
 
 ## Development
 

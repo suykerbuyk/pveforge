@@ -90,11 +90,12 @@ func offlineGoEnv(t *testing.T, env []string, args ...string) string {
 //   - upstream-absent: the upstream module is in no require, no go.sum
 //     line and nowhere in `go list -m all`;
 //   - notices-versions: THIRD-PARTY-NOTICES.md lists exactly the modules
-//     linked into cmd/pveforge — every non-standard-library module of `go
-//     list -deps ./cmd/pveforge` on any of noticesPlatforms, and nothing
-//     else — each at the version go.mod requires. A missing row is a
-//     licence-attribution gap; a stale version misattributes whose code
-//     pveforge ships.
+//     linked into the module's binaries — every non-standard-library module
+//     of `go list -deps` over every main package (cmd/pveforge, and the
+//     harness's cmd/pveforge-harness-secrets) on any of noticesPlatforms,
+//     and nothing else — each at the version go.mod requires. A missing row
+//     is a licence-attribution gap; a stale version misattributes whose
+//     code pveforge ships.
 //
 // Anti-vacuity: the fork is found in the requires, in go.sum and in the
 // module graph, so these rules are reading the real module. The graph is
@@ -208,13 +209,17 @@ func TestModuleGraph_ForkPinnedAndUpstreamAbsent(t *testing.T) {
 			t.Errorf("read %d module rows, fork's among them: %v: the guard is not reading the real table", len(listed), listed[forkModule])
 		}
 
-		// Completeness: the modules linked into the binary, on every
-		// platform, are exactly the listed ones.
+		// Completeness: the modules linked into the binaries — every main
+		// package — on every platform, are exactly the listed ones.
+		mains := strings.Fields(offlineGo(t, "list", "-f", `{{if eq .Name "main"}}{{.ImportPath}}{{end}}`, "./..."))
+		if !slices.Contains(mains, "github.com/suykerbuyk/pveforge/cmd/pveforge") || !slices.Contains(mains, "github.com/suykerbuyk/pveforge/cmd/pveforge-harness-secrets") {
+			t.Fatalf("main packages = %v: cmd/pveforge and cmd/pveforge-harness-secrets must both be among them", mains)
+		}
 		linked := map[string][]string{} // module -> the platforms linking it
 		for _, p := range noticesPlatforms {
 			goos, goarch, _ := strings.Cut(p, "/")
 			out := offlineGoEnv(t, []string{"GOOS=" + goos, "GOARCH=" + goarch},
-				"list", "-deps", "-f", "{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}", "./cmd/pveforge")
+				append([]string{"list", "-deps", "-f", "{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}"}, mains...)...)
 			for _, m := range strings.Fields(out) {
 				if !slices.Contains(linked[m], p) {
 					linked[m] = append(linked[m], p)
@@ -223,12 +228,12 @@ func TestModuleGraph_ForkPinnedAndUpstreamAbsent(t *testing.T) {
 		}
 		for m, platforms := range linked {
 			if !listed[m] {
-				t.Errorf("%s is linked into cmd/pveforge (%s) but has no row in THIRD-PARTY-NOTICES.md: add it, with the licence from its own LICENSE file", m, strings.Join(platforms, ", "))
+				t.Errorf("%s is linked into a binary of this module (%s) but has no row in THIRD-PARTY-NOTICES.md: add it, with the licence from its own LICENSE file", m, strings.Join(platforms, ", "))
 			}
 		}
 		for m := range listed {
 			if _, ok := linked[m]; !ok {
-				t.Errorf("THIRD-PARTY-NOTICES.md lists %s, which no platform links into cmd/pveforge any more: remove its row", m)
+				t.Errorf("THIRD-PARTY-NOTICES.md lists %s, which no platform links into any binary of this module any more: remove its row", m)
 			}
 		}
 		// Anti-vacuity: the dependency walk saw the fork, on every platform.

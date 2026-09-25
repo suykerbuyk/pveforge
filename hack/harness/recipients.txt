@@ -1,0 +1,4 @@
+# Public age recipients that hack/harness/secrets.age is sealed to, one per
+# line: `<age1… recipient> # <consumer>`. Public keys only: never a private
+# identity. After editing, run `hack/harness/unlock.sh reseal` and commit
+# both files. See README.md, "Harness secrets".
