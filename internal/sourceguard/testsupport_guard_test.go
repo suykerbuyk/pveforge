@@ -24,6 +24,38 @@ var testSupport = []string{
 	"internal/sourceguard",
 }
 
+// harnessToolMains are the nested harness's own tool binaries, never pveforge
+// itself, each allowed to link the one test-support package it exists to
+// run. cmd/pveforge-harness-accept runs internal/harness's guard (Open) and
+// its acceptance against the nested cluster for hack/harness/golden.sh and
+// reset.sh. Every other main, cmd/pveforge above all, is still held to
+// exclude every testSupport package from its closure; and each entry must be
+// a main that really imports its package, so the exception names something
+// real.
+var harnessToolMains = map[string]string{
+	"cmd/pveforge-harness-accept": "internal/harness",
+}
+
+// harnessToolMayLink is the whole exception: package importPath, named
+// pkgName, may link test-support package imported (a full import path) only
+// if it is a main of this module that harnessToolMains names, exactly, for
+// exactly that package.
+func harnessToolMayLink(pkgName, importPath, imported string) bool {
+	if pkgName != "main" {
+		return false
+	}
+	tool, ok := strings.CutPrefix(importPath, modulePath)
+	if !ok {
+		return false
+	}
+	rel, ok := strings.CutPrefix(imported, modulePath)
+	if !ok {
+		return false
+	}
+	allowed, ok := harnessToolMains[tool]
+	return ok && allowed == rel
+}
+
 // harnessSuites are the nested-harness suite packages
 // (pveforge-harness-guard): test files only, run with -tags harness against
 // the nested cluster. Nothing may import them, so the test-support
@@ -101,6 +133,7 @@ func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
 	}
 	var mains []string
 	importedByProduction := map[string][]string{} // import path -> non-test importers outside the table
+	toolLinks := map[string]bool{}                // harness tool main -> it imports its allowed package
 	for _, p := range pkgs {
 		if p.Name == "main" {
 			mains = append(mains, p.ImportPath)
@@ -109,7 +142,21 @@ func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
 			continue
 		}
 		for _, imp := range p.Imports {
+			if harnessToolMayLink(p.Name, p.ImportPath, imp) {
+				toolLinks[p.ImportPath] = true
+				continue
+			}
 			importedByProduction[imp] = append(importedByProduction[imp], p.ImportPath)
+		}
+	}
+	// Anti-vacuity for the exception: each entry is a main that really
+	// imports its package, and pveforge itself is not one of them.
+	for tool, pkg := range harnessToolMains {
+		if tool == "cmd/pveforge" {
+			t.Fatalf("cmd/pveforge can never be a harness tool main")
+		}
+		if !slices.Contains(mains, modulePath+tool) || !toolLinks[modulePath+tool] {
+			t.Errorf("harnessToolMains names %s for %s, but it is not a main that imports it", tool, pkg)
 		}
 	}
 	if !slices.Contains(mains, modulePath+"cmd/pveforge") {
@@ -129,10 +176,8 @@ func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
 			if by := importedByProduction[path]; len(by) > 0 {
 				t.Errorf("%s is imported from non-test code by %v: test-support machinery must never reach production", rel, by)
 			}
-			for _, m := range mains {
-				if slices.Contains(deps[m], path) {
-					t.Errorf("%s is in the dependency closure of %s", rel, m)
-				}
+			for _, m := range closureLinks(mains, deps, path) {
+				t.Errorf("%s is in the dependency closure of %s", rel, m)
 			}
 			var testImporters []string
 			for _, p := range pkgs {
@@ -266,5 +311,82 @@ func TestHarnessSuitesAreTestOnly(t *testing.T) {
 				t.Errorf("%s: -tags harness sees %q, untagged %q: no harness-tagged suite files, so this rule is not looking at the suites", rel, tagged, found.TestGoFiles)
 			}
 		})
+	}
+}
+
+// closureLinks returns the mains whose dependency closure (deps) holds
+// test-support package path, except the one harness tool main allowed it.
+func closureLinks(mains []string, deps map[string][]string, path string) []string {
+	var by []string
+	for _, m := range mains {
+		if harnessToolMayLink("main", m, path) {
+			continue
+		}
+		if slices.Contains(deps[m], path) {
+			by = append(by, m)
+		}
+	}
+	return by
+}
+
+// The closure check excepts the tool main for its one package only: a second
+// test-support package reaching it through its first is still caught, and
+// so is its package in any other main.
+func TestClosureLinks(t *testing.T) {
+	tool := modulePath + "cmd/pveforge-harness-accept"
+	pveforge := modulePath + "cmd/pveforge"
+	sibling := tool + "x"
+	harness := modulePath + "internal/harness"
+	pvefake := modulePath + "internal/pvefake"
+	mains := []string{pveforge, tool, sibling}
+	deps := map[string][]string{
+		pveforge: {modulePath + "internal/lock"},
+		tool:     {harness, pvefake},
+		sibling:  {harness},
+	}
+	for _, c := range []struct {
+		path string
+		want []string
+	}{
+		{harness, []string{sibling}},
+		{pvefake, []string{tool}},
+		{modulePath + "internal/netguard", nil},
+	} {
+		if got := closureLinks(mains, deps, c.path); !slices.Equal(got, c.want) {
+			t.Errorf("closureLinks(%s) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	deps[pveforge] = append(deps[pveforge], harness)
+	if got := closureLinks(mains, deps, harness); !slices.Equal(got, []string{pveforge, sibling}) {
+		t.Errorf("pveforge linking internal/harness: closureLinks = %v", got)
+	}
+}
+
+// The exception admits its one main linking its one package, and nothing
+// that merely resembles it.
+func TestHarnessToolMayLink(t *testing.T) {
+	const tool = modulePath + "cmd/pveforge-harness-accept"
+	const harness = modulePath + "internal/harness"
+	for _, c := range []struct {
+		why                      string
+		name, importer, imported string
+		want                     bool
+	}{
+		{"the tool main linking its package", "main", tool, harness, true},
+		{"the tool main linking a second test-support package", "main", tool, modulePath + "internal/pvefake", false},
+		{"the tool main linking a package outside the module", "main", tool, "example.com/x/internal/harness", false},
+		{"a sibling whose path starts with the tool's", "main", tool + "x", harness, false},
+		{"a package under the tool's directory", "main", tool + "/sub", harness, false},
+		{"the tool's path vendored under another module", "main", "example.com/y/vendor/" + tool, harness, false},
+		{"the tool's path without the module", "main", "cmd/pveforge-harness-accept", harness, false},
+		{"a non-main package at the tool's path", "accept", tool, harness, false},
+		{"pveforge itself", "main", modulePath + "cmd/pveforge", harness, false},
+		{"another main", "main", modulePath + "cmd/other", harness, false},
+		{"the package given without the module", "main", tool, "internal/harness", false},
+		{"no package", "main", tool, "", false},
+	} {
+		if got := harnessToolMayLink(c.name, c.importer, c.imported); got != c.want {
+			t.Errorf("%s: harnessToolMayLink(%q, %q, %q) = %v, want %v", c.why, c.name, c.importer, c.imported, got, c.want)
+		}
 	}
 }

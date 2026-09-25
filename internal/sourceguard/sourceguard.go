@@ -403,11 +403,12 @@ type TestFileFacts struct {
 
 // processMutators are functions that change state every test in the
 // process shares, keyed by import path. A name ending in "*" matches every
-// function with that prefix. t.Setenv and t.Chdir are deliberately absent:
+// function with that prefix. syscall.Kill is here because a test that
+// signals its own process reaches every handler the process has installed. t.Setenv and t.Chdir are deliberately absent:
 // the testing package itself refuses them in a parallel test.
 var processMutators = map[string][]string{
 	"os":            {"Setenv", "Unsetenv", "Clearenv", "Chdir"},
-	"syscall":       {"Setenv", "Unsetenv", "Clearenv", "Chdir"},
+	"syscall":       {"Setenv", "Unsetenv", "Clearenv", "Chdir", "Kill"},
 	"log":           {"Set*"},
 	"log/slog":      {"SetDefault", "SetLogLoggerLevel"},
 	"os/signal":     {"Notify", "Ignore", "Reset", "Stop"},

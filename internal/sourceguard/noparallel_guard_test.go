@@ -46,6 +46,7 @@ var noParallel = []struct{ pkg, why string }{
 	{"internal/harness/suites", "the nested cluster itself: every suite drives the same two nodes, which make harness also serialises (-p 1)"},
 	{"internal/harnesssecrets", "the execve, isTerminal and readSecret seams; t.Setenv"},
 	{"cmd/pveforge-harness-secrets", "t.Setenv, and child processes whose HOME and TMPDIR each test points at its own directory"},
+	{"cmd/pveforge-harness-accept", "the process's signal handlers: a test sends itself SIGTERM, which run catches"},
 }
 
 // parallelAllowed lists the packages whose tests touch no process-global
@@ -71,7 +72,7 @@ func TestTestFacts_Calibration(t *testing.T) {
 	if facts.Files != 3 {
 		t.Errorf("Files = %d, want 3 (two in-package test files and an external one)", facts.Files)
 	}
-	if want := []string{"a_test.go:11", "b_test.go:6", "c_test.go:18"}; !slices.Equal(facts.Parallel, want) {
+	if want := []string{"a_test.go:11", "b_test.go:6", "c_test.go:19"}; !slices.Equal(facts.Parallel, want) {
 		t.Errorf("Parallel = %q, want %q (a call, a method value in the _test package, and b.RunParallel; never a comment or string)", facts.Parallel, want)
 	}
 	// c_test.go's forms (pveforge-noparallel review, RNP1) are each a way a
@@ -83,14 +84,15 @@ func TestTestFacts_Calibration(t *testing.T) {
 		"a_test.go:14: os.Stdin =",
 		"a_test.go:15: SetTaskTimingsForTests",
 		"a_test.go:17: netguard.ExpectViolation",
-		"c_test.go:22: os.Setenv",
-		"c_test.go:23: os.Chdir",
-		"c_test.go:24: logpkg.SetOutput",
-		"c_test.go:25: counter++",
-		"c_test.go:26: registry[…] =",
-		"c_test.go:27: cfg.N.M =",
-		"c_test.go:28: hook =",
-		"c_test.go:29: (*cfg.N).M--",
+		"c_test.go:23: os.Setenv",
+		"c_test.go:24: os.Chdir",
+		"c_test.go:25: logpkg.SetOutput",
+		"c_test.go:26: counter++",
+		"c_test.go:27: registry[…] =",
+		"c_test.go:28: cfg.N.M =",
+		"c_test.go:29: hook =",
+		"c_test.go:30: (*cfg.N).M--",
+		"c_test.go:31: syscall.Kill",
 	}
 	if !slices.Equal(facts.Globals, want) {
 		t.Errorf("Globals = %q\nwant      %q", facts.Globals, want)
