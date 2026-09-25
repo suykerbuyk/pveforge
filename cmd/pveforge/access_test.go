@@ -27,8 +27,8 @@ type addrRewrite struct {
 	addr  string
 }
 
-func (a addrRewrite) InstallPubkeyViaPassword(ctx context.Context, _, user, password, line string) (string, error) {
-	return a.inner.InstallPubkeyViaPassword(ctx, a.addr, user, password, line)
+func (a addrRewrite) InstallPubkeyViaPassword(ctx context.Context, _, user, password, line, pin string) (string, error) {
+	return a.inner.InstallPubkeyViaPassword(ctx, a.addr, user, password, line, pin)
 }
 
 func (a addrRewrite) DialWithKey(ctx context.Context, _, user string, key []byte, fp string) (bootstrap.SSHSession, error) {

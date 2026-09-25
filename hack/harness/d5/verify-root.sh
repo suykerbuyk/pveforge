@@ -97,6 +97,9 @@ pin_served() { # the pin is one of the served keys' fingerprints; says which
 	awk -v p="$pin" '$2 == p { print "pinned key type:", $NF; found = 1 } END { exit !found }' "$D5_EVIDENCE/keyscan.fp"
 }
 keyscan() { ssh-keyscan -T 10 "$D5_HOSTNAME" >"$D5_EVIDENCE/keyscan.txt"; }
+# k1: pin_served, remembering that it passed. d5_check runs it in this shell.
+k1_verified=0
+k1() { pin_served && k1_verified=1; }
 
 v0_roles() { # the four roles are exactly the pinned definitions
 	jq -e --arg p "$D5_ROLE_PREFIX" --slurpfile e "$D5_FIXTURES/d5r3-expected-roles.json" '
@@ -169,7 +172,13 @@ p0)
 	d5_check "P5 storage $D5_STORAGE active on $D5_NODE" storage_active
 	d5_check "P6 the token may set tag pveforge-harness (datacenter user-tag-access)" tag_allowed
 	d5_check "fetch keyscan" keyscan
-	d5_check "K1 the pinned host key is one qa-pve-02 serves" pin_served
+	d5_check "K1 the pinned host key is one qa-pve-02 serves" k1
+	# G4 passes this exact value to bootstrap --host-key-fingerprint, so the
+	# password never goes to a host K1 did not verify. Printed only once K1
+	# has verified it.
+	if [ "$k1_verified" = 1 ]; then
+		d5_note "PIN host_key_fingerprint=$(<"$D5_EVIDENCE/pin.txt") (verified by K1; G4 passes it as --host-key-fingerprint)"
+	fi
 	if [ "$D5_FAIL" = 0 ]; then
 		mkdir -m 700 -- "$D5_P0"
 		for f in acl roles users groups pools; do

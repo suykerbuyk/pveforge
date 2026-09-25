@@ -66,7 +66,11 @@ type SSHTransport interface {
 	// that connection. Used ONLY for a target's true first bootstrap (no
 	// SSH auth persisted yet) — every later Run must not touch password
 	// auth or TOFU again.
-	InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authorizedKeyLine string) (hostKeyFingerprint string, err error)
+	//
+	// pin, when not "", is the host key fingerprint the operator gave
+	// (Options.HostKeyFingerprint): the host key must match it, checked
+	// before the password is sent, and it is what is returned.
+	InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authorizedKeyLine, pin string) (hostKeyFingerprint string, err error)
 
 	// DialWithKey connects to addr as user using privateKeyPEM, verifying
 	// the host key against hostKeyFingerprint (pinned, per
@@ -151,6 +155,18 @@ type Options struct {
 	// (ErrKeylessTargetNeedsFlag); and the flag is refused against a target
 	// that does hold an SSH block (ErrKeylessWithPersistedSSH).
 	NoSSHKey bool
+
+	// HostKeyFingerprint, when set, is the target's SSH host key
+	// fingerprint as the operator verified it (--host-key-fingerprint,
+	// "SHA256:<base64>", as ssh-keygen -l -E sha256 prints it and the
+	// roster stores it). The password connection, the pubkey install's or
+	// NoSSHKey's, is checked against it instead of trusting the host key on
+	// first use; SSH checks the host key before authentication, so a
+	// mismatch is refused before the password is sent. For a target that
+	// already holds a pinned key, a different value is refused before any
+	// connection. Empty: trust on first use, as before, with the accepted
+	// fingerprint reported.
+	HostKeyFingerprint string
 
 	// TokenOwner is the PVE principal that owns the token, e.g.
 	// "pveforge-harness@pve". It is NOT a Linux login and needs no SSH
@@ -352,7 +368,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		// on first use (pin ""), and the fingerprint it returns is both
 		// reported (r.res below) and pinned for any redial this run makes
 		// (freshSession).
-		session, fp, err := transport.DialWithPassword(ctx, addr, sshUser, opts.PVEPassword, "")
+		session, fp, err := transport.DialWithPassword(ctx, addr, sshUser, opts.PVEPassword, opts.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: connect with password (no ssh key): %w", opts.TargetID, err)
 		}
@@ -370,6 +386,9 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		r.ident = sshIdentity{addr: addr, user: sshUser, password: opts.PVEPassword, hostKeyFP: fp, keyless: true}
 
 	case existing != nil:
+		if opts.HostKeyFingerprint != "" && opts.HostKeyFingerprint != existing.HostKeyFingerprint {
+			return nil, fmt.Errorf("bootstrap %s: --host-key-fingerprint %s is not the host key this target is pinned to (%s); nothing was dialed — reconcile deliberately, pveforge will not re-pin", opts.TargetID, opts.HostKeyFingerprint, existing.HostKeyFingerprint)
+		}
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — this needs deliberate operator reconciliation; pveforge will not silently re-trust and re-pin a different host key", opts.TargetID, err)
@@ -384,7 +403,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 			return nil, fmt.Errorf("bootstrap %s: generate keypair: %w", opts.TargetID, genErr)
 		}
 
-		hostKeyFP, err := transport.InstallPubkeyViaPassword(ctx, addr, sshUser, opts.PVEPassword, keypair.AuthorizedKeyLine)
+		hostKeyFP, err := transport.InstallPubkeyViaPassword(ctx, addr, sshUser, opts.PVEPassword, keypair.AuthorizedKeyLine, opts.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: install pubkey: %w", opts.TargetID, err)
 		}
@@ -557,6 +576,11 @@ func validateOptions(opts *Options) error {
 		return fmt.Errorf("bootstrap: roster path is required")
 	case opts.Passphrase.IsZero():
 		return fmt.Errorf("bootstrap: roster passphrase is required")
+	}
+	if opts.HostKeyFingerprint != "" {
+		if err := sshexec.CheckFingerprint(opts.HostKeyFingerprint); err != nil {
+			return fmt.Errorf("bootstrap: --host-key-fingerprint: %w", err)
+		}
 	}
 	return nil
 }

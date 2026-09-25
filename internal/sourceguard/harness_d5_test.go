@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -502,6 +503,12 @@ func TestD5Verify_Green(t *testing.T) {
 				t.Errorf("no MANIFEST.sha256: %v", err)
 			}
 			if c.phase == "p0" {
+				// G4 copies the pin K1 verified, exactly.
+				pin, err := os.ReadFile(filepath.Join(r.evidence, "pin.txt"))
+				want := "PIN host_key_fingerprint=" + strings.TrimSpace(string(pin)) + " (verified by K1; G4 passes it as --host-key-fingerprint)\n"
+				if err != nil || len(pin) < len("SHA256:") || !strings.Contains(r.result, want) {
+					t.Errorf("K1's pin is not printed for G4 (%v): want %q in\n%s", err, want, r.result)
+				}
 				for _, f := range []string{"acl", "roles", "users", "groups", "pools"} {
 					if _, err := os.Stat(filepath.Join(r.p0Dir, f+".json")); err != nil {
 						t.Errorf("P0 baseline %s not written: %v", f, err)
@@ -629,6 +636,10 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 			if rc.phase == "p0" {
 				if _, err := os.Stat(r.p0Dir); err == nil {
 					t.Error("a red p0 wrote the P0 baseline")
+				}
+				// A pin K1 did not verify is never offered to G4.
+				if slices.Contains(rc.want, "K1") && strings.Contains(r.result, "PIN host_key_fingerprint=") {
+					t.Errorf("K1 is red, yet the pin was printed for G4:\n%s", r.result)
 				}
 			}
 		})
@@ -789,7 +800,7 @@ func TestD5Sequence_MatchesTheFixtures(t *testing.T) {
 	if !strings.Contains(text, `echo "E=$E"`) {
 		t.Error("G0 does not print the evidence path for the operator's G4 terminal")
 	}
-	for _, flag := range []string{"bootstrap qa-pve-02-harness ", "--roster ~/.config/pveforge/harness-outer.toml ", "--node qa-pve-02 ", "--no-ssh-key ", "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
+	for _, flag := range []string{"bootstrap qa-pve-02-harness ", "--roster ~/.config/pveforge/harness-outer.toml ", "--node qa-pve-02 ", "--no-ssh-key ", `--host-key-fingerprint "$PIN" `, "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
 		if !strings.Contains(boot, flag) {
 			t.Errorf("bootstrap line lacks %q", flag)
 		}

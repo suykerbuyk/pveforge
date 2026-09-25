@@ -64,11 +64,14 @@ type SSHServer struct {
 	stall       chan struct{}
 	asyncExec   bool
 
-	mu        sync.Mutex
-	cmds      []string
-	conns     int
-	stdinSeen []StdinRecord
-	events    []string
+	mu    sync.Mutex
+	cmds  []string
+	conns int
+	// passwordTries counts password authentication attempts, admitted or
+	// not: a client that refuses the host key first never makes one.
+	passwordTries int
+	stdinSeen     []StdinRecord
+	events        []string
 }
 
 // DrainJoinTimeout bounds how long a session in RecordStdin mode waits for
@@ -241,6 +244,22 @@ func (s *SSHServer) Connections() int {
 	return s.conns
 }
 
+// HostKeyFingerprint is this server's host key fingerprint, SHA256:<base64>,
+// as ssh-keygen -l -E sha256 prints it and the roster stores it.
+func (s *SSHServer) HostKeyFingerprint() string {
+	return ssh.FingerprintSHA256(s.hostSigner.PublicKey())
+}
+
+// PasswordAttempts returns how many password authentication attempts
+// reached this server, admitted or refused. SSH checks the host key before
+// any authentication, so a client that refuses this server's host key never
+// sends its password: 0 here is the proof.
+func (s *SSHServer) PasswordAttempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.passwordTries
+}
+
 // Commands returns every exec command received so far, in arrival order.
 func (s *SSHServer) Commands() []string {
 	s.mu.Lock()
@@ -259,6 +278,9 @@ func (s *SSHServer) handleConn(conn net.Conn) {
 			return nil, fmt.Errorf("auth rejected")
 		},
 		PasswordCallback: func(m ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			s.mu.Lock()
+			s.passwordTries++
+			s.mu.Unlock()
 			if s.allowedPassword != "" && m.User() == s.allowedUser && string(pw) == s.allowedPassword {
 				return nil, nil
 			}

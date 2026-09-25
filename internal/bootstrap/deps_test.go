@@ -43,7 +43,7 @@ func TestRealSSHTransport_InstallPubkeyViaPassword(t *testing.T) {
 	defer cancel()
 
 	transport := NewSSHTransport()
-	fp, err := transport.InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", "ssh-ed25519 AAAAtest comment")
+	fp, err := transport.InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", "ssh-ed25519 AAAAtest comment", "")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestRealSSHTransport_InstallPubkeyViaPassword_PropagatesError(t *testing.T)
 	defer cancel()
 
 	transport := NewSSHTransport()
-	_, err := transport.InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "wrong-password", "ssh-ed25519 AAAAtest comment")
+	_, err := transport.InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "wrong-password", "ssh-ed25519 AAAAtest comment", "")
 	if err == nil {
 		t.Fatal("expected error for wrong password")
 	}
@@ -99,7 +99,7 @@ func TestRealSSHTransport_DialWithKey_RunAndClose(t *testing.T) {
 	fs.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	fp, err := NewSSHTransport().InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", kp.AuthorizedKeyLine)
+	fp, err := NewSSHTransport().InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", kp.AuthorizedKeyLine, "")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestRealSSHTransport_ReconnectWithPinnedKey_RunAndClose(t *testing.T) {
 	// Establish the pinned fingerprint the same way a prior successful
 	// bootstrap would have (via the password/TOFU path), then reconnect
 	// using ONLY the reconnect path — no password auth involved.
-	fp, err := NewSSHTransport().InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", kp.AuthorizedKeyLine)
+	fp, err := NewSSHTransport().InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", kp.AuthorizedKeyLine, "")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestRealSSHTransport_DialWithPassword(t *testing.T) {
 	defer cancel()
 	transport := NewSSHTransport()
 
-	installFP, err := transport.InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", "ssh-ed25519 AAAAtest comment")
+	installFP, err := transport.InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "hunter2", "ssh-ed25519 AAAAtest comment", "")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}

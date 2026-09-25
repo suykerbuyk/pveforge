@@ -137,6 +137,8 @@ the exit status is still 0: the create task succeeded.`,
 				}
 			} else if noSSHKey {
 				return errors.New("vm create: --no-ssh-key only applies with --unique-tag, whose check runs as root")
+			} else if cmd.Flags().Changed("host-key-fingerprint") {
+				return errors.New("vm create: --host-key-fingerprint only applies with --unique-tag, whose check runs as root over SSH")
 			}
 			// Guard the sentinel, not a range: NextVMID reads pin == 0 as
 			// "no pin, auto-allocate", and auto-allocation is explicitly
@@ -323,6 +325,7 @@ the exit status is still 0: the create task succeeded.`,
 	addLockWaitFlag(cmd)
 	cmd.Flags().StringVar(&uniqueTag, "unique-tag", "", "refuse the create if any VM or container in the cluster already carries this tag (one of this create's own tags); the guests are listed as root over SSH")
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, "with --unique-tag: "+noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", "with --unique-tag: "+hostKeyFingerprintAccessUsage)
 	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of create parameters (values must be JSON strings)")
 	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of create parameters (values must be JSON strings)")
 	markMutating(cmd)

@@ -16,8 +16,8 @@ func NewSSHTransport() SSHTransport { return realSSHTransport{} }
 
 type realSSHTransport struct{}
 
-func (realSSHTransport) InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authorizedKeyLine string) (string, error) {
-	res, err := sshexec.InstallPubkeyViaPassword(ctx, addr, user, password, authorizedKeyLine)
+func (realSSHTransport) InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authorizedKeyLine, pin string) (string, error) {
+	res, err := sshexec.InstallPubkeyViaPassword(ctx, addr, user, password, authorizedKeyLine, pin)
 	if err != nil {
 		return "", err
 	}

@@ -193,11 +193,14 @@ type fakeBootstrapTransport struct {
 	// the install path, which is what C-T8b has to observe.
 	installCalls int
 	pwCalls      int
+	// the pins each password connection was asked to check
+	installPins, pwPins []string
 }
 
-func (f *fakeBootstrapTransport) InstallPubkeyViaPassword(context.Context, string, string, string, string) (string, error) {
+func (f *fakeBootstrapTransport) InstallPubkeyViaPassword(_ context.Context, _, _, _, _, pin string) (string, error) {
 	f.calls++
 	f.installCalls++
+	f.installPins = append(f.installPins, pin)
 	return "", f.installErr
 }
 func (f *fakeBootstrapTransport) DialWithKey(context.Context, string, string, []byte, string) (bootstrap.SSHSession, error) {
@@ -209,9 +212,10 @@ func (f *fakeBootstrapTransport) ReconnectWithPinnedKey(context.Context, string,
 	return nil, errors.New("unexpected reconnect")
 }
 
-func (f *fakeBootstrapTransport) DialWithPassword(context.Context, string, string, string, string) (bootstrap.SSHSession, string, error) {
+func (f *fakeBootstrapTransport) DialWithPassword(_ context.Context, _, _, _, pin string) (bootstrap.SSHSession, string, error) {
 	f.calls++
 	f.pwCalls++
+	f.pwPins = append(f.pwPins, pin)
 	return nil, "", errors.New("unexpected keyless dial")
 }
 

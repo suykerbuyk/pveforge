@@ -31,6 +31,7 @@ var (
 func newBootstrapCmd() *cobra.Command {
 	var (
 		host, node, pveUser, tokenOwner, tokenID string
+		hostKeyFP                                string
 		grantSpecs                               []string
 		apiPort, sshPort                         int
 		insecureTLS, noSSHKey                    bool
@@ -103,6 +104,7 @@ func newBootstrapCmd() *cobra.Command {
 				RosterPath:  rosterPath,
 				Passphrase:  passphrase,
 			}
+			opts.HostKeyFingerprint = hostKeyFP
 
 			res, err := bootstrap.Run(cmd.Context(), opts, newBootstrapTransport(), newBootstrapValidator())
 			return finishBootstrap(cmd.OutOrStdout(), cmd.ErrOrStderr(), format, args[0], res, err)
@@ -118,6 +120,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port on the target host")
 	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with: the SSH LOGIN (must be an @pam user); the token's owner is --token-owner. In keyless mode this login's password is used on every run")
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, "authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster. The host key is trusted on first use on EVERY such run, and the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair")
+	cmd.Flags().StringVar(&hostKeyFP, "host-key-fingerprint", "", "the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: the password connection (the key install's, or --no-ssh-key's) must present that key, checked before the password is sent, instead of trusting the host key on first use. For a target that already holds a pinned key, a different value is refused before any connection. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves.")
 	cmd.Flags().StringVar(&tokenOwner, "token-owner", "", "PVE principal that will own the token, as name@realm (default: --pve-user). It is not the SSH login and needs no SSH account. A non-root owner must itself hold the whole role at each granted path, or bootstrap refuses before touching anything. Changing it deliberately leaves the previous token live on PVE, held by nobody (orphaned_token), never revoked; omitting it when the roster holds another owner's token is refused")
 	cmd.Flags().StringVar(&tokenID, "token-id", "pveforge", "name of the scoped API token to create")
 	cmd.Flags().StringArrayVar(&grantSpecs, "grant", nil, "an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement")

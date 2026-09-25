@@ -836,7 +836,14 @@ func TestUniqueTag_H3_RootAccessRules(t *testing.T) {
 		t.Fatalf("--no-ssh-key alone: exit %d, %d sent, stderr %q", code, f.sent(), stderr)
 	}
 	t.Setenv(pvePasswordEnvVar, "root-pw")
-	code, stdout, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--no-ssh-key")
+	// A pin the host does not present: refused before the password is sent,
+	// and nothing is created.
+	wrong := "SHA256:" + strings.Repeat("W", 43)
+	code, _, stderr = createTagged(rp, 101, "x", "--unique-tag", "x", "--no-ssh-key", "--host-key-fingerprint", wrong)
+	if code != 1 || !strings.Contains(stderr, "host key mismatch") || fs.PasswordAttempts() != 0 || f.posts != 0 {
+		t.Fatalf("a wrong pin: exit %d, password attempts %d, POSTs %d, stderr %q", code, fs.PasswordAttempts(), f.posts, stderr)
+	}
+	code, stdout, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--no-ssh-key", "--host-key-fingerprint", fs.HostKeyFingerprint())
 	if code != 0 || stdout != "qa-pve-01: vm 101 created\n" || f.posts != 1 {
 		t.Fatalf("keyless with --no-ssh-key: exit %d, stdout %q, stderr %q, POSTs %d", code, stdout, stderr, f.posts)
 	}
