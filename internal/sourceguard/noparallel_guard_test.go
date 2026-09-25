@@ -59,7 +59,7 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"cmd/pveforge-harness-pins", "run over a roster file in the test's own directory; no process-global state"},
 	{"internal/lock/lockguard", "a static source guard"},
 	{"internal/nodump", "its test calls Set in a child process, never in the test process"},
-	{"internal/sourceguard", "static walks and read-only go commands"},
+	{"internal/sourceguard", "static walks and read-only go commands; the harness scripts' tests each run in their own directory, sharing only a pins binary built once (sync.OnceValues) and only run after"},
 }
 
 // TestTestFacts_Calibration: the walker finds what it must — a t.Parallel

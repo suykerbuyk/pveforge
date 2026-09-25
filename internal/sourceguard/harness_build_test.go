@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -103,6 +104,8 @@ type buildHome struct {
 	keyscan map[string]string // vmid -> the scan's output, replacing hostKey
 	tcp     map[string]string // "ip_port" -> attempts that fail first (default 1: the preflight's), or "never"
 	outer   string            // the harness roster's host for qa-pve-02-harness ("" = 198.51.100.20; "-" = none)
+	roster  string            // the whole harness roster, replacing the one outer builds
+	pins    string            // a stand-in pins tool's body ("" = the real cmd/pveforge-harness-pins)
 	getent  map[string]string // host -> getent ahostsv4's answer
 	extra   func(t *testing.T, home string)
 }
@@ -119,13 +122,14 @@ func (b buildHome) setup(t *testing.T, home string) {
 	if outer == "" {
 		outer = "198.51.100.20"
 	}
-	roster := "# test roster\n[[targets]]\nid = \"qa-pve-01\"\nhost = \"192.0.2.91\"\n\n[[targets]]\nnode = \"qa-pve-02\"\nid = \"qa-pve-02-harness\"\n"
-	if outer != "-" {
-		roster += "host = \"" + outer + "\"\n"
+	roster := b.roster
+	if roster == "" {
+		host := ""
+		if outer != "-" {
+			host = "host = \"" + outer + "\"\n"
+		}
+		roster = outerRoster(host)
 	}
-	// Decoys: a sub-table's host is never the target's, whether or not the
-	// sub-table has an id of its own.
-	roster += "\n[targets.ssh]\nuser = \"root\"\nhost = \"192.0.2.90\"\n\n[targets.token]\nid = \"pveforge-harness@pve!build\"\nhost = \"192.0.2.91\"\n"
 	writeFile(t, filepath.Join(cfg, "harness-outer.toml"), roster, 0o600)
 	if !b.noKey {
 		writeFile(t, filepath.Join(cfg, "harness-nested_ed25519"), "fake private key\n", 0o600)
@@ -157,6 +161,55 @@ func (b buildHome) setup(t *testing.T, home string) {
 	}
 }
 
+// outerRoster is a harness roster pveforge loads, host the harness target's
+// host line. Decoys: the targets before and after it name two of the nested
+// addresses, so reading either one's host refuses the build.
+func outerRoster(host string) string {
+	return "# test roster\n[[targets]]\nid = \"qa-pve-01\"\nhost = \"192.0.2.91\"\nnode = \"qa-pve-01\"\n\n" +
+		"[[targets]]\nnode = \"qa-pve-02\"\nid = \"qa-pve-02-harness\"\n" + host +
+		"\n  [targets.token]\n  id = \"pveforge-harness@pve!build\"\n  secret_enc = \"\"\"\n" + testArmor + "\"\"\"\n\n" +
+		"[[targets]]\nid = \"qa-pve-03\"\nhost = \"192.0.2.90\"\nnode = \"qa-pve-03\"\n"
+}
+
+const testArmor = "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCg==\n-----END AGE ENCRYPTED FILE-----\n"
+
+// pinsBuild builds cmd/pveforge-harness-pins once for the package: build.sh
+// reads the harness roster with it, so its tests read the roster with
+// pveforge's own loader, never a stand-in, unless a case says so. Once built
+// it is only ever run, so parallel tests may share it. Its directory is named
+// for this process, so TestMain removes it without holding it anywhere.
+var pinsBuild = sync.OnceValues(func() (string, error) {
+	dir, err := os.MkdirTemp("", pinsDirPrefix())
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "pveforge-harness-pins")
+	if out, err := exec.Command("go", "build", "-o", p, "github.com/suykerbuyk/pveforge/cmd/pveforge-harness-pins").CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build cmd/pveforge-harness-pins: %v: %s", err, out)
+	}
+	return p, nil
+})
+
+func pinsDirPrefix() string { return fmt.Sprintf("pveforge-harness-pins-%d-", os.Getpid()) }
+
+func pinsTool(t *testing.T) string {
+	t.Helper()
+	p, err := pinsBuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	dirs, _ := filepath.Glob(filepath.Join(os.TempDir(), pinsDirPrefix()+"*"))
+	for _, d := range dirs {
+		os.RemoveAll(d)
+	}
+	os.Exit(code)
+}
+
 // buildWorld: a clean slate on qa-pve-02. The pool is empty at the preflight
 // and then lists all three; each VM carries the tag and is running.
 func buildWorld(t *testing.T, h buildHome) probeSpec {
@@ -177,6 +230,12 @@ func buildWorld(t *testing.T, h buildHome) probeSpec {
 			"getent":      "#!/usr/bin/env bash\n[ \"$1\" = ahostsv4 ] && [ -f \"$FAKE_PVEFORGE_DIR/getent/$2\" ] || exit 2\ncat \"$FAKE_PVEFORGE_DIR/getent/$2\"\n",
 		}),
 		setup: h.setup,
+		env:   map[string]string{"HARNESS_PINS_BIN": pinsTool(t)},
+	}
+	if h.pins != "" {
+		p := filepath.Join(t.TempDir(), "pins")
+		writeFile(t, p, h.pins, 0o700)
+		s.env["HARNESS_PINS_BIN"] = p
 	}
 	for v := range buildIPs {
 		s.resp[bContent(v)] = `[]`
@@ -923,12 +982,31 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 		"the outer host by name": {buildHome{outer: "qa-pve-02.example.invalid", getent: map[string]string{
 			"qa-pve-02.example.invalid": "198.51.100.20   STREAM qa-pve-02.example.invalid\n192.0.2.92      STREAM\n"}}, "pvh-nfs's address 192.0.2.92 is the outer host qa-pve-02.example.invalid"},
 		"unresolvable": {buildHome{outer: "nowhere.example.invalid"}, "cannot resolve the outer host nowhere.example.invalid"},
-		"no host":      {buildHome{outer: "-"}, "names no host for target qa-pve-02-harness"},
+		// pveforge's loader refuses a target without a host.
+		"no host":        {buildHome{outer: "-"}, "cannot read " + outerRosterTail},
+		"no such target": {buildHome{roster: strings.Replace(outerRoster("host = \"198.51.100.20\"\n"), `"qa-pve-02-harness"`, `"qa-pve-02-other"`, 1)}, "harness-outer.toml names no target qa-pve-02-harness"},
+		// A roster pveforge would not load is never read another way: here
+		// a host key inside [targets.ssh], which no roster has.
+		"not a roster pveforge loads": {buildHome{roster: outerRoster("host = \"198.51.100.20\"\n") + "\n  [targets.ssh]\n  user = \"root\"\n  host = \"192.0.2.90\"\n"}, "cannot read " + outerRosterTail},
+		// The pins tool's answer is held to one line of two words even though
+		// the tool itself refuses anything else.
+		"three words":             {buildHome{pins: "#!/bin/sh\necho '198.51.100.20 - x'\n"}, "cannot read " + outerRosterTail},
+		"two lines":               {buildHome{pins: "#!/bin/sh\nprintf '198.51.100.20 -\\n192.0.2.90 -\\n'\n"}, "cannot read " + outerRosterTail},
+		"a bare host":             {buildHome{pins: "#!/bin/sh\necho 198.51.100.20\n"}, "cannot read " + outerRosterTail},
+		"the tool fails":          {buildHome{pins: "#!/bin/sh\necho '198.51.100.20 -'\nexit 2\n"}, "cannot read " + outerRosterTail},
+		"the tool prints nothing": {buildHome{pins: "#!/bin/sh\nexit 0\n"}, "cannot read " + outerRosterTail},
+		"the tool's no target":    {buildHome{pins: "#!/bin/sh\nexit 3\n"}, "names no target qa-pve-02-harness"},
+		// Its stderr quotes roster values, and is never shown.
+		"the tool's stderr": {buildHome{pins: "#!/bin/sh\necho pins-stderr >&2\nexit 1\n"}, "cannot read " + outerRosterTail},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := runProbe(t, buildWorld(t, tc.h))
-			if r.code != 3 || !strings.Contains(r.stderr, tc.want) {
-				t.Fatalf("exit %d, want 3 and %q:\n%s", r.code, tc.want, r.stderr)
+			want := strings.ReplaceAll(tc.want, "~", r.home)
+			if r.code != 3 || !strings.Contains(r.stderr, want) {
+				t.Fatalf("exit %d, want 3 and %q:\n%s", r.code, want, r.stderr)
+			}
+			if strings.Contains(r.stderr, "pins-stderr") {
+				t.Errorf("the pins tool's stderr was shown:\n%s", r.stderr)
 			}
 			if w := r.writes(); len(w) != 0 {
 				t.Errorf("a refused build sent %q", w)
@@ -943,6 +1021,35 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 	}
 	if got := r.buildEvidence(t, "outer-host"); got != "qa-pve-02.example.invalid: 198.51.100.20\n" {
 		t.Errorf("outer-host %q", got)
+	}
+}
+
+// outerRosterTail is the harness roster, ~ for $HOME.
+const outerRosterTail = "~/.config/pveforge/harness-outer.toml\n"
+
+// B14b: the outer host is read with pveforge's own roster loader (R3 of
+// pveforge-harness-shell-scoping), so TOML a line parser misreads names the
+// target pveforge dials, and the build goes ahead against it.
+func TestBuild_OuterHostIsPveforges(t *testing.T) {
+	real := "host = \"198.51.100.20\"\n"
+	for name, roster := range map[string]string{
+		// A multi-line string holding a [[targets]] block for the same id,
+		// whose host is pvh-n1's address.
+		"a multi-line string": strings.Replace(outerRoster(real), testArmor,
+			"-----BEGIN AGE ENCRYPTED FILE-----\n[[targets]]\nid = \"qa-pve-02-harness\"\nhost = \"192.0.2.90\"\n-----END AGE ENCRYPTED FILE-----\n", 1),
+		"a comment on the header": strings.Replace(outerRoster(real), "[[targets]]\nnode = \"qa-pve-02\"", "[[targets]] # the harness\nnode = \"qa-pve-02\"", 1),
+		"single quotes":           outerRoster("host = '198.51.100.20'\n"),
+		"an inline host":          strings.Replace(outerRoster(""), `id = "qa-pve-02-harness"`, `id = "qa-pve-02-harness"`+"\nhost = \"198.51.100.20\" # the outer host", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runProbe(t, buildWorld(t, buildHome{roster: roster}))
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
+			if got := r.buildEvidence(t, "outer-host"); got != "198.51.100.20: 198.51.100.20\n" {
+				t.Errorf("outer-host %q", got)
+			}
+		})
 	}
 }
 
@@ -961,6 +1068,78 @@ func TestBuild_SignalsDuringCleanup(t *testing.T) {
 				t.Fatalf("exit %d\n%s", r.code, r.stderr)
 			}
 			equalCalls(t, "writes", r.writes(), bTornDown)
+		})
+	}
+}
+
+// hb_pins (build/env.sh) is idempotent: a second call keeps HB_PINS and
+// builds nothing, where re-declaring the readonly HB_PINS would exit 1
+// outside hb_die. hb_resolve is too (nested.sh's bridge resolves go after
+// hb_pins may have).
+func TestBuildEnv_PinsTwice(t *testing.T) {
+	env, err := filepath.Abs(filepath.Join(harnessDir, "build", "env.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, given := range map[string]bool{"HARNESS_PINS_BIN": true, "built into the cache": false} {
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			stub := filepath.Join(tmp, "stub")
+			writeFile(t, filepath.Join(stub, "go"), "#!/usr/bin/env bash\necho \"$*\" >>\""+tmp+"/go.log\"\n", 0o700)
+			pins := filepath.Join(tmp, "pins")
+			writeFile(t, pins, "#!/bin/sh\n", 0o700)
+			want := pins
+			cmd := exec.Command("bash", "-c", `set -euo pipefail; source "$1"; hb_pins; a=$HB_PINS; hb_pins; hb_resolve go; hb_resolve go; printf '%s %s' "$a" "$HB_PINS"`, "bash", env)
+			cmd.Env = []string{"PATH=" + stub + ":" + harnessPATH(t), "HOME=" + filepath.Join(tmp, "home")}
+			if given {
+				cmd.Env = append(cmd.Env, "HARNESS_PINS_BIN="+pins)
+			} else {
+				want = filepath.Join(tmp, "home/.cache/pveforge-harness/pveforge-harness-pins")
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil || string(out) != want+" "+want {
+				t.Fatalf("err %v, output %q; want %q twice", err, out, want)
+			}
+			builds, _ := os.ReadFile(filepath.Join(tmp, "go.log"))
+			if n := strings.Count(string(builds), "build "); given && n != 0 || !given && n != 1 {
+				t.Errorf("go ran %d builds: %q", n, builds)
+			}
+		})
+	}
+}
+
+// inheritedStub is a program an environment could name in HB_PINS or
+// HB_TOOL_GO: it records that it ran, and does nothing else.
+func inheritedStub(t *testing.T) (path, ranLog string) {
+	t.Helper()
+	d := t.TempDir()
+	path, ranLog = filepath.Join(d, "inherited"), filepath.Join(d, "ran")
+	writeFile(t, path, "#!/bin/sh\necho \"$*\" >>"+ranLog+"\n", 0o700)
+	return path, ranLog
+}
+
+// No shell code from the environment (72401b9, 4f82c64): build/env.sh sets
+// HB_PINS and HB_TOOL_* itself, so an exported one is never what runs, on
+// either of hb_pins's paths.
+func TestBuild_IgnoresInheritedHB(t *testing.T) {
+	for _, v := range []string{"HB_PINS", "HB_TOOL_GO"} {
+		t.Run(v, func(t *testing.T) {
+			s := buildWorld(t, buildHome{})
+			stub, ran := inheritedStub(t)
+			s.env[v] = stub
+			if v == "HB_TOOL_GO" {
+				// The build-into-cache path, with a go on PATH that "builds"
+				// the real pins tool.
+				s.env["HARNESS_PINS_BIN"] = "-"
+				s.stubs["go"] = "#!/usr/bin/env bash\n[ \"$1 $2\" = 'build -o' ] || exit 97\nmkdir -p -- \"${3%/*}\" && cp -- " + pinsTool(t) + " \"$3\"\n"
+			}
+			r := runProbe(t, s)
+			if b, err := os.ReadFile(ran); err == nil {
+				t.Errorf("the inherited %s ran: %q", v, b)
+			}
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
 		})
 	}
 }

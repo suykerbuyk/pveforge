@@ -11,9 +11,15 @@
 # placed in TOML, JSON or a PVE parameter without escaping.
 #
 # hb_read_env fills the associative array HB; hb_resolve sets HB_TOOL_<NAME>
-# to a tool's absolute path.
+# to a tool's absolute path; hb_pins sets HB_PINS to the roster pins tool.
 
 readonly HB_ENV_FILE=$HOME/.config/pveforge/harness-build.env
+
+# Nothing below is taken from the environment: HB, HB_PINS and every
+# HB_TOOL_* are set by this file's functions or not at all, so an inherited
+# value (a stub path, say) is dropped here, and "already set" below always
+# means "set by this shell".
+unset HB HB_PINS "${!HB_TOOL_@}"
 
 # key -> the pattern its value must match.
 declare -A HB_PATTERN=(
@@ -50,15 +56,37 @@ hb_die() { # status message
 	exit "$1"
 }
 
-# hb_resolve resolves each tool once, to an absolute path, as lib does its own.
+# hb_resolve resolves each tool once, to an absolute path, as lib does its own;
+# a tool already resolved by this shell is kept.
 hb_resolve() { # tool...
-	local t p
+	local t p n
 	for t in "$@"; do
+		n=${t^^}
+		n=HB_TOOL_${n//-/_}
+		[ -z "${!n+set}" ] || continue
 		p=$(type -P "$t") || hb_die 2 "$t is not on PATH"
 		[[ $p == /* ]] || hb_die 2 "$t resolves to $p, which is not an absolute path"
-		t=${t^^}
-		declare -gr "HB_TOOL_${t//-/_}=$p"
+		declare -gr "$n=$p"
 	done
+}
+
+# hb_pins sets HB_PINS to cmd/pveforge-harness-pins, which reads a roster
+# with pveforge's own loader: HARNESS_PINS_BIN, or built as unlock.sh builds
+# its helper. Once this shell has set HB_PINS, a second call is a no-op.
+hb_pins() {
+	[ -z "${HB_PINS+set}" ] || return 0
+	if [ -n "${HARNESS_PINS_BIN:-}" ]; then
+		[[ $HARNESS_PINS_BIN == /* ]] && [ -f "$HARNESS_PINS_BIN" ] && [ -x "$HARNESS_PINS_BIN" ] ||
+			hb_die 2 "HARNESS_PINS_BIN must be the absolute path of an executable, got '$HARNESS_PINS_BIN'"
+		declare -gr HB_PINS=$HARNESS_PINS_BIN
+		return
+	fi
+	local root pins
+	hb_resolve go
+	root=$(cd -- "${BASH_SOURCE[0]%/*}/../../.." && pwd) || hb_die 2 "cannot find the repository root"
+	pins=${XDG_CACHE_HOME:-$HOME/.cache}/pveforge-harness/pveforge-harness-pins
+	(cd -- "$root" && "$HB_TOOL_GO" build -o "$pins" ./cmd/pveforge-harness-pins) || hb_die 2 "cannot build cmd/pveforge-harness-pins"
+	declare -gr HB_PINS=$pins
 }
 
 hb_read_env() {
