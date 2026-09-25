@@ -553,9 +553,9 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 	v4 := func(p string) string {
 		return "pveum user token permissions " + d5User + " build --path " + p + " --output-format json"
 	}
-	userRow := `{"path":"/pool/pveforge-harness","propagate":0,"roleid":"PveforgeHarness","type":"user","ugid":"pveforge-harness@pve"}`
+	userRow := `{"path":"/pool/pveforge-harness","propagate":0,"roleid":"ForgeHarness","type":"user","ugid":"pveforge-harness@pve"}`
 	reds := []red{
-		{name: "P1 a harness role exists", phase: "p0", worldAt: "p0", mutate: map[string]string{roles: `. + [{"roleid":"PveforgeHarnessX","privs":"","special":0}]`}, want: []string{"P1"}},
+		{name: "P1 a harness role exists", phase: "p0", worldAt: "p0", mutate: map[string]string{roles: `. + [{"roleid":"ForgeHarnessX","privs":"","special":0}]`}, want: []string{"P1"}},
 		{name: "P2 the pool exists", phase: "p0", worldAt: "p0", mutate: map[string]string{pools: `. + [{"poolid":"pveforge-harness"}]`}, want: []string{"P2"}},
 		{name: "P3 the user exists", phase: "p0", worldAt: "p0", mutate: map[string]string{users: `. + [{"userid":"pveforge-harness@pve","enable":1,"expire":0}]`}, want: []string{"P3"}},
 		{name: "P4 a row for the user exists", phase: "p0", worldAt: "p0", mutate: map[string]string{acl: `. + [` + userRow + `]`}, want: []string{"P4"}},
@@ -566,10 +566,10 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "P6 user-allow existing", phase: "p0", worldAt: "p0", mutate: map[string]string{options: `. + {"user-tag-access":{"user-allow":"existing"}}`}, want: []string{"P6"}},
 		{name: "K1 the pinned key is not served", phase: "p0", worldAt: "p0", keyscanTypes: []string{"ed25519"}, want: []string{"K1"}},
 		{name: "K1 pin is another key", phase: "p0", worldAt: "p0", pin: "SHA256:someone-else", want: []string{"K1"}},
-		{name: "V0 a harness role widened", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "PveforgeHarnessIso" then .privs = "Datastore.Audit,Datastore.AllocateTemplate" else . end)`}, want: []string{"V0"}},
+		{name: "V0 a harness role widened", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "ForgeHarnessIso" then .privs = "Datastore.Audit,Datastore.AllocateTemplate" else . end)`}, want: []string{"V0"}},
 		{name: "V0b another custom role changed", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "OpsRole" then .privs = "VM.Audit,VM.Allocate" else . end)`}, want: []string{"V0b"}},
-		{name: "L1b a harness role marked special", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "PveforgeHarnessNet" then .special = 1 else . end)`}, want: []string{"L1b"}},
-		{name: "L1b privs as an array", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "PveforgeHarnessNet" then .privs = ["SDN.Use"] else . end)`}, want: []string{"V0", "L1b"}},
+		{name: "L1b a harness role marked special", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "ForgeHarnessNet" then .special = 1 else . end)`}, want: []string{"L1b"}},
+		{name: "L1b privs as an array", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "ForgeHarnessNet" then .privs = ["SDN.Use"] else . end)`}, want: []string{"V0", "L1b"}},
 		{name: "O1 the pool has a member", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-02"}]`}, want: []string{"O1"}},
 		{name: "O2 the user expires", phase: "owner", worldAt: "owner", mutate: map[string]string{users: `map(if .userid == "pveforge-harness@pve" then .expire = 1893456000 else . end)`}, want: []string{"O2"}},
 		{name: "O1 two pools answered", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `. + [{"poolid":"pveforge-harness","members":[]}]`}, want: []string{"O1"}},
@@ -602,7 +602,7 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "RV5 a pool left", phase: "reverted", worldAt: "p0", mutate: map[string]string{pools: `. + [{"poolid":"left"}]`}, want: []string{"RV5"}},
 		{name: "RV P4 a harness row left", phase: "reverted", worldAt: "p0", mutate: map[string]string{acl: `. + [` + userRow + `]`}, want: []string{"P4", "RV1"}},
 		{name: "V3t the token's tree", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/permissions": `{"/":{"Sys.Audit":0}}`}, want: []string{"V3t"}},
-		{name: "V0t a role widened", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/roles/PveforgeHarnessNet": `{"SDN.Use":1,"SDN.Audit":1}`}, want: []string{"V0t"}},
+		{name: "V0t a role widened", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/roles/ForgeHarnessNet": `{"SDN.Use":1,"SDN.Audit":1}`}, want: []string{"V0t"}},
 		{name: "V1t the token sees a row", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/acl": `[{"path":"/vms/690","ugid":"x@pve","roleid":"PVEVMUser"}]`}, want: []string{"V1t"}},
 		{name: "V7t a foreign member", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":105,"node":"qa-pve-02"}]}]`}, want: []string{"V7t"}},
 		{name: "V7t-node a member elsewhere", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-01"},{"type":"qemu","vmid":691,"node":"qa-pve-02"},{"type":"qemu","vmid":692,"node":"qa-pve-02"}]}]`}, want: []string{"V7t-node"}},
@@ -906,5 +906,93 @@ func TestD5Revert_UndoesTheSequenceInOrder(t *testing.T) {
 		if !oka || !okb || a >= b {
 			t.Errorf("revert order: %s (step %d) must come before %s (step %d)", order[i-1], a, order[i], b)
 		}
+	}
+}
+
+// PVE's own ID rules, as pve-access-control (dff26b45) and pve-manager
+// (4f6e0ac8) state them:
+//   - a role ID: pve-roleid, src/PVE/AccessControl.pm:1341
+//     m/^[A-Za-z0-9\.\-_]+\z/; and create_role, src/PVE/API2/Role.pm:96,
+//     refuses $role =~ /^PVE/i ("cannot use role ID starting with the
+//     (case-insensitive) 'PVE' namespace"). G1 went red on exactly this.
+//   - a pool ID: pve-poolid, src/PVE/AccessControl.pm:1353-1367, at most 3
+//     levels, m!^[A-Za-z0-9\.\-_]+(?:/[A-Za-z0-9\.\-_]+){0,2}\z!; no
+//     reserved prefix (pve-manager PVE/API2/Pool.pm uses only the format).
+//   - a user ID: src/PVE/Auth/Plugin.pm:121-147, 3 to 64 characters,
+//     m!^(${user_regex})\@(${realm_regex})\z! with user_regex [^\s:/]+ and
+//     realm_regex [A-Za-z][A-Za-z0-9\.\-_]+ (Plugin.pm:34-35); no reserved
+//     prefix.
+var (
+	pveRoleIDFormat = regexp.MustCompile(`^[A-Za-z0-9.\-_]+$`)
+	pveRoleReserved = regexp.MustCompile(`(?i)^PVE`)
+	pvePoolIDFormat = regexp.MustCompile(`^[A-Za-z0-9.\-_]+(?:/[A-Za-z0-9.\-_]+){0,2}$`)
+	pveUserIDFormat = regexp.MustCompile(`^[^\s:/]+@[A-Za-z][A-Za-z0-9.\-_]+$`)
+)
+
+// pveRoleIDValid is PVE's whole rule for a role ID pveum role add accepts.
+func pveRoleIDValid(id string) bool {
+	return pveRoleIDFormat.MatchString(id) && !pveRoleReserved.MatchString(id)
+}
+
+// The rule itself, against the IDs it must refuse and accept.
+func TestPVERoleIDRule(t *testing.T) {
+	for id, want := range map[string]bool{
+		"ForgeHarness": true, "ForgeHarnessSpace": true, "my.role-1_x": true,
+		"PveforgeHarness": false, "PVEVMAdmin": false, "pveX": false, "pVe": false,
+		"Forge Harness": false, "Forge/Harness": false, "": false, "Forge\n": false,
+	} {
+		if got := pveRoleIDValid(id); got != want {
+			t.Errorf("pveRoleIDValid(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
+
+// Every role ID the D5 tooling names (sequence.md's role adds and G4's
+// grants, and the roles fixture) is one PVE accepts; so are the pool and the
+// user it creates.
+func TestD5Sequence_IDsArePVEValid(t *testing.T) {
+	remote, local, _ := d5Commands(t, "sequence.md")
+	roleAdd := regexp.MustCompile(`^pveum role add (\S+) `)
+	var added []string
+	for _, c := range remote {
+		if m := roleAdd.FindStringSubmatch(c); m != nil {
+			added = append(added, m[1])
+		}
+	}
+	grant := regexp.MustCompile(`--grant '[^:']+:([^:']+):`)
+	var granted []string
+	for _, l := range local {
+		for _, m := range grant.FindAllStringSubmatch(l, -1) {
+			granted = append(granted, m[1])
+		}
+	}
+	var fixture []string
+	for id := range d5Roles(t) {
+		fixture = append(fixture, id)
+	}
+	for what, ids := range map[string][]string{"role add": added, "--grant": granted, "roles fixture": fixture} {
+		if len(ids) != 4 {
+			t.Errorf("%s names %d roles %q, want the 4 harness roles", what, len(ids), ids)
+		}
+		for _, id := range ids {
+			if !pveRoleIDValid(id) {
+				t.Errorf("%s: role ID %q is one PVE refuses (pve-roleid, or the reserved 'PVE' namespace)", what, id)
+			}
+		}
+	}
+	var pools, users []string
+	for _, c := range remote {
+		if m := regexp.MustCompile(`^pveum pool add (\S+) `).FindStringSubmatch(c); m != nil {
+			pools = append(pools, m[1])
+		}
+		if m := regexp.MustCompile(`^pveum user add (\S+) `).FindStringSubmatch(c); m != nil {
+			users = append(users, m[1])
+		}
+	}
+	if len(pools) != 1 || !pvePoolIDFormat.MatchString(pools[0]) {
+		t.Errorf("pool add names %q, want one pve-poolid", pools)
+	}
+	if len(users) != 1 || len(users[0]) < 3 || len(users[0]) > 64 || !pveUserIDFormat.MatchString(users[0]) {
+		t.Errorf("user add names %q, want one user ID PVE accepts", users)
 	}
 }

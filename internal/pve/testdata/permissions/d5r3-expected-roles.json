@@ -1,5 +1,5 @@
 {
- "PveforgeHarness": [
+ "ForgeHarness": [
   "Pool.Audit",
   "VM.Allocate",
   "VM.Audit",
@@ -14,13 +14,13 @@
   "VM.PowerMgmt",
   "VM.Snapshot"
  ],
- "PveforgeHarnessIso": [
+ "ForgeHarnessIso": [
   "Datastore.Audit"
  ],
- "PveforgeHarnessNet": [
+ "ForgeHarnessNet": [
   "SDN.Use"
  ],
- "PveforgeHarnessSpace": [
+ "ForgeHarnessSpace": [
   "Datastore.AllocateSpace",
   "Datastore.Audit"
  ]

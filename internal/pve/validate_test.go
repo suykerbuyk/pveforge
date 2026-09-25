@@ -159,10 +159,10 @@ func d5(t *testing.T) ([]Grant, map[string]map[string]int) {
 	}
 	var want []Grant
 	for path, role := range map[string]string{
-		"/pool/pveforge-harness":        "PveforgeHarness",
-		"/sdn/zones/localnetwork/vmbr0": "PveforgeHarnessNet",
-		"/storage/local":                "PveforgeHarnessIso",
-		"/storage/pveforge-harness":     "PveforgeHarnessSpace",
+		"/pool/pveforge-harness":        "ForgeHarness",
+		"/sdn/zones/localnetwork/vmbr0": "ForgeHarnessNet",
+		"/storage/local":                "ForgeHarnessIso",
+		"/storage/pveforge-harness":     "ForgeHarnessSpace",
 	} {
 		want = append(want, Grant{Path: path, Role: role, Privs: roles[role]})
 	}
@@ -661,12 +661,12 @@ func TestD5Fixtures(t *testing.T) {
 		t.Fatalf("D5 tree paths = %s", got)
 	}
 	// D5's pinned files: r3's, with Datastore.Audit added to
-	// PveforgeHarnessSpace so the pool token can list the harness storage's
+	// ForgeHarnessSpace so the pool token can list the harness storage's
 	// content (PVE drops volumes failing check_volume_access from /content).
 	// Bootstrap's A-ACC generates its grants from the ACL rows and the roles.
 	for name, want := range map[string]string{
-		"d5r3-expected-acl-rows.json":        "b824e17bacd5d50e104fee03607b26303aaa30188077911510c2e29970275644",
-		"d5r3-expected-roles.json":           "182f3e5cbdcfcba699fb0a6863355a519e4af06035ad9b0c5b90d85c6e38aa8a",
+		"d5r3-expected-acl-rows.json":        "54baf98e3212a3f07a6da631b45e0f950f5501794baee36e9a7afe7e81ad5d0d",
+		"d5r3-expected-roles.json":           "5e29e48c43d246019b0588c7e2928bbd23b822aacd36b6ebc7ad2effb3a6869b",
 		"d5r3-expected-tree-post-build.json": "3cc6724ff18af278311bd04cefe75cf657f178f77093d2c241c23dae528ead5b",
 	} {
 		b, err := os.ReadFile("testdata/permissions/" + name)

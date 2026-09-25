@@ -40,14 +40,14 @@ down VMs from an earlier run is a fresh operator ask, or root's hand
 ## R1-R2: the eight ACL rows
 
 ```
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --tokens "pveforge-harness@pve!build" --roles PveforgeHarness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --tokens "pveforge-harness@pve!build" --roles PveforgeHarnessSpace'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --tokens "pveforge-harness@pve!build" --roles PveforgeHarnessIso'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --tokens "pveforge-harness@pve!build" --roles PveforgeHarnessNet'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarnessSpace'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --users pveforge-harness@pve --roles PveforgeHarnessIso'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles PveforgeHarnessNet'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --tokens "pveforge-harness@pve!build" --roles ForgeHarness'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --tokens "pveforge-harness@pve!build" --roles ForgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --tokens "pveforge-harness@pve!build" --roles ForgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --tokens "pveforge-harness@pve!build" --roles ForgeHarnessNet'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --users pveforge-harness@pve --roles ForgeHarness'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --users pveforge-harness@pve --roles ForgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --users pveforge-harness@pve --roles ForgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles ForgeHarnessNet'
 ```
 
 (Skip the four token rows if G4 never minted the token.)
@@ -58,10 +58,10 @@ ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum user token remove pveforge-harness@pve build'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum user delete pveforge-harness@pve'
 ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum pool delete pveforge-harness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete PveforgeHarness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete PveforgeHarnessSpace'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete PveforgeHarnessIso'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete PveforgeHarnessNet'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarness'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarnessNet'
 ```
 
 ## R7: the roster entry, by hand
