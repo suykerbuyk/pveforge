@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# Offline stand-in for pveforge, used only by
-# internal/sourceguard/harness_scripts_test.go. It appends each call's argv to
-# $FAKE_PVEFORGE_DIR/argv.log, one line per call, and answers from files the
-# test wrote: resp/<key> is a call's stdout and rc/<key> its exit status
-# (default 0), where <key> is "<verb> <path>[ <field=value>...]" (or
-# "vm create <vmid>") with every byte outside [A-Za-z0-9._-] turned into "_".
+# Offline stand-in for pveforge, used only by the tests in
+# internal/sourceguard (harness_scripts_test.go, harness_probe_test.go). It
+# appends each call's argv to $FAKE_PVEFORGE_DIR/argv.log, one line per call,
+# and answers from files the test wrote: resp/<key> is a call's stdout and
+# rc/<key> its exit status (default 0), where <key> is
+# "<verb> <path>[ <field=value>...]" (or "vm create <vmid>") with every byte
+# outside [A-Za-z0-9._-] turned into "_".
 # A read with no resp file, or any call it does not know, exits 99.
+#
+# Sequences (for the capability probe): the n-th call of a key (counted from
+# 1, per key) answers from resp/<key>.<n> and rc/<key>.<n> when they exist,
+# else from resp/<key> and rc/<key> as above. err/<key>[.<n>] is written to
+# stderr, as pveforge's error text; kill/<key>[.<n>] names a signal (TERM,
+# INT, HUP) sent to the calling script before answering, or "group:<signal>"
+# to send it to the whole process group, as a terminal's Ctrl-C does.
+# block/<key>[.<n>] makes the call touch $F/blocked and then wait for a line
+# on the fifo $F/block.fifo before answering, so a test can act mid-run. With
+# none of these files present, every answer is exactly what it always was.
 set -u
 F=${FAKE_PVEFORGE_DIR:?}
 printf '%s\n' "$*" >>"$F/argv.log"
@@ -16,12 +27,40 @@ if [ -n "${PVEFORGE_ROSTER+set}" ]; then
 	exit 98
 fi
 key() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+# pick prints the path of the n-th variant of dir/k, else of dir/k, else nothing.
+pick() { # dir k n
+	if [ -f "$F/$1/$2.$3" ]; then
+		printf '%s' "$F/$1/$2.$3"
+	elif [ -f "$F/$1/$2" ]; then
+		printf '%s' "$F/$1/$2"
+	fi
+}
 answer() { # key default-stdout
-	local k rc=0
+	local k n=1 rc=0 f sig
 	k=$(key "$1")
-	[ -f "$F/rc/$k" ] && rc=$(cat "$F/rc/$k")
-	if [ -f "$F/resp/$k" ]; then
-		cat "$F/resp/$k"
+	mkdir -p "$F/count"
+	[ -f "$F/count/$k" ] && n=$(($(cat "$F/count/$k") + 1))
+	printf '%s' "$n" >"$F/count/$k"
+	f=$(pick block "$k" "$n")
+	if [ -n "$f" ]; then
+		: >"$F/blocked"
+		read -r _ <"$F/block.fifo"
+	fi
+	f=$(pick kill "$k" "$n")
+	if [ -n "$f" ]; then
+		sig=$(cat "$f")
+		case $sig in
+		group:*) kill -s "${sig#group:}" 0 ;;
+		*) kill -s "$sig" "$PPID" ;;
+		esac
+	fi
+	f=$(pick rc "$k" "$n")
+	[ -n "$f" ] && rc=$(cat "$f")
+	f=$(pick err "$k" "$n")
+	[ -n "$f" ] && cat "$f" >&2
+	f=$(pick resp "$k" "$n")
+	if [ -n "$f" ]; then
+		cat "$f"
 	elif [ -n "$2" ]; then
 		printf '%s\n' "$2"
 	else
