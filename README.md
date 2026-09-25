@@ -426,6 +426,9 @@ use one). The outer cluster's root password is never in the blob.
   (`BASH_FUNC_*`, which bash imports under any name, `declare` and `unset`
   included, so no check inside a script can survive one), `SHELLOPTS`,
   `BASHOPTS`, `BASH_ENV`, `ENV` and `PS4`. Everything else passes unchanged.
+  `unlock.sh` itself runs under `bash -p` (its interpreter line), which
+  imports no function and reads none of those from the environment either;
+  run it as a command, not as `bash unlock.sh`, which it refuses.
 - `unlock.sh seal` encrypts a new env file — read from stdin, or prompted for
   with no echo on a terminal — to every recipient. `unlock.sh reseal`
   re-encrypts the current secrets to the current recipients. `unlock.sh status`

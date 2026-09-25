@@ -443,3 +443,52 @@ func isExit(err error, code int) bool {
 	ee, ok := err.(*exec.ExitError)
 	return ok && ee.ExitCode() == code
 }
+
+// unlock.sh's own commands run under bash -p: an inherited function named
+// go (the helper's build) and a BASH_ENV startup file both run in a plain
+// bash with the same environment (the control), and neither runs in
+// unlock.sh. Run with bash, not as a command, it loses -p and refuses.
+func TestUnlockSh_ImportsNoShellCode(t *testing.T) {
+	root := moduleCopy(t)
+	w := newWorld(t)
+	harness := filepath.Join(root, "hack", "harness")
+	if err := os.Rename(filepath.Join(w.harness, "recipients.txt"), filepath.Join(harness, "recipients.txt")); err != nil {
+		t.Fatal(err)
+	}
+	spy := filepath.Join(w.tmp, "spy")
+	bashEnv := filepath.Join(w.tmp, "bash-env")
+	if err := os.WriteFile(bashEnv, []byte("echo bash-env >>"+spy+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := append(w.env("GOMODCACHE="+goEnv(t, "GOMODCACHE"), "GOCACHE="+goEnv(t, "GOCACHE"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off", "GOTOOLCHAIN=local"),
+		"BASH_FUNC_go%%=() {  echo function-go >>"+spy+"; command go \"$@\"; }",
+		"BASH_ENV="+bashEnv)
+
+	control := exec.Command("bash", "-c", "go version >/dev/null")
+	control.Env = env
+	if out, err := control.CombinedOutput(); err != nil {
+		t.Fatalf("control: %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(spy); string(b) != "bash-env\nfunction-go\n" {
+		t.Fatalf("control: spy %q; the attack must run in a plain bash, or this test proves nothing", b)
+	}
+	_ = os.Remove(spy)
+
+	unlock := filepath.Join(harness, "unlock.sh")
+	seal := exec.Command(unlock, "seal")
+	seal.Env = env
+	seal.Stdin = strings.NewReader("PVEFORGE_ROSTER_PASSPHRASE=" + sentinel(t) + "\n")
+	if out, err := seal.CombinedOutput(); err != nil {
+		t.Fatalf("unlock.sh seal: %v\n%s", err, out)
+	}
+	if b, err := os.ReadFile(spy); err == nil {
+		t.Errorf("unlock.sh ran the environment's shell code: %q", b)
+	}
+
+	plain := exec.Command("bash", unlock, "status")
+	plain.Env = env
+	out, err := plain.CombinedOutput()
+	if !isExit(err, 2) || !strings.Contains(string(out), "run it as a command (its interpreter line is bash -p), not with bash") {
+		t.Errorf("bash unlock.sh: %v\n%s", err, out)
+	}
+}
