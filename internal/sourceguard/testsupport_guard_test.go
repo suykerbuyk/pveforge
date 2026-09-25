@@ -17,16 +17,28 @@ const modulePath = "github.com/suykerbuyk/pveforge/"
 // None may ever be linked into pveforge. A new one belongs here — the
 // completeness check below fails until it is added.
 var testSupport = []string{
+	"internal/harness",
 	"internal/lock/lockguard",
 	"internal/netguard",
 	"internal/pvefake",
 	"internal/sourceguard",
 }
 
+// harnessSuites are the nested-harness suite packages
+// (pveforge-harness-guard): test files only, run with -tags harness against
+// the nested cluster. Nothing may import them, so the test-support
+// anti-vacuity rule ("another package's tests import it") cannot hold for
+// them; they are held to their own rules instead (TestHarnessSuitesAreTestOnly).
+var harnessSuites = []string{
+	"internal/harness/suites",
+}
+
 // goPackage is the part of `go list -json` this guard reads.
 type goPackage struct {
 	ImportPath   string
 	Name         string
+	GoFiles      []string
+	TestGoFiles  []string
 	Imports      []string // non-test imports only
 	TestImports  []string
 	XTestImports []string
@@ -138,6 +150,9 @@ func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
 	// main or listed here.
 	var orphans []string
 	for _, p := range pkgs {
+		if slices.Contains(harnessSuites, strings.TrimPrefix(p.ImportPath, modulePath)) {
+			continue // held to TestHarnessSuitesAreTestOnly's rules
+		}
 		if p.Name != "main" && len(importedByProduction[p.ImportPath]) == 0 {
 			orphans = append(orphans, strings.TrimPrefix(p.ImportPath, modulePath))
 		}
@@ -198,5 +213,58 @@ func TestManPageGeneratorNeverReachesProduction(t *testing.T) {
 		if len(matches(testDeps, d)) == 0 {
 			t.Errorf("no test of cmd/pveforge depends on %s: this guard is not looking at a real importer (or it is dead and should go)", d)
 		}
+	}
+}
+
+// TestHarnessSuitesAreTestOnly holds each harnessSuites package to: no
+// subpackages, even with -tags harness (each would be a test binary whose
+// suites run with no guard); no non-test Go files (nothing to link into
+// anything); imported by no other
+// package, from tests or not; and test files that exist only under
+// -tags harness beyond the untagged anchor — anti-vacuity, so the rule is
+// looking at the real suites.
+func TestHarnessSuitesAreTestOnly(t *testing.T) {
+	var pkgs []goPackage
+	dec := json.NewDecoder(strings.NewReader(goList(t, "-json", "./...")))
+	for {
+		var p goPackage
+		if err := dec.Decode(&p); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("decode go list output: %v", err)
+		}
+		pkgs = append(pkgs, p)
+	}
+	for _, rel := range harnessSuites {
+		path := modulePath + rel
+		t.Run(rel, func(t *testing.T) {
+			var found *goPackage
+			for i := range pkgs {
+				if pkgs[i].ImportPath == path {
+					found = &pkgs[i]
+				}
+			}
+			if found == nil {
+				t.Fatalf("%s is not a package of this module", rel)
+			}
+			if len(found.GoFiles) != 0 {
+				t.Errorf("%s has non-test Go files %q: a harness suite package holds tests only", rel, found.GoFiles)
+			}
+			for _, p := range pkgs {
+				if p.ImportPath != path && (slices.Contains(p.Imports, path) || slices.Contains(p.TestImports, path) || slices.Contains(p.XTestImports, path)) {
+					t.Errorf("%s is imported by %s: nothing may import a harness suite", rel, p.ImportPath)
+				}
+			}
+			// Exactly one package, with the harness tag too: a suite in a
+			// subpackage would be its own test binary, with no TestMain and
+			// so no harness.Open guarding it.
+			if under := strings.Fields(goList(t, "-tags", "harness", "./"+rel+"/...")); len(under) != 1 || under[0] != path {
+				t.Errorf("go list -tags harness ./%s/... = %q: a harness suite package has no subpackages (each would run without the guard's TestMain)", rel, under)
+			}
+			tagged := strings.Fields(goList(t, "-tags", "harness", "-f", `{{join .TestGoFiles " "}}`, "./"+rel))
+			if len(tagged) <= len(found.TestGoFiles) {
+				t.Errorf("%s: -tags harness sees %q, untagged %q: no harness-tagged suite files, so this rule is not looking at the suites", rel, tagged, found.TestGoFiles)
+			}
+		})
 	}
 }

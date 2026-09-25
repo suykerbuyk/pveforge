@@ -70,6 +70,15 @@ integration: ## Run integration-tagged tests (none exist yet — this project's 
 		go test -tags=integration ./...; \
 	fi
 
+# HARNESS_ROSTER is the nested harness's roster; `make harness` passes it
+# to the suites as an absolute path (go test runs in the package directory).
+HARNESS_ROSTER ?= $(PVEFORGE_HARNESS_ROSTER)
+
+.PHONY: harness
+harness: ## Run the nested-harness suites (-tags harness) against the nested pvh cluster only; run through hack/harness/unlock.sh, with PVEFORGE_HARNESS_ROSTER and PVEFORGE_HARNESS_OUTER_ROSTERS set, and PVEFORGE_ROSTER and every proxy variable unset
+	@if [ -z "$(HARNESS_ROSTER)" ]; then echo "make harness: set PVEFORGE_HARNESS_ROSTER (or HARNESS_ROSTER)"; exit 2; fi
+	PVEFORGE_HARNESS_ROSTER="$(abspath $(HARNESS_ROSTER))" go test -tags harness -count=1 -p 1 ./internal/harness/suites/...
+
 ##@ Lint
 
 .PHONY: lint
@@ -81,6 +90,7 @@ lint: modcheck ## Check module hygiene (modcheck), formatting (gofmt) and static
 		exit 1; \
 	fi
 	$(OFFLINE) go vet ./...
+	$(OFFLINE) go vet -tags harness ./...
 
 # The module-graph rules the go tool does not enforce (the go-proxmox fork
 # pinned to a vX.Y.Z-pveforge.N tag, no replace/exclude, the upstream
