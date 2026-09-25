@@ -2,3 +2,4 @@
 # line: `<age1… recipient> # <consumer>`. Public keys only: never a private
 # identity. After editing, run `hack/harness/unlock.sh reseal` and commit
 # both files. See README.md, "Harness secrets".
+age18y2hhpj356638cfkmvn09mghzlq9q2wg6k8l3rugdm0myhyshd0qspqruu # operator
