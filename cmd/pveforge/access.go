@@ -81,7 +81,9 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	if pin != "" {
+	// Given means checked, an empty value included: "" would otherwise read
+	// as no pin, trusting the host key on first use.
+	if cmd.Flags().Changed("host-key-fingerprint") {
 		if err := sshexec.CheckFingerprint(pin); err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint: %w", err)
 		}
