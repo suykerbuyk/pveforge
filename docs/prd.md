@@ -217,7 +217,8 @@ token-authenticated" using only credentials an operator already has:
    - The token is then validated by its effective permissions: it must hold
      every requested grant and reach no further, within the validator's
      stated known limits (`internal/pve/validate.go`: e.g. pool membership
-     is not read, and delegations on pool members are not seen). On success the granted
+     is read only for a non-propagating pool grant whose Pool.Audit the
+     token holds, and delegations on pool members are not seen). On success the granted
      scope is printed with the result (`grants`), only when a token
      survives the run.
    - Re-running with grants whose paths or privileges differ from the held
