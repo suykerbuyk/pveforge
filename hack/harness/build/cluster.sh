@@ -51,10 +51,14 @@ if [ -n "$(declare -F)" ]; then
 	echo "harness-build: refusing: shell functions already defined (inherited from the environment)" >&2
 	exit 2
 fi
-# Tracing would print the password the moment it is read: refused before it
-# is. So are the other ways the environment can run code in this shell.
-case "$-" in *x* | *v*)
-	echo "harness-build: refusing: xtrace or verbose is on, and would print the password" >&2
+# The shell options lib.sh refuses, for the same reasons, before the password
+# is read: tracing (x, v) would print it; allexport (a, which SHELLOPTS in
+# the environment can turn on) would export it into every program this
+# script runs; functrace and errtrace (T, E) would run an inherited DEBUG or
+# ERR trap inside functions. So are the other ways the environment can run
+# code in this shell.
+case "$-" in *x* | *v* | *a* | *T* | *E*)
+	echo "harness-build: refusing: shell options \$-=$- include xtrace, verbose, allexport, functrace or errtrace" >&2
 	exit 2
 	;;
 esac
