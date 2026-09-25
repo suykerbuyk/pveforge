@@ -167,24 +167,15 @@ if [ -e "$NESTED" ] || [ -L "$NESTED" ]; then
 elif [ "$mode" = bridge ]; then
 	hb_die 2 "$NESTED does not exist: run 'nested.sh bootstrap' first"
 fi
-# The pins tool: HARNESS_PINS_BIN, or built as unlock.sh builds its helper.
-if [ -n "${HARNESS_PINS_BIN:-}" ]; then
-	[[ $HARNESS_PINS_BIN == /* ]] && [ -f "$HARNESS_PINS_BIN" ] && [ -x "$HARNESS_PINS_BIN" ] ||
-		hb_die 2 "HARNESS_PINS_BIN must be the absolute path of an executable, got '$HARNESS_PINS_BIN'"
-	readonly PINS=$HARNESS_PINS_BIN
-else
-	hb_resolve go
-	root=$(cd -- "${BASH_SOURCE[0]%/*}/../.." && pwd) || hb_die 2 "cannot find the repository root"
-	PINS=${XDG_CACHE_HOME:-$HOME/.cache}/pveforge-harness/pveforge-harness-pins
-	(cd -- "$root" && "$HB_TOOL_GO" build -o "$PINS" ./cmd/pveforge-harness-pins) || hb_die 2 "cannot build cmd/pveforge-harness-pins"
-	readonly PINS
-fi
+# The pins tool (build/env.sh).
+hb_pins
+readonly PINS=$HB_PINS
 if [ "$mode" = bridge ]; then
 	[ -n "${PVEFORGE_HARNESS_OUTER_ROSTERS:-}" ] || hb_die 2 "PVEFORGE_HARNESS_OUTER_ROSTERS must list the outer rosters: acceptance refuses any overlap with them"
 	if [ -n "${HARNESS_ACCEPT_BIN:-}" ]; then
 		[[ $HARNESS_ACCEPT_BIN == /* ]] && [ -f "$HARNESS_ACCEPT_BIN" ] && [ -x "$HARNESS_ACCEPT_BIN" ] ||
 			hb_die 2 "HARNESS_ACCEPT_BIN must be the absolute path of an executable, got '$HARNESS_ACCEPT_BIN'"
-	elif [ -z "${HB_TOOL_GO:-}" ]; then
+	else
 		hb_resolve go
 	fi
 fi

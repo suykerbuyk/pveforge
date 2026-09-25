@@ -939,3 +939,86 @@ func TestNested_ThePassphraseReachesOnlyPveforgeAndAccept(t *testing.T) {
 		})
 	}
 }
+
+// N12: without HARNESS_PINS_BIN, the pins tool is built from this repository
+// into the cache (build/env.sh's hb_pins, shared with build.sh), and that
+// build is the one the run reads the roster with; a failed build stops the
+// run before anything.
+func TestNested_PinsToolBuiltIntoCache(t *testing.T) {
+	fakePins, err := filepath.Abs(filepath.Join(harnessDir, "test", "fake-pins.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(filepath.Join(harnessDir, "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The stand-in go logs where it ran and what, and "builds" the fake
+	// pins tool at -o.
+	goStub := func(rc int) string {
+		return "#!/usr/bin/env bash\nprintf 'go %s %s\\n' \"$PWD\" \"$*\" >>\"$FAKE_PVEFORGE_DIR/go.log\"\n" +
+			"[ " + strconv.Itoa(rc) + " = 0 ] || exit " + strconv.Itoa(rc) + "\n" +
+			"[ \"$1 $2 $4\" = 'build -o ./cmd/pveforge-harness-pins' ] && [ \"$#\" = 4 ] || exit 97\n" +
+			"mkdir -p -- \"${3%/*}\" && cp -- " + fakePins + " \"$3\" && chmod 700 \"$3\"\n"
+	}
+	// xdg: XDG_CACHE_HOME ("-" unset, "dir" a directory of the test's own);
+	// set but empty is unset, as the XDG spec has it.
+	for name, xdg := range map[string]string{"the default cache": "-", "XDG_CACHE_HOME": "dir", "an empty XDG_CACHE_HOME": ""} {
+		t.Run(name, func(t *testing.T) {
+			s := nestedWorld(t, "bootstrap")
+			s.env["HARNESS_PINS_BIN"] = "-"
+			s.stubs["go"] = goStub(0)
+			want := "" // where the tool is built ("" = under $HOME, known after the run)
+			s.env["XDG_CACHE_HOME"] = xdg
+			if xdg == "dir" {
+				d := t.TempDir()
+				s.env["XDG_CACHE_HOME"] = d
+				want = filepath.Join(d, "pveforge-harness/pveforge-harness-pins")
+			}
+			r := runProbe(t, s)
+			if r.code != 0 {
+				t.Fatalf("exit %d:\n%s", r.code, r.stderr)
+			}
+			if want == "" {
+				want = filepath.Join(r.home, ".cache/pveforge-harness/pveforge-harness-pins")
+			}
+			if got := fakeLog(r, "go.log"); got != "go "+root+" build -o "+want+" ./cmd/pveforge-harness-pins\n" {
+				t.Errorf("go.log %q, want the build of %s in %s", got, want, root)
+			}
+			equalCalls(t, "calls", nestedCalls(r), nestedBootstrapCalls)
+		})
+	}
+	// No shell code from the environment: an exported HB_PINS or HB_TOOL_GO
+	// is never what runs (build/env.sh sets both itself).
+	for _, v := range []string{"HB_PINS", "HB_TOOL_GO"} {
+		t.Run("an inherited "+v, func(t *testing.T) {
+			s := nestedWorld(t, "bootstrap")
+			stub, ran := inheritedStub(t)
+			s.env[v] = stub
+			if v == "HB_TOOL_GO" {
+				s.env["HARNESS_PINS_BIN"] = "-"
+				s.stubs["go"] = goStub(0)
+			}
+			r := runProbe(t, s)
+			if b, err := os.ReadFile(ran); err == nil {
+				t.Errorf("the inherited %s ran: %q", v, b)
+			}
+			if r.code != 0 {
+				t.Fatalf("exit %d:\n%s", r.code, r.stderr)
+			}
+			equalCalls(t, "calls", nestedCalls(r), nestedBootstrapCalls)
+		})
+	}
+	t.Run("the build fails", func(t *testing.T) {
+		s := nestedWorld(t, "bootstrap")
+		s.env["HARNESS_PINS_BIN"] = "-"
+		s.stubs["go"] = goStub(1)
+		r := runProbe(t, s)
+		if r.code != 2 || !strings.Contains(r.stderr, "cannot build cmd/pveforge-harness-pins") {
+			t.Fatalf("exit %d, want 2 and the build refused:\n%s", r.code, r.stderr)
+		}
+		if len(r.calls) != 0 {
+			t.Errorf("a refused run ran %q", r.calls)
+		}
+	})
+}

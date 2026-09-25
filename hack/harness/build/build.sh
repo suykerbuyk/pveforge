@@ -62,6 +62,7 @@ done
 readonly keep repin
 
 hb_resolve stat mv chmod date sleep timeout ssh-keyscan getent
+hb_pins
 harness_init
 harness_declare_vmids 690 691 692
 harness_require_storage "$storage"
@@ -132,25 +133,21 @@ now() {
 	[[ $t =~ ^[0-9]+$ ]] || fail "the clock read '$t'"
 	printf '%s' "$t"
 }
-# outer_host prints the host the harness roster names for $HARNESS_TARGET.
+# outer_host prints the host the harness roster names for $HARNESS_TARGET,
+# read by the pins tool with pveforge's own loader; it fails, printing
+# nothing, when the roster cannot be read (1) or has no such target (3).
+# The tool's stderr quotes roster values, so it is never shown.
 outer_host() {
-	local l id="" host="" in=0 found=""
-	while IFS= read -r l || [ -n "$l" ]; do
-		if [[ $l =~ ^[[:space:]]*\[ ]]; then
-			[ "$in" = 0 ] || [ "$id" != "$HARNESS_TARGET" ] || found=$host
-			in=0
-			[[ $l =~ ^[[:space:]]*\[\[targets\]\][[:space:]]*$ ]] && in=1 id="" host=""
-			continue
-		fi
-		[ "$in" = 1 ] || continue
-		if [[ $l =~ ^[[:space:]]*id[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
-			id=${BASH_REMATCH[1]}
-		elif [[ $l =~ ^[[:space:]]*host[[:space:]]*=[[:space:]]*\"([^\"]*)\" ]]; then
-			host=${BASH_REMATCH[1]}
-		fi
-	done <"$HARNESS_ROSTER"
-	[ "$in" = 0 ] || [ "$id" != "$HARNESS_TARGET" ] || found=$host
-	printf '%s' "$found"
+	local out rc=0
+	out=$("$HB_PINS" "$HARNESS_ROSTER" "$HARNESS_TARGET" 2>/dev/null) || rc=$?
+	case "$rc" in
+	0) ;;
+	3) return 3 ;;
+	*) return 1 ;;
+	esac
+	# One line, two words: "<host> <pin>".
+	[[ $out =~ ^([^[:space:]]+)\ [^[:space:]]+$ ]] || return 1
+	printf '%s' "${BASH_REMATCH[1]}"
 }
 # ip_pinned says whether the known_hosts text pins a key for ip.
 ip_pinned() { # text ip
@@ -182,8 +179,10 @@ if [ "$repin" = 0 ]; then
 fi
 
 # None of the three addresses may be the outer host itself.
-outer=$(outer_host) || refuse "cannot read $HARNESS_ROSTER"
-[ -n "$outer" ] || refuse "$HARNESS_ROSTER names no host for target $HARNESS_TARGET"
+outer_rc=0
+outer=$(outer_host) || outer_rc=$?
+[ "$outer_rc" != 3 ] || refuse "$HARNESS_ROSTER names no target $HARNESS_TARGET"
+[ "$outer_rc" = 0 ] || refuse "cannot read $HARNESS_ROSTER"
 if [[ $outer =~ $HB_IP_RE ]]; then
 	outer_ips=$outer
 else
