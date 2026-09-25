@@ -4,6 +4,7 @@ import (
 	"io"
 	logpkg "log"
 	"os"
+	"syscall"
 	"testing"
 )
 
@@ -27,6 +28,7 @@ func TestMore(t *testing.T) {
 	cfg.N.M = 1
 	hook = func() {}
 	(*cfg.N).M--
+	syscall.Kill(syscall.Getpid(), 0)
 	t.Setenv("Y", "2") // refused by testing itself in a parallel test: not counted
 	var local struct{ f int }
 	local.f = 3 // a local's field: not counted
