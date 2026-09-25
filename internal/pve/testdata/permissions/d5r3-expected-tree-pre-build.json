@@ -1,0 +1,26 @@
+{
+ "/pool/pveforge-harness": {
+  "Pool.Audit": 0,
+  "VM.Allocate": 0,
+  "VM.Audit": 0,
+  "VM.Config.CDROM": 0,
+  "VM.Config.CPU": 0,
+  "VM.Config.Cloudinit": 0,
+  "VM.Config.Disk": 0,
+  "VM.Config.HWType": 0,
+  "VM.Config.Memory": 0,
+  "VM.Config.Network": 0,
+  "VM.Config.Options": 0,
+  "VM.PowerMgmt": 0,
+  "VM.Snapshot": 0
+ },
+ "/sdn/zones/localnetwork/vmbr0": {
+  "SDN.Use": 0
+ },
+ "/storage/local": {
+  "Datastore.Audit": 0
+ },
+ "/storage/pveforge-harness": {
+  "Datastore.AllocateSpace": 0
+ }
+}
