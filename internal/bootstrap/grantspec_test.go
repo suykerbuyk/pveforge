@@ -443,7 +443,7 @@ func readD5(t *testing.T, name string, v interface{}) {
 // d5Fixture returns the token's ACL rows, the grants they imply (privileges
 // pinned from the roles fixture), their --grant specs, and a pveum role
 // list answer built from the roles fixture (widen, when set, is appended to
-// PveforgeHarness's privileges).
+// ForgeHarness's privileges).
 func d5Fixture(t *testing.T, widen string) (rows []d5ACLRow, grants []Grant, specs []string, roleList string) {
 	t.Helper()
 	var all []d5ACLRow
@@ -470,7 +470,7 @@ func d5Fixture(t *testing.T, widen string) (rows []d5ACLRow, grants []Grant, spe
 	var entries []string
 	for _, id := range ids {
 		privs := strings.Join(roles[id], ",")
-		if id == "PveforgeHarness" && widen != "" {
+		if id == "ForgeHarness" && widen != "" {
 			privs += "," + widen
 		}
 		entries = append(entries, fmt.Sprintf(`{"privs":%q,"roleid":%q,"special":0}`, privs, id))
@@ -512,7 +512,7 @@ func TestRun_AACC_D5Grants(t *testing.T) {
 		t.Fatalf("result grants = %#v", res.Grants)
 	}
 
-	t.Run("PveforgeHarness widened on PVE: refused before any remove", func(t *testing.T) {
+	t.Run("ForgeHarness widened on PVE: refused before any remove", func(t *testing.T) {
 		_, grants, _, widened := d5Fixture(t, "Permissions.Modify")
 		s := seedRoster(t, "root@pam!build", "")
 		s.opts.TokenID = "build"

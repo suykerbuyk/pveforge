@@ -10,7 +10,7 @@ func TestGrantCheck(t *testing.T) {
 	ok := []Grant{
 		{Path: "/", Role: "PVEVMAdmin", Propagate: true},
 		{Path: "/pool/p", Role: "R"},
-		{Path: "/sdn/zones/localnetwork/vmbr0", Role: "PveforgeHarnessNet", Privs: []string{"SDN.Use"}},
+		{Path: "/sdn/zones/localnetwork/vmbr0", Role: "ForgeHarnessNet", Privs: []string{"SDN.Use"}},
 		{Path: "/storage/local", Role: "R.x-y_z", Privs: []string{"Datastore.Audit", "VM.GuestAgent.FileSystemMgmt"}},
 	}
 	for _, g := range ok {

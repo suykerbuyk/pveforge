@@ -55,10 +55,10 @@ STOP. Evidence: `$E/g0/`, and the P0 baseline.
 ## G1: steps 1-4, the four roles
 
 ```
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add PveforgeHarness --privs "Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot"'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add PveforgeHarnessSpace --privs "Datastore.AllocateSpace,Datastore.Audit"'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add PveforgeHarnessIso --privs "Datastore.Audit"'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add PveforgeHarnessNet --privs "SDN.Use"'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add ForgeHarness --privs "Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot"'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add ForgeHarnessSpace --privs "Datastore.AllocateSpace,Datastore.Audit"'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add ForgeHarnessIso --privs "Datastore.Audit"'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role add ForgeHarnessNet --privs "SDN.Use"'
 ```
 
 Each must exit 0; record each status. Then:
@@ -92,10 +92,10 @@ These must exist before step 11: bootstrap refuses a non-root owner lacking
 them (`ErrOwnerLacksPrivileges`, a non-verdict that touches nothing).
 
 ```
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /pool/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarness --propagate 0'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /storage/pveforge-harness --users pveforge-harness@pve --roles PveforgeHarnessSpace --propagate 0'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /storage/local --users pveforge-harness@pve --roles PveforgeHarnessIso --propagate 0'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles PveforgeHarnessNet --propagate 0'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /pool/pveforge-harness --users pveforge-harness@pve --roles ForgeHarness --propagate 0'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /storage/pveforge-harness --users pveforge-harness@pve --roles ForgeHarnessSpace --propagate 0'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /storage/local --users pveforge-harness@pve --roles ForgeHarnessIso --propagate 0'
+ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl modify /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles ForgeHarnessNet --propagate 0'
 HARNESS_EVIDENCE="$E"/g3 hack/harness/d5/verify-root.sh granted
 ```
 
@@ -122,7 +122,7 @@ any other key.
 
 ```
 pveforge roster init ~/.config/pveforge/harness-outer.toml
-pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml --host qa-pve-02.lab.quantum.com --node qa-pve-02 --insecure-tls --pve-user root@pam --no-ssh-key --host-key-fingerprint "$PIN" --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:PveforgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:PveforgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:PveforgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:PveforgeHarnessNet:SDN.Use:0' -o json > "$E/g4-bootstrap.json"
+pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml --host qa-pve-02.lab.quantum.com --node qa-pve-02 --insecure-tls --pve-user root@pam --no-ssh-key --host-key-fingerprint "$PIN" --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0' -o json > "$E/g4-bootstrap.json"
 ```
 
 Its stdout carries no secret. The gate: `token_outcome` is `minted`,

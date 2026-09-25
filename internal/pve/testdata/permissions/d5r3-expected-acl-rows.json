@@ -2,49 +2,49 @@
  {
   "path": "/pool/pveforge-harness",
   "propagate": 0,
-  "roleid": "PveforgeHarness",
+  "roleid": "ForgeHarness",
   "ugid": "pveforge-harness@pve"
  },
  {
   "path": "/pool/pveforge-harness",
   "propagate": 0,
-  "roleid": "PveforgeHarness",
+  "roleid": "ForgeHarness",
   "ugid": "pveforge-harness@pve!build"
  },
  {
   "path": "/sdn/zones/localnetwork/vmbr0",
   "propagate": 0,
-  "roleid": "PveforgeHarnessNet",
+  "roleid": "ForgeHarnessNet",
   "ugid": "pveforge-harness@pve"
  },
  {
   "path": "/sdn/zones/localnetwork/vmbr0",
   "propagate": 0,
-  "roleid": "PveforgeHarnessNet",
+  "roleid": "ForgeHarnessNet",
   "ugid": "pveforge-harness@pve!build"
  },
  {
   "path": "/storage/local",
   "propagate": 0,
-  "roleid": "PveforgeHarnessIso",
+  "roleid": "ForgeHarnessIso",
   "ugid": "pveforge-harness@pve"
  },
  {
   "path": "/storage/local",
   "propagate": 0,
-  "roleid": "PveforgeHarnessIso",
+  "roleid": "ForgeHarnessIso",
   "ugid": "pveforge-harness@pve!build"
  },
  {
   "path": "/storage/pveforge-harness",
   "propagate": 0,
-  "roleid": "PveforgeHarnessSpace",
+  "roleid": "ForgeHarnessSpace",
   "ugid": "pveforge-harness@pve"
  },
  {
   "path": "/storage/pveforge-harness",
   "propagate": 0,
-  "roleid": "PveforgeHarnessSpace",
+  "roleid": "ForgeHarnessSpace",
   "ugid": "pveforge-harness@pve!build"
  }
 ]
