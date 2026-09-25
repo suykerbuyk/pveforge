@@ -3,6 +3,7 @@ package sshexec
 import (
 	"fmt"
 	"net"
+	"regexp"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -36,6 +37,22 @@ func CaptureHostKeyCallback(captured *CapturedHostKey) ssh.HostKeyCallback {
 		captured.Key = key
 		return nil
 	}
+}
+
+// fingerprintRE is a SHA256 host key fingerprint exactly as
+// `ssh-keygen -l -E sha256` prints it and the roster stores it
+// (ssh.FingerprintSHA256): "SHA256:" and the unpadded base64 of 32 bytes.
+var fingerprintRE = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+
+// CheckFingerprint refuses anything but one such fingerprint: an MD5 form,
+// a whole ssh-keygen line, padding or stray whitespace. A pin is checked
+// before anything is dialed, so a typo is named, never taken for a
+// mismatching host.
+func CheckFingerprint(s string) error {
+	if !fingerprintRE.MatchString(s) {
+		return fmt.Errorf("host key fingerprint %q is not SHA256:<43 base64 characters>, as ssh-keygen -l -E sha256 prints it", s)
+	}
+	return nil
 }
 
 // PinnedHostKeyCallback returns an ssh.HostKeyCallback that accepts a

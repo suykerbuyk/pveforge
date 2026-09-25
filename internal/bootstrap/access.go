@@ -51,13 +51,16 @@ type AccessOptions struct {
 	// Addr is the target's SSH address, host:port.
 	Addr string
 	// SSHUser, PrivateKeyPEM and HostKeyFingerprint are the target's stored
-	// SSH auth. Unused when Password is set.
+	// SSH auth. With Password set, SSHUser and PrivateKeyPEM are unused and
+	// HostKeyFingerprint is the operator's --host-key-fingerprint: the
+	// password connection is checked against it, before the password is
+	// sent; "" trusts the host key on first use.
 	SSHUser            string
 	PrivateKeyPEM      []byte
 	HostKeyFingerprint string
 	// Password, when set, makes the session keyless: root with this per-run
-	// password, the host key trusted on first use. It is called only when
-	// the session is first needed.
+	// password, the host key pinned by HostKeyFingerprint or else trusted on
+	// first use. It is called only when the session is first needed.
 	Password func(ctx context.Context) (string, error)
 	// REST is the token's view, for the Ensure reads; nil when the target
 	// holds no token, so every read goes over root.
@@ -121,7 +124,7 @@ func (a *RootAccess) root(ctx context.Context) (SSHSession, error) {
 		if err := a.ResolveCredentials(ctx); err != nil {
 			return nil, err
 		}
-		s, _, err := a.transport.DialWithPassword(ctx, a.opts.Addr, "root", a.password, "")
+		s, _, err := a.transport.DialWithPassword(ctx, a.opts.Addr, "root", a.password, a.opts.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("connect as root with the password: %w", err)
 		}

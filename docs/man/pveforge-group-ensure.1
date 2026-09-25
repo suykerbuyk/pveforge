@@ -30,6 +30,10 @@ stderr; stdout is unchanged and the exit status is still 0.
 	help for ensure
 
 .PP
+\fB--host-key-fingerprint\fP=""
+	the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: with --no-ssh-key the password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; with a stored key it must equal the pinned one, or nothing is dialed
+
+.PP
 \fB--lock-wait\fP=0s
 	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
 

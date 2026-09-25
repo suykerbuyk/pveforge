@@ -85,7 +85,7 @@ func sshDirectDial(addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
 // door. It has a real site at internal/bootstrap/deps.go:20; it appears here
 // too because this probe must reference every target, witnessed or not.
 func installPubkey(ctx context.Context) error {
-	_, err := sshexec.InstallPubkeyViaPassword(ctx, "example.invalid:22", "root", "pw", "ssh-ed25519 AAAAtest")
+	_, err := sshexec.InstallPubkeyViaPassword(ctx, "example.invalid:22", "root", "pw", "ssh-ed25519 AAAAtest", "")
 	return err
 }
 

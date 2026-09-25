@@ -28,7 +28,7 @@ func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	res, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
+	res, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey", "")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestInstallPubkeyViaPassword_AppendsAndCapturesHostKey(t *testing.T) {
 	}
 
 	// Second call: idempotent no-op.
-	res2, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
+	res2, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey", "")
 	if err != nil {
 		t.Fatalf("InstallPubkeyViaPassword (second): %v", err)
 	}
@@ -63,7 +63,7 @@ func TestInstallPubkeyViaPassword_WrongPasswordRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "wrong-password", "ssh-ed25519 AAAAtest testkey")
+	_, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "wrong-password", "ssh-ed25519 AAAAtest testkey", "")
 	if err == nil {
 		t.Fatal("expected error for wrong password")
 	}
@@ -80,7 +80,7 @@ func TestInstallPubkeyViaPassword_RemoteScriptFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey")
+	_, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey", "")
 	if err == nil {
 		t.Fatal("expected error when the remote script exits non-zero")
 	}

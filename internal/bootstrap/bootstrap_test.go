@@ -269,16 +269,21 @@ type fakeTransport struct {
 	dialCalls               int
 	reconnectCalls          int
 	installedKeyLines       []string // every authorizedKeyLine InstallPubkeyViaPassword was called with, in order
+	installPins             []string // every pin InstallPubkeyViaPassword was called with, in order
 	reconnectedFingerprints []string // every hostKeyFingerprint ReconnectWithPinnedKey was called with, in order
 	reconnectedAddrs        []string
 	reconnectedKeys         [][]byte
 }
 
-func (t *fakeTransport) InstallPubkeyViaPassword(_ context.Context, addr, user, password, authorizedKeyLine string) (string, error) {
+func (t *fakeTransport) InstallPubkeyViaPassword(_ context.Context, addr, user, password, authorizedKeyLine, pin string) (string, error) {
 	t.installCalls++
 	t.installedKeyLines = append(t.installedKeyLines, authorizedKeyLine)
+	t.installPins = append(t.installPins, pin)
 	if t.installErr != nil {
 		return "", t.installErr
+	}
+	if pin != "" {
+		return pin, nil
 	}
 	return t.installFingerprint, nil
 }

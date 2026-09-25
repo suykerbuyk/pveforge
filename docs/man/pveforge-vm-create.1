@@ -82,6 +82,10 @@ the exit status is still 0: the create task succeeded.
 	help for create
 
 .PP
+\fB--host-key-fingerprint\fP=""
+	with --unique-tag: the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: with --no-ssh-key the password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; with a stored key it must equal the pinned one, or nothing is dialed
+
+.PP
 \fB--json\fP=""
 	JSON object of create parameters (values must be JSON strings)
 

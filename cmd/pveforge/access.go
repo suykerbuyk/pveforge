@@ -15,6 +15,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
 // `pveforge user ensure`, `group ensure` and `acl grant` (task
@@ -35,6 +36,8 @@ const accessSSHPort = "22"
 // escalatingList names bootstrap.EscalatingPrivileges for help text, so the
 // text can never drift from the list the checks use.
 var escalatingList = strings.Join(bootstrap.EscalatingPrivileges, ", ")
+
+const hostKeyFingerprintAccessUsage = "the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: with --no-ssh-key the password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; with a stored key it must equal the pinned one, or nothing is dialed"
 
 const noSSHKeyAccessUsage = "connect as root with the PVE password (" + pvePasswordEnvVar + ", else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key"
 
@@ -68,6 +71,20 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 	if !noSSHKey && t.SSH == nil {
 		return nil, nil, nil, nil, fmt.Errorf("target %q holds no SSH key: pass --no-ssh-key to connect as root with the PVE password for this run", targetID)
 	}
+	// The operator's pin, checked before the passphrase is asked for and
+	// before anything is dialed.
+	pin, err := cmd.Flags().GetString("host-key-fingerprint")
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if pin != "" {
+		if err := sshexec.CheckFingerprint(pin); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint: %w", err)
+		}
+		if !noSSHKey && pin != t.SSH.HostKeyFingerprint {
+			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint %s is not the host key target %q is pinned to (%s); nothing was dialed", pin, targetID, t.SSH.HostKeyFingerprint)
+		}
+	}
 	pass, err := roster.ResolvePassphraseContext(cmd.Context())
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -83,7 +100,7 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 		rest, opts.REST, opts.OwnToken, closeREST = rc, rc, t.Token.ID, func() { _ = rc.Close() }
 	}
 	if noSSHKey {
-		opts.Password = resolvePVEPassword
+		opts.Password, opts.HostKeyFingerprint = resolvePVEPassword, pin
 	} else {
 		key, err := roster.DecryptString(t.SSH.PrivateKeyEnc, pass)
 		if err != nil {
@@ -256,6 +273,7 @@ stderr; stdout is unchanged and the exit status is still 0.`,
 	cmd.Flags().StringArrayVar(&groups, "group", nil, "add the user to this group (repeatable; membership is only added)")
 	cmd.Flags().BoolVar(&allowEscalating, "allow-escalating-role", false, "allow joining a group that holds a role conferring an escalating privilege: "+escalatingList)
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", hostKeyFingerprintAccessUsage)
 	addRosterFlag(cmd)
 	addLockWaitFlag(cmd)
 	markMutating(cmd)
@@ -318,6 +336,7 @@ stderr; stdout is unchanged and the exit status is still 0.`,
 	}
 	cmd.Flags().String("comment", "", "set the group's comment")
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", hostKeyFingerprintAccessUsage)
 	addRosterFlag(cmd)
 	addLockWaitFlag(cmd)
 	markMutating(cmd)
@@ -409,6 +428,7 @@ outside pveforge.`,
 	cmd.Flags().StringArrayVar(&grants, "grant", nil, "a grant PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; PROPAGATE defaults to 0)")
 	cmd.Flags().BoolVar(&allowEscalating, "allow-escalating-role", false, "allow a role conferring an escalating privilege: "+escalatingList)
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", hostKeyFingerprintAccessUsage)
 	addRosterFlag(cmd)
 	// destructive: a widened grant may be used before it is revoked, and
 	// what is done with it cannot be undone; an escalating role hands out
@@ -482,6 +502,7 @@ they are read, by pveforge or anyone else, can show half-applied.`,
 		return kvjson.Render(cmd.OutOrStdout(), format, accessInventoryResult{Target: args[0], AccessInventory: inv})
 	}
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", hostKeyFingerprintAccessUsage)
 	addRosterFlag(cmd)
 	markSafe(cmd)
 	return cmd

@@ -58,6 +58,10 @@ outside pveforge.
 	help for grant
 
 .PP
+\fB--host-key-fingerprint\fP=""
+	the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: with --no-ssh-key the password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; with a stored key it must equal the pinned one, or nothing is dialed
+
+.PP
 \fB--no-ssh-key\fP[=false]
 	connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, trusting the host key on first use, as bootstrap --no-ssh-key does; required for a target that holds no SSH key
 
