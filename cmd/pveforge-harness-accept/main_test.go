@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -50,22 +52,28 @@ func TestRun_UsageErrorsExitTwo(t *testing.T) {
 	}
 }
 
-// A signal ends the wait with 128+signum, never a pass.
+// A signal ends the wait with 128+signum, never a pass and never "not
+// accepted". The attempt signals the process and returns only once its
+// context is cancelled: whatever the scheduling from there, the status must
+// come from the signal (the 5 s bound only catches a signal that never
+// arrives; it synchronises nothing).
 func TestRun_ASignalEndsIt(t *testing.T) {
-	var errOut bytes.Buffer
-	code := run(context.Background(), []string{"-deadline", "10s", "-every", "10ms"}, &errOut, func(ctx context.Context) error {
-		if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
-			t.Fatal(err)
+	for sig, want := range map[syscall.Signal]int{syscall.SIGTERM: 143, syscall.SIGINT: 130} {
+		var errOut bytes.Buffer
+		code := run(context.Background(), []string{"-deadline", "10s", "-every", "10ms"}, &errOut, func(ctx context.Context) error {
+			if err := syscall.Kill(syscall.Getpid(), sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Error("the signal never reached the attempt's context")
+			}
+			return ctx.Err()
+		})
+		if code != want || !strings.Contains(errOut.String(), "interrupted ("+sig.String()+")") {
+			t.Fatalf("%v: exit %d, want %d\n%s", sig, code, want, errOut.String())
 		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-			t.Error("the signal never reached the attempt's context")
-		}
-		return ctx.Err()
-	})
-	if code != 143 || !strings.Contains(errOut.String(), "interrupted") {
-		t.Fatalf("exit %d, want 143\n%s", code, errOut.String())
 	}
 }
 
@@ -81,5 +89,71 @@ func TestRun_TheDefaultDeadlineIsFifteenMinutes(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, errOut.String())
+	}
+}
+
+// laggingSignals stands in for os/signal. os/signal hands a signal to each
+// channel registered for it in turn, and a subscriber may act on it (cancel a
+// context) before a later channel has it. This delivers to the FIRST channel
+// registered at once, and to any later one only after run has returned: the
+// latest os/signal may deliver it. A status decided from one subscriber's
+// record is right under any delivery order; one that waits on a second
+// subscriber it cannot be sure has been handed the signal is not.
+type laggingSignals struct {
+	mu    sync.Mutex
+	chans []chan<- os.Signal
+	late  []os.Signal
+}
+
+func (l *laggingSignals) notify(c chan<- os.Signal, _ ...os.Signal) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.chans = append(l.chans, c)
+}
+
+func (l *laggingSignals) stop(chan<- os.Signal) {}
+
+func (l *laggingSignals) send(s os.Signal) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.chans) == 0 {
+		panic("a signal before any subscriber")
+	}
+	l.chans[0] <- s
+	l.late = append(l.late, s)
+}
+
+// flush hands the held signals to the later channels, after run returned.
+func (l *laggingSignals) flush() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.chans[1:] {
+		for _, s := range l.late {
+			select {
+			case c <- s:
+			default:
+			}
+		}
+	}
+}
+
+// The status of a signalled wait is decided by the signal, whatever order
+// the signal reaches the subscribers in: deterministic, no timing involved.
+func TestRun_ASignalDecidesTheStatusUnderAnyDeliveryOrder(t *testing.T) {
+	for sig, want := range map[syscall.Signal]int{syscall.SIGTERM: 143, syscall.SIGINT: 130} {
+		l := &laggingSignals{}
+		origN, origS := notifySignals, stopSignals
+		notifySignals, stopSignals = l.notify, l.stop
+		var errOut bytes.Buffer
+		code := run(context.Background(), []string{"-deadline", "10s", "-every", "10ms"}, &errOut, func(ctx context.Context) error {
+			l.send(sig)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		l.flush()
+		notifySignals, stopSignals = origN, origS
+		if code != want || !strings.Contains(errOut.String(), "interrupted ("+sig.String()+")") {
+			t.Fatalf("%v: exit %d, want %d\n%s", sig, code, want, errOut.String())
+		}
 	}
 }
