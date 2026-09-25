@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -34,6 +35,19 @@ type permRouter struct {
 	paths map[string]answer
 	roles map[string]answer
 	reqs  []string
+
+	// pveforge-validator-pool-membership's reads, each recorded:
+	// trees answers the tree reads after the first, in order (the last
+	// repeats; unset, tree answers every read) — "tree";
+	// pools answers GET /pools?poolid=<id> in order (the last repeats) —
+	// "pools:<id>"; nextid answers GET /cluster/nextid?vmid=<n> —
+	// "nextid:<n>"; storage answers GET /storage — "storage".
+	trees   []answer
+	pools   map[string][]answer
+	nextid  map[string]answer
+	storage *answer
+	nTree   int
+	nPools  map[string]int
 }
 
 func (pr *permRouter) serve(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +62,36 @@ func (pr *permRouter) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/access/permissions" && len(q) == 0:
 		pr.reqs = append(pr.reqs, "tree")
 		a, ok = pr.tree, true
+		if pr.nTree > 0 && len(pr.trees) > 0 {
+			a = pr.trees[min(pr.nTree-1, len(pr.trees)-1)]
+		}
+		pr.nTree++
+	case r.URL.Path == "/pools" && len(q) == 1 && len(q["poolid"]) == 1:
+		id := q.Get("poolid")
+		pr.reqs = append(pr.reqs, "pools:"+id)
+		seq := pr.pools[id]
+		if ok = len(seq) > 0; ok {
+			if pr.nPools == nil {
+				pr.nPools = map[string]int{}
+			}
+			a = seq[min(pr.nPools[id], len(seq)-1)]
+			pr.nPools[id]++
+		} else {
+			pr.t.Errorf("unexpected pool read %q", id)
+		}
+	case r.URL.Path == "/cluster/nextid" && len(q) == 1 && len(q["vmid"]) == 1:
+		n := q.Get("vmid")
+		pr.reqs = append(pr.reqs, "nextid:"+n)
+		if a, ok = pr.nextid[n]; !ok {
+			pr.t.Errorf("unexpected nextid check %q", n)
+		}
+	case r.URL.Path == "/storage" && len(q) == 0:
+		pr.reqs = append(pr.reqs, "storage")
+		if ok = pr.storage != nil; ok {
+			a = *pr.storage
+		} else {
+			pr.t.Errorf("unexpected storage list read")
+		}
 	case r.URL.Path == "/access/permissions" && len(q) == 1 && len(q["path"]) == 1:
 		p := q.Get("path")
 		pr.reqs = append(pr.reqs, "path:"+p)
@@ -164,11 +208,18 @@ type vcase struct {
 	// requests, if non-negative, is the exact request count.
 	requests int
 	check    func(t *testing.T, pr *permRouter)
+
+	trees   []answer
+	pools   map[string][]answer
+	nextid  map[string]answer
+	storage *answer
+	// seq, if set, is the exact request sequence.
+	seq []string
 }
 
 func runVCase(t *testing.T, tc vcase) {
 	t.Helper()
-	pr := &permRouter{t: t, tree: tc.tree, paths: tc.paths, roles: tc.roles}
+	pr := &permRouter{t: t, tree: tc.tree, paths: tc.paths, roles: tc.roles, trees: tc.trees, pools: tc.pools, nextid: tc.nextid, storage: tc.storage}
 	c := testClient(t, newFakeAPIServer(t, pr.serve))
 	err := ValidateTokenGrants(context.Background(), c, tc.want)
 	switch {
@@ -189,7 +240,9 @@ func runVCase(t *testing.T, tc vcase) {
 		if !errors.Is(err, tc.expect) {
 			t.Fatalf("want %v, got %v", tc.expect, err)
 		}
-		for _, other := range []error{ErrNoGrants, ErrWrongScope, ErrScopeTooWide} {
+		// ErrNotAuthorized too: bootstrap revokes on it (isVerdict), so a row
+		// expecting any other outcome must not carry it anywhere in the chain.
+		for _, other := range []error{ErrNoGrants, ErrWrongScope, ErrScopeTooWide, ErrNotAuthorized} {
 			if other != tc.expect && errors.Is(err, other) {
 				t.Fatalf("want only %v, got %v", tc.expect, err)
 			}
@@ -208,6 +261,9 @@ func runVCase(t *testing.T, tc vcase) {
 	}
 	if tc.requests >= 0 && len(pr.reqs) != tc.requests {
 		t.Errorf("requests = %v, want %d", pr.reqs, tc.requests)
+	}
+	if tc.seq != nil && strings.Join(pr.reqs, " ") != strings.Join(tc.seq, " ") {
+		t.Errorf("request sequence:\n got:  %q\n want: %q", pr.reqs, tc.seq)
 	}
 	if tc.check != nil {
 		tc.check(t, pr)
@@ -456,19 +512,38 @@ func TestValidateTokenGrants(t *testing.T) {
 	}
 
 	want, tree := d5(t)
-	cases["T11 D5's four pinned grants"] = vcase{want: want, tree: data(mustJSON(t, tree)), paths: d5Paths(t, want, tree), expect: nil, requests: 5}
+	// pveforge-validator-pool-membership: D5's pool grant carries Pool.Audit
+	// and its ?path= answer shows it held, so a tree with members resolves
+	// the pool: tree, the pool's ?path=, members, tree again, members
+	// again, then the other three grants' ?path=.
+	d5Pools := map[string][]answer{"pveforge-harness": {d5MembersAns}}
+	d5Seq := func(extra ...string) []string {
+		seq := []string{"tree", "path:/pool/pveforge-harness", "pools:pveforge-harness", "tree", "pools:pveforge-harness"}
+		seq = append(seq, extra...)
+		return append(seq, "path:/sdn/zones/localnetwork/vmbr0", "path:/storage/local", "path:/storage/pveforge-harness")
+	}
+	// P0: the post-build tree, every privilege at 0, members 690-692.
+	cases["T11/P0 D5's four pinned grants, members resolved"] = vcase{want: want, tree: data(mustJSON(t, tree)), paths: d5Paths(t, want, tree),
+		pools: d5Pools, expect: nil, requests: 8, seq: d5Seq()}
 	{
 		absent := clone(tree)
 		delete(absent, "/sdn/zones/localnetwork/vmbr0")
 		cases["T11b D5 with the SDN grant absent"] = vcase{want: want, tree: data(mustJSON(t, absent)), paths: d5Paths(t, want, absent),
-			expect: ErrWrongScope, names: []string{"/sdn/zones/localnetwork/vmbr0"}, requests: 5}
+			pools: d5Pools, expect: ErrWrongScope, names: []string{"/sdn/zones/localnetwork/vmbr0"}, requests: 8}
 	}
 	{
-		// Known limits 1 and 2, pinned: a propagate-0 subset of the pool
-		// role on a VM that is NOT a pool member (a delegated row) passes.
+		// A propagate-0 subset of the pool role on a VM that is NOT a pool
+		// member (a delegated row): refused now that membership is read,
+		// since /vms/105 exists. Known limits 1 and 2 still hold where the
+		// pool cannot be resolved (T11c-fallback).
 		deleg := clone(tree)
 		deleg["/vms/105"] = map[string]int{"VM.Audit": 0, "VM.PowerMgmt": 0}
-		cases["T11c D5 plus a delegated member-shaped row (known limits 1, 2)"] = vcase{want: want, tree: data(mustJSON(t, deleg)), paths: d5Paths(t, want, deleg), expect: nil, requests: 5}
+		cases["T11c D5 plus a delegated row on a non-member VM"] = vcase{want: want, tree: data(mustJSON(t, deleg)), paths: d5Paths(t, want, deleg),
+			pools: d5Pools, nextid: map[string]answer{"105": vmidTaken(105)}, expect: ErrScopeTooWide,
+			names: []string{"at /vms/105 the token holds VM.Audit,VM.PowerMgmt,"}, requests: 9, seq: d5Seq("nextid:105")}
+		wantNA, delegNA := d5WithoutPoolAudit(want, deleg)
+		cases["T11c-fallback D5 without Pool.Audit plus a delegated row (known limits 1, 2)"] = vcase{want: wantNA, tree: data(mustJSON(t, delegNA)),
+			paths: d5Paths(t, wantNA, delegNA), expect: nil, requests: 5}
 	}
 	{
 		// One grant's privilege at another grant's path: each grant alone
@@ -476,21 +551,78 @@ func TestValidateTokenGrants(t *testing.T) {
 		cross := clone(tree)
 		cross["/storage/local"]["SDN.Use"] = 0
 		cases["T21 D5 plus SDN.Use on /storage/local"] = vcase{want: want, tree: data(mustJSON(t, cross)), paths: d5Paths(t, want, tree),
-			expect: ErrScopeTooWide, names: []string{"at /storage/local the token holds SDN.Use,"}, requests: 5}
+			pools: d5Pools, expect: ErrScopeTooWide, names: []string{"at /storage/local the token holds SDN.Use,"}, requests: 8}
 	}
 	{
-		// The plan's original T21 fixture: VM.Allocate IS in the pool
-		// role, so the pool-member rule accepts it on any /storage/ path
-		// (known limit 1). Pinned so the limit stays visible.
+		// The plan's original T21 fixture: VM.Allocate IS in the pool role,
+		// so only the pool clause could confer it on /storage/local, which
+		// is not a pool member and exists: too wide. Unresolved (Pool.Audit
+		// not held), known limit 1 still accepts it.
 		kl1 := clone(tree)
 		kl1["/storage/local"]["VM.Allocate"] = 0
-		cases["T21b D5 plus VM.Allocate on /storage/local (known limit 1)"] = vcase{want: want, tree: data(mustJSON(t, kl1)), paths: d5Paths(t, want, tree), expect: nil, requests: 5}
+		local := data(`[{"storage":"local","type":"dir"},{"storage":"pveforge-harness","type":"zfspool"}]`)
+		cases["T21b/P2 D5 plus VM.Allocate on a non-member, existing /storage/local"] = vcase{want: want, tree: data(mustJSON(t, kl1)), paths: d5Paths(t, want, tree),
+			pools: d5Pools, storage: &local, expect: ErrScopeTooWide, names: []string{"at /storage/local the token holds VM.Allocate,"}, requests: 9}
+		wantNA, kl1NA := d5WithoutPoolAudit(want, kl1)
+		cases["T21b-fallback D5 without Pool.Audit plus VM.Allocate on /storage/local (known limit 1)"] = vcase{want: wantNA, tree: data(mustJSON(t, kl1NA)),
+			paths: d5Paths(t, wantNA, kl1NA), expect: nil, requests: 5}
+		// P3: Pool.Audit requested but absent from PVE's ?path= answer: no
+		// resolution, no /pools read — and the missing privilege itself is
+		// ErrWrongScope, never ErrScopeTooWide.
+		noAudit := clone(kl1)
+		delete(noAudit["/pool/pveforge-harness"], "Pool.Audit")
+		cases["P3 Pool.Audit requested but not held: no /pools read"] = vcase{want: want, tree: data(mustJSON(t, kl1)),
+			paths: d5Paths(t, want, noAudit), expect: ErrWrongScope, names: []string{"lacks [Pool.Audit]"}, requests: 5,
+			check: func(t *testing.T, pr *permRouter) {
+				if pr.count("pools:") != 0 {
+					t.Errorf("requests = %v; want no /pools read", pr.reqs)
+				}
+			}}
+	}
+	{
+		// G4 (c1): D5 at mint — the pool has no members yet, so nothing
+		// needs resolving: byte-for-byte today's requests, no /pools read.
+		g4 := clone(tree)
+		for _, id := range []string{"690", "691", "692"} {
+			delete(g4, "/vms/"+id)
+		}
+		cases["G4 D5 at mint, empty pool: no /pools request"] = vcase{want: want, tree: data(mustJSON(t, g4)), paths: d5Paths(t, want, g4), expect: nil, requests: 5,
+			seq: []string{"tree", "path:/pool/pveforge-harness", "path:/sdn/zones/localnetwork/vmbr0", "path:/storage/local", "path:/storage/pveforge-harness"}}
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) { runVCase(t, tc) })
 	}
 }
+
+// d5WithoutPoolAudit is D5 with Pool.Audit dropped from the pool role and
+// from every path of tree: a pool grant membership is never resolved for.
+func d5WithoutPoolAudit(want []Grant, tree map[string]map[string]int) ([]Grant, map[string]map[string]int) {
+	out := make([]Grant, len(want))
+	for i, g := range want {
+		g.Privs = slices.DeleteFunc(slices.Clone(g.Privs), func(p string) bool { return p == "Pool.Audit" })
+		out[i] = g
+	}
+	t := clone(tree)
+	for _, set := range t {
+		delete(set, "Pool.Audit")
+	}
+	return out, t
+}
+
+// d5MembersAns is GET /pools?poolid=pveforge-harness after the build, from
+// pve-manager Pool.pm c7d5332's source, NOT live-captured.
+var d5MembersAns = data(`[{"poolid":"pveforge-harness","comment":"pveforge nested harness (D5)","members":[` +
+	`{"id":"qemu/690","node":"qa-pve-02","type":"qemu","vmid":690},` +
+	`{"id":"qemu/691","node":"qa-pve-02","type":"qemu","vmid":691},` +
+	`{"id":"qemu/692","node":"qa-pve-02","type":"qemu","vmid":692}]}]`)
+
+// vmidTaken is PVE's /cluster/nextid answer for a vmid in use; vmidFreeAns
+// its answer for a free one (the id itself).
+func vmidTaken(n int) answer {
+	return answer{http.StatusBadRequest, fmt.Sprintf(`{"errors":{"vmid":"VM %d already exists"},"data":null}`, n)}
+}
+func vmidFreeAns(n int) answer { return data(fmt.Sprintf(`"%d"`, n)) }
 
 func liveTreeAt(t *testing.T, path string) map[string]int {
 	t.Helper()
