@@ -42,6 +42,8 @@ var noParallel = []struct{ pkg, why string }{
 	{"internal/lock", "pollInterval and defaultWait, which the lock-wait tests shorten"},
 	{"internal/netguard", "its own recorder (installed, violations, expecting, observedDials), which its tests reset"},
 	{"internal/pvefake", "DrainJoinTimeout, the RecordStdin mode's drain bound, which TestSSHServer_BoundedDrainRecordsTruncation lowers"},
+	{"internal/harness", "the subprocess run of the suites, and the guard's shared fake resolver table, which one row extends"},
+	{"internal/harness/suites", "the nested cluster itself: every suite drives the same two nodes, which make harness also serialises (-p 1)"},
 	{"internal/harnesssecrets", "the execve, isTerminal and readSecret seams; t.Setenv"},
 	{"cmd/pveforge-harness-secrets", "t.Setenv, and child processes whose HOME and TMPDIR each test points at its own directory"},
 }
