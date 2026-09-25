@@ -80,7 +80,10 @@ type BridgeIsolationClient interface {
 //
 // Not a PostApplier yet: it has no CLI caller. Apply writes the hookscript
 // and sets the live tap isolation flag but re-checks neither afterwards — a
-// candidate for PostApply once a command uses it.
+// candidate for PostApply once a command uses it. That command words its
+// report by res.Changed || op.Wrote(), as vm set does for VMFieldsEnsure: a
+// Run can end on the no-op path after an earlier attempt wrote (see
+// Applied).
 type BridgeIsolationEnsure struct {
 	Client BridgeIsolationClient
 	VMID   int
@@ -93,6 +96,19 @@ type BridgeIsolationEnsure struct {
 	// Required; which storage has snippets enabled varies by deployment,
 	// so this is never hardcoded.
 	StorageID string
+
+	// Applied is what Apply actually wrote, in first-write order, populated
+	// as each write succeeds and ACCUMULATED across every Apply of one Run,
+	// the way VMFieldsEnsure.Applied is: "snippet" for the uploaded
+	// hookscript file, "hookscript" for the config field (the CAS write or
+	// its SSH fallback), and each tap device whose live isolation was set.
+	// A conflict retry re-runs Read and maybe Apply after an earlier
+	// attempt's writes, and those writes happened: an attempt that uploads
+	// the snippet and then hits a digest conflict, followed by a retry that
+	// finds the hookscript already set by an outside writer, ends on Run's
+	// no-op path (Result.Changed false) although this Run wrote. Each entry
+	// appears once. An Op serves one Run.
+	Applied []string
 
 	// digest, hookscript, and running are set by Read and consumed by
 	// Apply — refreshed on every attempt, including a Run-driven retry
@@ -223,6 +239,7 @@ func (op *BridgeIsolationEnsure) Apply(ctx context.Context) error {
 	if err := op.Client.UploadSnippet(ctx, op.StorageID, op.snippetFilename(), op.scriptContent()); err != nil {
 		return fmt.Errorf("bridge isolation ensure: vm %d: upload snippet: %w", op.VMID, err)
 	}
+	op.Applied = appendOnce(op.Applied, "snippet")
 
 	wanted := op.wantedHookscript()
 	if op.hookscript != wanted {
@@ -238,6 +255,7 @@ func (op *BridgeIsolationEnsure) Apply(ctx context.Context) error {
 				return fmt.Errorf("bridge isolation ensure: vm %d: set hookscript: %w", op.VMID, err)
 			}
 		}
+		op.Applied = appendOnce(op.Applied, "hookscript")
 	}
 
 	if op.running {
@@ -246,9 +264,18 @@ func (op *BridgeIsolationEnsure) Apply(ctx context.Context) error {
 			if err := op.Client.SetBridgePortIsolated(ctx, tap, true); err != nil {
 				return fmt.Errorf("bridge isolation ensure: vm %d: apply live isolation to %s: %w", op.VMID, tap, err)
 			}
+			op.Applied = appendOnce(op.Applied, tap)
 		}
 	}
 	return nil
+}
+
+// Wrote reports whether this Run wrote anything, on any attempt: Applied
+// accumulates across a conflict retry, so this holds even when the Run ended
+// on the no-op path (Result.Changed false) after an earlier attempt's
+// writes. It is the fact a caller words its report by.
+func (op *BridgeIsolationEnsure) Wrote() bool {
+	return len(op.Applied) > 0
 }
 
 // snippetFilename is the deployed script's filename — one per VM (see

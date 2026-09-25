@@ -34,6 +34,7 @@ type fakeBridgeClient struct {
 	lastFieldValue string
 
 	uploadSnippetErr    error
+	uploadSnippetErrs   []error // by call number, before uploadSnippetErr
 	uploadSnippetCalls  int
 	lastSnippetStorage  string
 	lastSnippetFilename string
@@ -103,10 +104,14 @@ func (f *fakeBridgeClient) SetVMConfigField(_ context.Context, _ int, _, value s
 }
 
 func (f *fakeBridgeClient) UploadSnippet(_ context.Context, storageID, filename string, content []byte) error {
+	idx := f.uploadSnippetCalls
 	f.uploadSnippetCalls++
 	f.lastSnippetStorage = storageID
 	f.lastSnippetFilename = filename
 	f.lastSnippetContent = string(content)
+	if idx < len(f.uploadSnippetErrs) {
+		return f.uploadSnippetErrs[idx]
+	}
 	return f.uploadSnippetErr
 }
 

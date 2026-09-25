@@ -254,8 +254,9 @@ func (op *VMFieldsEnsure) Satisfied(current string) bool {
 	return true
 }
 
-// Apply validates op (see Validate), resets Applied (see that field's own
-// doc comment), then iterates Pairs in order, skipping any field Read's
+// Apply validates op (see Validate), then iterates Pairs in order (adding
+// each write to Applied, which accumulates across the Run's attempts: see
+// that field's own doc comment), skipping any field Read's
 // snapshot already found matching (no wasted write on an already-correct
 // field, matching BridgeIsolationEnsure's own hookscript
 // skip-if-already-correct precedent) — via the two-value map form, same
