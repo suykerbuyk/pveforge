@@ -17,9 +17,19 @@
 # block/<key>[.<n>] makes the call touch $F/blocked and then wait for a line
 # on the fifo $F/block.fifo before answering, so a test can act mid-run. With
 # none of these files present, every answer is exactly what it always was.
+#
+# For nested.sh (inert unless the test made an env/ directory): each call's
+# environment is saved to env/<n>, n its line in argv.log. `roster init
+# <path>` (key "roster init") writes an empty roster at <path>, mode 0600,
+# unless its status is non-zero; `bootstrap <id>` and `network bridge create
+# <id> <iface>` answer under the keys "bootstrap <id>" and "network bridge
+# create <id> <iface>".
 set -u
 F=${FAKE_PVEFORGE_DIR:?}
 printf '%s\n' "$*" >>"$F/argv.log"
+if [ -d "$F/env" ]; then
+	env >"$F/env/$(wc -l <"$F/argv.log" | tr -d ' ')"
+fi
 # lib.sh names the roster with --roster on every call and unsets
 # PVEFORGE_ROSTER, so a default roster can never reach pveforge.
 if [ -n "${PVEFORGE_ROSTER+set}" ]; then
@@ -87,6 +97,22 @@ if [ "${1:-}" = api ]; then
 	put) answer "$k" null ;;
 	post | delete) answer "$k" '"UPID:fake"' ;;
 	esac
+fi
+if [ "${1:-}" = roster ] && [ "${2:-}" = init ] && [ "$#" = 3 ]; then
+	k=$(key "roster init")
+	rc=0
+	f=$(pick rc "$k" 1)
+	[ -z "$f" ] || rc=$(cat "$f")
+	if [ "$rc" = 0 ]; then
+		(umask 077 && echo "# fake nested roster" >"$3")
+	fi
+	answer "roster init" "Initialized empty roster at $3"
+fi
+if [ "${1:-}" = bootstrap ] && [ "$#" -ge 2 ]; then
+	answer "bootstrap $2" ""
+fi
+if [ "${1:-}" = network ] && [ "${2:-}" = bridge ] && [ "${3:-}" = create ] && [ "$#" -ge 5 ]; then
+	answer "network bridge create $4 $5" "$4: bridge $5 created"
 fi
 echo "fake pveforge: unexpected call: $*" >&2
 exit 99

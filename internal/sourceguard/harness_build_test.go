@@ -753,8 +753,8 @@ func TestPrepareISO_Refusals(t *testing.T) {
 		"short":          {"Short-7", nil, nil, nil, 2, "shorter than 8 characters"},
 		"two lines":      {"Nested-Test\nPw-7f3a9c", nil, nil, nil, 2, "holds a control character"},
 		"arguments":      {nestedPw, []string{"--storage", "x"}, nil, nil, 2, "usage: prepare-iso.sh"},
-		"xtrace":         {nestedPw, nil, []string{"-x"}, nil, 2, "xtrace or verbose is on"},
-		"verbose":        {nestedPw, nil, []string{"-v"}, nil, 2, "xtrace or verbose is on"},
+		"xtrace":         {nestedPw, nil, []string{"-x"}, nil, 2, "include xtrace, verbose, allexport, functrace or errtrace"},
+		"verbose":        {nestedPw, nil, []string{"-v"}, nil, 2, "include xtrace, verbose, allexport, functrace or errtrace"},
 		"BASH_ENV":       {nestedPw, nil, nil, map[string]string{"BASH_ENV": "/dev/null"}, 2, "BASH_ENV or ENV is set"},
 		"in the answers": {"reboot-on-error", nil, nil, nil, 4, "pvh-n1: the rendered answer file holds the plaintext password"},
 	} {

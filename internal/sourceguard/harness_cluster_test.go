@@ -296,7 +296,7 @@ func TestCluster_Refusals(t *testing.T) {
 		"two lines": {func(c *clusterSpec, s *probeSpec) {
 			s.env["PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD"] = "Nested-Test\nPw-7f3a9c"
 		}, "the nested root password holds a control character"},
-		"xtrace":   {func(c *clusterSpec, s *probeSpec) { s.bashArgs = []string{"-x"} }, "xtrace or verbose is on"},
+		"xtrace":   {func(c *clusterSpec, s *probeSpec) { s.bashArgs = []string{"-x"} }, "include xtrace, verbose, allexport, functrace or errtrace"},
 		"BASH_ENV": {func(c *clusterSpec, s *probeSpec) { s.env["BASH_ENV"] = "/dev/null" }, "BASH_ENV or ENV is set"},
 		"no nfs pin": {func(c *clusterSpec, s *probeSpec) { c.known = hostKey("690") + "\n" + hostKey("691") + "\n" },
 			"pins no ed25519 host key for 192.0.2.92: run build.sh first"},
