@@ -13,6 +13,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
 // pvePasswordEnvVar names the environment variable holding the PAM/realm
@@ -61,6 +62,15 @@ func newBootstrapCmd() *cobra.Command {
 			// roster.ValidateTargetID) must not cost two prompts either.
 			if err := roster.ValidateTargetID(args[0]); err != nil {
 				return err
+			}
+			// And a pin that was GIVEN must be one, an empty value included:
+			// internal/bootstrap reads "" as trust on first use, so
+			// `--host-key-fingerprint ""` (an unset variable, say) would
+			// otherwise silently mean no pin at all.
+			if cmd.Flags().Changed("host-key-fingerprint") {
+				if err := sshexec.CheckFingerprint(hostKeyFP); err != nil {
+					return fmt.Errorf("--host-key-fingerprint: %w", err)
+				}
 			}
 			// And the owner, for the same reason: a userid pveforge cannot
 			// own a token with must not cost the operator two prompts.
