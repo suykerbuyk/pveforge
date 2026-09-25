@@ -39,6 +39,12 @@ func TestMain(m *testing.M) {
 		sum := sha256.Sum256([]byte(os.Getenv("PVEFORGE_ROSTER_PASSPHRASE")))
 		fmt.Println("pass-sha=" + hex.EncodeToString(sum[:]))
 		os.Exit(7)
+	case "env":
+		// The child's whole environment, one variable per line.
+		for _, kv := range os.Environ() {
+			fmt.Println(kv)
+		}
+		os.Exit(0)
 	case "leak":
 		// The scanner's control: a child that DOES write the secret.
 		_ = os.WriteFile(filepath.Join(os.Getenv("TMPDIR"), "leak.txt"), []byte(os.Getenv("PVEFORGE_ROSTER_PASSPHRASE")), 0o600)
@@ -322,5 +328,167 @@ func TestUnlockSh(t *testing.T) {
 	}
 	if hits := scan(t, w.root, secret); len(hits) != 0 {
 		t.Errorf("the secret is on disk in %q", hits)
+	}
+}
+
+// shellCodeVars are what `run` drops: every way the environment runs code
+// in, or changes, a bash child before its first line.
+var shellCodeVars = []string{
+	"BASH_FUNC_declare%%=() {  :; }",
+	"BASH_FUNC_unset%%=() {  :; }",
+	"BASH_FUNC_printf%%=() {  builtin echo spy; }",
+	"SHELLOPTS=xtrace",
+	"BASHOPTS=extdebug",
+	"BASH_ENV=/tmp/spy-bash-env",
+	"ENV=/tmp/spy-env",
+	"PS4=$(echo spy)",
+}
+
+// run's child sees none of shellCodeVars, whatever the parent held, and
+// every other variable unchanged, look-alike names included.
+func TestRun_DropsShellCodeVariables(t *testing.T) {
+	w := newWorld(t)
+	secret := sentinel(t)
+	seal(t, w, "PVEFORGE_ROSTER_PASSPHRASE="+secret+"\n", secret)
+	keep := []string{"PVEFORGE_BIN=/opt/pveforge", "BASH_FUNCS=kept", "MY_BASH_FUNC_x=kept", "ENVIRONMENT=kept", "PS1=kept$ ", "BASH_XTRACEFD=9", childVar + "=env"}
+	cmd := exec.Command(helperBin, "--dir", w.harness, "run", "--", testBin(t))
+	cmd.Env = append(append(w.env("PVEFORGE_HARNESS_AGE_IDENTITY="+w.identity), shellCodeVars...), keep...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	got := map[string]bool{}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		got[l] = true
+	}
+	for _, kv := range shellCodeVars {
+		name, _, _ := strings.Cut(kv, "=")
+		for l := range got {
+			if strings.HasPrefix(l, name+"=") {
+				t.Errorf("the child's environment holds %s", l)
+			}
+		}
+	}
+	for _, kv := range append(keep, "PATH="+os.Getenv("PATH"), "HOME="+w.home, "PVEFORGE_ROSTER_PASSPHRASE="+secret) {
+		if !got[kv] {
+			t.Errorf("the child's environment lacks %q", kv)
+		}
+	}
+}
+
+// The review's attack, through unlock.sh run: functions named declare and
+// unset, inherited from the environment, defeat every check a bash script can
+// make of its own functions, and a printf function then sees the secret.
+// The same script run with the same environment, without run, is the control:
+// the attack is real there.
+func TestUnlockSh_NeutralizesInheritedFunctions(t *testing.T) {
+	root := moduleCopy(t)
+	w := newWorld(t)
+	harness := filepath.Join(root, "hack", "harness")
+	if err := os.Rename(filepath.Join(w.harness, "recipients.txt"), filepath.Join(harness, "recipients.txt")); err != nil {
+		t.Fatal(err)
+	}
+	env := w.env("GOMODCACHE="+goEnv(t, "GOMODCACHE"), "GOCACHE="+goEnv(t, "GOCACHE"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off", "GOTOOLCHAIN=local")
+	unlock := filepath.Join(harness, "unlock.sh")
+	secret := sentinel(t)
+	sealCmd := exec.Command(unlock, "seal")
+	sealCmd.Env = env
+	sealCmd.Stdin = strings.NewReader("PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD=" + secret + "\n")
+	if out, err := sealCmd.CombinedOutput(); err != nil {
+		t.Fatalf("unlock.sh seal: %v\n%s", err, out)
+	}
+	// lib.sh's own check, then the password through printf.
+	script := filepath.Join(w.root, "victim.sh")
+	body := "#!/usr/bin/env bash\n" +
+		"if [ -n \"$(declare -F)\" ]; then echo refused; exit 2; fi\n" +
+		"unset -f printf\n" +
+		"printf '%s\\n' \"$PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD\" >/dev/null\n" +
+		"exit 7\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spy := filepath.Join(w.tmp, "spy")
+	attack := []string{
+		"BASH_FUNC_declare%%=() {  :; }",
+		"BASH_FUNC_unset%%=() {  :; }",
+		"BASH_FUNC_printf%%=() {  builtin echo \"$@\" >>" + spy + "; }",
+	}
+
+	control := exec.Command(script)
+	control.Env = append(append(append([]string{}, env...), attack...), "PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD="+secret)
+	// Exit 7: the check was fooled, and the script ran on.
+	if out, err := control.CombinedOutput(); !isExit(err, 7) {
+		t.Fatalf("control: %v (want 7)\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(spy); !strings.Contains(string(b), secret) {
+		t.Fatalf("control: the attack did not reach the secret (spy %q); this test would prove nothing", b)
+	}
+	_ = os.Remove(spy)
+
+	run := exec.Command(unlock, "run", "--", script)
+	run.Env = append(append(append([]string{}, env...), attack...), "PVEFORGE_HARNESS_AGE_IDENTITY="+w.identity)
+	out, err := run.CombinedOutput()
+	if !isExit(err, 7) {
+		t.Fatalf("unlock.sh run: %v (want 7: no inherited function, so no refusal and no spy)\n%s", err, out)
+	}
+	if b, err := os.ReadFile(spy); err == nil {
+		t.Errorf("the spy ran under run: %q", b)
+	}
+	if strings.Contains(string(out), secret) {
+		t.Error("the secret was printed")
+	}
+}
+
+func isExit(err error, code int) bool {
+	ee, ok := err.(*exec.ExitError)
+	return ok && ee.ExitCode() == code
+}
+
+// unlock.sh's own commands run under bash -p: an inherited function named
+// go (the helper's build) and a BASH_ENV startup file both run in a plain
+// bash with the same environment (the control), and neither runs in
+// unlock.sh. Run with bash, not as a command, it loses -p and refuses.
+func TestUnlockSh_ImportsNoShellCode(t *testing.T) {
+	root := moduleCopy(t)
+	w := newWorld(t)
+	harness := filepath.Join(root, "hack", "harness")
+	if err := os.Rename(filepath.Join(w.harness, "recipients.txt"), filepath.Join(harness, "recipients.txt")); err != nil {
+		t.Fatal(err)
+	}
+	spy := filepath.Join(w.tmp, "spy")
+	bashEnv := filepath.Join(w.tmp, "bash-env")
+	if err := os.WriteFile(bashEnv, []byte("echo bash-env >>"+spy+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := append(w.env("GOMODCACHE="+goEnv(t, "GOMODCACHE"), "GOCACHE="+goEnv(t, "GOCACHE"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off", "GOTOOLCHAIN=local"),
+		"BASH_FUNC_go%%=() {  echo function-go >>"+spy+"; command go \"$@\"; }",
+		"BASH_ENV="+bashEnv)
+
+	control := exec.Command("bash", "-c", "go version >/dev/null")
+	control.Env = env
+	if out, err := control.CombinedOutput(); err != nil {
+		t.Fatalf("control: %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(spy); string(b) != "bash-env\nfunction-go\n" {
+		t.Fatalf("control: spy %q; the attack must run in a plain bash, or this test proves nothing", b)
+	}
+	_ = os.Remove(spy)
+
+	unlock := filepath.Join(harness, "unlock.sh")
+	seal := exec.Command(unlock, "seal")
+	seal.Env = env
+	seal.Stdin = strings.NewReader("PVEFORGE_ROSTER_PASSPHRASE=" + sentinel(t) + "\n")
+	if out, err := seal.CombinedOutput(); err != nil {
+		t.Fatalf("unlock.sh seal: %v\n%s", err, out)
+	}
+	if b, err := os.ReadFile(spy); err == nil {
+		t.Errorf("unlock.sh ran the environment's shell code: %q", b)
+	}
+
+	plain := exec.Command("bash", unlock, "status")
+	plain.Env = env
+	out, err := plain.CombinedOutput()
+	if !isExit(err, 2) || !strings.Contains(string(out), "run it as a command (its interpreter line is bash -p), not with bash") {
+		t.Errorf("bash unlock.sh: %v\n%s", err, out)
 	}
 }

@@ -112,8 +112,8 @@ func (f files) readSecrets(environ []string) ([]Pair, error) {
 }
 
 // run decrypts the secrets and replaces this process with argv, its
-// environment the current one minus both identity variables, plus the
-// secrets. A secret whose name is already set is refused rather than
+// environment the current one minus both identity variables and the
+// variables that run code in a bash child (ChildEnv), plus the secrets. A secret whose name is already set is refused rather than
 // overridden: PVEFORGE_PVE_PASSWORD-style name reuse must never silently
 // mix two credentials.
 func run(f files, environ, argv []string) error {
@@ -133,13 +133,14 @@ func run(f files, environ, argv []string) error {
 }
 
 // ChildEnv is the environment run gives its child: environ without the
-// identity variables, plus pairs. A pair whose name is already set in
-// environ is refused.
+// identity variables and without the variables through which the
+// environment runs code in a bash child (shellCodeVar), plus pairs. A pair
+// whose name is already set in environ is refused.
 func ChildEnv(environ []string, pairs []Pair) ([]string, error) {
 	out := make([]string, 0, len(environ)+len(pairs))
 	for _, kv := range environ {
 		name, _, _ := strings.Cut(kv, "=")
-		if name == IdentityFileVar || name == IdentityVar {
+		if name == IdentityFileVar || name == IdentityVar || shellCodeVar(name) {
 			continue
 		}
 		for _, p := range pairs {
@@ -153,6 +154,22 @@ func ChildEnv(environ []string, pairs []Pair) ([]string, error) {
 		out = append(out, p.Name+"="+p.Value)
 	}
 	return out, nil
+}
+
+// shellCodeVar reports whether name is a variable through which the
+// environment runs code in, or changes, a bash child before its first line
+// can check anything: an exported function (BASH_FUNC_<name>%%, which bash
+// imports under ANY name, declare and unset included, so no in-script check
+// survives one), shell options (SHELLOPTS, BASHOPTS: xtrace would print a
+// secret the moment a script reads it), a startup file (BASH_ENV, ENV), and
+// xtrace's prompt (PS4, whose expansions run commands). run drops them all;
+// every other variable (PATH, HOME, PVEFORGE_BIN, ...) passes unchanged.
+func shellCodeVar(name string) bool {
+	switch name {
+	case "SHELLOPTS", "BASHOPTS", "BASH_ENV", "ENV", "PS4":
+		return true
+	}
+	return strings.HasPrefix(name, "BASH_FUNC_")
 }
 
 func sealCmd(f files, stdin *os.File, prompt, stdout io.Writer) error {
