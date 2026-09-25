@@ -660,12 +660,14 @@ func TestD5Fixtures(t *testing.T) {
 	if got := strings.Join(paths, " "); got != "/pool/pveforge-harness /sdn/zones/localnetwork/vmbr0 /storage/local /storage/pveforge-harness /vms/690 /vms/691 /vms/692" {
 		t.Fatalf("D5 tree paths = %s", got)
 	}
-	// Byte-for-byte copies of D5 r3's pinned files (bootstrap's A-ACC
-	// generates its grants from the ACL rows and the roles).
+	// D5's pinned files: r3's, with Datastore.Audit added to
+	// PveforgeHarnessSpace so the pool token can list the harness storage's
+	// content (PVE drops volumes failing check_volume_access from /content).
+	// Bootstrap's A-ACC generates its grants from the ACL rows and the roles.
 	for name, want := range map[string]string{
 		"d5r3-expected-acl-rows.json":        "b824e17bacd5d50e104fee03607b26303aaa30188077911510c2e29970275644",
-		"d5r3-expected-roles.json":           "f37fb0c9c739f623a300661cf25383d82b81b4a9633b648481dc67c9bce97441",
-		"d5r3-expected-tree-post-build.json": "ef839bf7b17353733a1b446b6594da240107f45aac3ad4c5d8de8f754d1cdfcb",
+		"d5r3-expected-roles.json":           "182f3e5cbdcfcba699fb0a6863355a519e4af06035ad9b0c5b90d85c6e38aa8a",
+		"d5r3-expected-tree-post-build.json": "3cc6724ff18af278311bd04cefe75cf657f178f77093d2c241c23dae528ead5b",
 	} {
 		b, err := os.ReadFile("testdata/permissions/" + name)
 		if err != nil {
