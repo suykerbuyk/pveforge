@@ -14,9 +14,10 @@ import (
 // types.go; TestRosterKeys_MatchTheTypes pins that.
 var rosterKeys = map[string][]string{
 	"":              {"targets"},
-	"targets":       {"id", "host", "node", "api_port", "insecure_tls", "export", "token", "ssh"},
+	"targets":       {"id", "host", "node", "api_port", "insecure_tls", "export", "token", "ssh", "tls"},
 	"targets.token": {"id", "secret_enc"},
 	"targets.ssh":   {"user", "public_key", "host_key_fingerprint", "private_key_enc"},
+	"targets.tls":   {"spki_sha256"},
 }
 
 // checkKeys refuses a roster holding a key that is not one of rosterKeys,

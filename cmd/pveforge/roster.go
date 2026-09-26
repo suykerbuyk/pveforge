@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -79,10 +81,17 @@ func newRosterInitCmd() *cobra.Command {
 }
 
 func newRosterValidateCmd() *cobra.Command {
+	var requireTLSPins bool
 	cmd := &cobra.Command{
 		Use:   "validate [path]",
 		Short: "Parse and validate the roster file",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Parse and validate the roster file, and list its targets.
+
+With --require-tls-pins it also fails (exit 1) when any insecure_tls target
+has no [targets.tls] pin, naming each one. A target that verifies its
+certificate against the system CAs (insecure_tls false) needs no pin and is
+never listed. Nothing is contacted and nothing is written.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := resolveRosterPath(cmd, args)
 			if err != nil {
@@ -104,13 +113,36 @@ func newRosterValidateCmd() *cobra.Command {
 				case t.SSH != nil:
 					status = "ssh configured"
 				}
+				if t.TLS != nil {
+					status += ", tls pinned"
+				}
 				fmt.Fprintf(out, "  - %s (%s, node=%s): %s\n", t.ID, t.Host, t.Node, status)
+			}
+			if requireTLSPins {
+				return requireTLSPinsIn(path, r)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&requireTLSPins, "require-tls-pins", false, "fail when any insecure_tls target has no [targets.tls] pin, naming each")
 	markSafe(cmd)
 	return cmd
+}
+
+// requireTLSPinsIn is --require-tls-pins: every insecure_tls target must
+// hold a TLS pin. A CA-verified target (insecure_tls false) is exempt: its
+// chain is its identity, and pinning it is optional.
+func requireTLSPinsIn(path string, r *roster.Roster) error {
+	var unpinned []string
+	for _, t := range r.Targets {
+		if t.InsecureTLS && t.TLS == nil {
+			unpinned = append(unpinned, strconv.Quote(t.ID))
+		}
+	}
+	if len(unpinned) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: %d insecure_tls target(s) hold no [targets.tls] pin: %s", path, len(unpinned), strings.Join(unpinned, ", "))
 }
 
 // resolveRosterPath resolves the roster file path shared by every roster

@@ -58,6 +58,9 @@ func TestRun(t *testing.T) {
 		{"a host with a space", nestedRoster("192.0.2.90 x", pin), []string{"pvh-n1"}, 1, "", "not one plain word"},
 		{"a pin with a newline", nestedRoster("192.0.2.90", `SHA256:a\nb`), []string{"pvh-n1"}, 1, "", "not one plain word"},
 		{"not a roster", "this is = not toml [", []string{"pvh-n1"}, 1, "", "parse roster"},
+		// A roster holding a TLS pin (pveforge-rest-tls-certificate-pinning)
+		// is read as before: the tool's output is unchanged by it.
+		{"a TLS-pinned target", nestedRoster("192.0.2.90", pin) + "\n  [targets.tls]\n  spki_sha256 = \"sha256//AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\"\n", []string{"pvh-n2"}, 0, "192.0.2.91 -\n", ""},
 		{"an unknown key", nestedRoster("192.0.2.90", pin) + "extra = 1\n", []string{"pvh-n1"}, 1, "", "parse roster"},
 		{"no roster file", "", []string{"/nonexistent/harness-nested.toml", "pvh-n1"}, 1, "", "read roster"},
 		{"one argument", "", []string{"x"}, 2, "", "usage"},

@@ -144,6 +144,7 @@ func TestEverySeedCanActuallyFire(t *testing.T) {
 		what string
 	}{
 		{dialerSeedCalls, "NewClient", "dialerSeedCalls"},
+		{dialerSeedCalls, "ServedPin", "dialerSeedCalls"},
 		{dialerSeedCalls, "Dial", "dialerSeedCalls"},
 		{dialerSeedCalls, "DialWithPassword", "dialerSeedCalls"},
 		{dialerSeedValues, "DefaultTransport", "dialerSeedValues"},
@@ -198,6 +199,11 @@ func TestPreInstallScan_CatchesTheCapturedTransportIdioms(t *testing.T) {
 		"transport_literal":          "var c = &http.Client{Transport: &http.Transport{}}\n",
 		"via_helper":                 "func mk() *http.Transport { return http.DefaultTransport.(*http.Transport).Clone() }\n\nvar c = &http.Client{Transport: mk()}\n",
 		"in_init":                    "var c *http.Client\n\nfunc init() { c = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()} }\n",
+		// pveforge-rest-tls-certificate-pinning: a pinned client clones at
+		// construction exactly as an InsecureTLS one does, and ServedPin
+		// dials at call time.
+		"pinned_client":      "var c, _ = pve.NewClient(pve.ClientConfig{TLSPin: \"sha256//x\"})\n",
+		"served_pin_at_init": "var c, _, _ = pve.ServedPin(nil, \"h\", 8006)\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

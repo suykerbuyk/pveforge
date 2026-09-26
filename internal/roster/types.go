@@ -39,6 +39,18 @@ type Target struct {
 	Export      string     `toml:"export"`
 	Token       *TokenAuth `toml:"token"`
 	SSH         *SSHAuth   `toml:"ssh"`
+	// TLS pins the REST peer's certificate key, as SSH.HostKeyFingerprint
+	// pins the SSH peer's host key. nil means no pin: the target's REST
+	// client then behaves as it always has.
+	TLS *TLSPin `toml:"tls"`
+}
+
+// TLSPin is a target's [targets.tls] subtable. SPKISHA256 is a
+// tlspin.Pin ("sha256//<base64>"), checked when the roster is loaded. It
+// is not secret. It is written only by WriteTLSPin, a compare-and-set, so
+// no writer can replace a pin it did not first read.
+type TLSPin struct {
+	SPKISHA256 string `toml:"spki_sha256"`
 }
 
 // TokenAuth is the primary auth path: a Proxmox API token. ID is the token's

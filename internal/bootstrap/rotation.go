@@ -785,7 +785,7 @@ func (r *runner) leftover(state string) {
 // rejected once is never persisted because a later attempt merely failed to
 // connect. A plain error on the first attempt is not retried.
 func (r *runner) validatePostMint(secret string) (verdict, nonVerdict error) {
-	cfg := APIConfig{Host: r.opts.Host, APIPort: r.opts.APIPort, InsecureTLS: r.opts.InsecureTLS, TokenID: r.fullID, TokenSecret: secret}
+	cfg := APIConfig{Host: r.opts.Host, APIPort: r.opts.APIPort, InsecureTLS: r.opts.InsecureTLS, TLSPin: r.opts.TLSPin, TokenID: r.fullID, TokenSecret: secret}
 	var sawVerdict error // the last retryable verdict seen, if any
 	for attempt := 1; attempt <= postMintAttempts; attempt++ {
 		if attempt > 1 {
@@ -928,7 +928,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 		reasonErr = held.DecryptErr
 	} else {
 		err := r.api.ValidateTokenGrants(r.ctx, APIConfig{
-			Host: r.opts.Host, APIPort: r.opts.APIPort, InsecureTLS: r.opts.InsecureTLS,
+			Host: r.opts.Host, APIPort: r.opts.APIPort, InsecureTLS: r.opts.InsecureTLS, TLSPin: r.opts.TLSPin,
 			TokenID: held.ID, TokenSecret: held.Secret,
 		}, r.want)
 		if err == nil {

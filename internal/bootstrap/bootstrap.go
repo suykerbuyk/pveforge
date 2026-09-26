@@ -32,6 +32,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // RunResult is one remote command's outcome, mirroring sshexec.Result —
@@ -107,6 +108,9 @@ type APIConfig struct {
 	Host        string
 	APIPort     int
 	InsecureTLS bool
+	// TLSPin is the pin the validator's client must see (pve.ClientConfig's
+	// TLSPin): the one the roster holds for the target, when it holds one.
+	TLSPin      tlspin.Pin
 	TokenID     string
 	TokenSecret string
 }
@@ -128,6 +132,12 @@ type Options struct {
 	APIPort     int
 	InsecureTLS bool
 	SSHPort     int // 0 => 22
+
+	// TLSPin is the target's TLS pin, filled from the roster's
+	// [targets.tls] by defaultHostNodeFromRoster; no flag sets it yet. Every
+	// REST client this run builds (the token validator's) carries it, so a
+	// pinned target is never validated through an unpinned connection.
+	TLSPin tlspin.Pin
 
 	// PVEUsername is the SSH LOGIN: a PAM/realm username, e.g. "root@pam".
 	// Only @pam (or bare, defaulting to pam: "root" becomes "root@pam")
@@ -537,6 +547,14 @@ func defaultHostNodeFromRoster(opts *Options) {
 	}
 	if !opts.InsecureTLS {
 		opts.InsecureTLS = tg.InsecureTLS
+	}
+	// The same precedence for the TLS pin: a value already set wins, and a
+	// pin the roster holds is otherwise used. As with InsecureTLS, an absent
+	// value cannot mean "unset it": no run can drop a pin by omitting one,
+	// which is the point (a pin is replaced only by roster.WriteTLSPin's
+	// compare-and-set, never by a run that simply did not mention it).
+	if opts.TLSPin == "" && tg.TLS != nil {
+		opts.TLSPin = tlspin.Pin(tg.TLS.SPKISHA256)
 	}
 }
 

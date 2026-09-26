@@ -107,6 +107,7 @@ func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, 
 		Host:        cfg.Host,
 		APIPort:     cfg.APIPort,
 		InsecureTLS: cfg.InsecureTLS,
+		TLSPin:      cfg.TLSPin,
 		TokenID:     cfg.TokenID,
 		TokenSecret: cfg.TokenSecret,
 	})

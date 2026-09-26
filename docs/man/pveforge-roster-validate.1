@@ -10,12 +10,22 @@ pveforge-roster-validate - Parse and validate the roster file
 
 
 .SH DESCRIPTION
-Parse and validate the roster file
+Parse and validate the roster file, and list its targets.
+
+.PP
+With --require-tls-pins it also fails (exit 1) when any insecure_tls target
+has no [targets.tls] pin, naming each one. A target that verifies its
+certificate against the system CAs (insecure_tls false) needs no pin and is
+never listed. Nothing is contacted and nothing is written.
 
 
 .SH OPTIONS
 \fB-h\fP, \fB--help\fP[=false]
 	help for validate
+
+.PP
+\fB--require-tls-pins\fP[=false]
+	fail when any insecure_tls target has no [targets.tls] pin, naming each
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
