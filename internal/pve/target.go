@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // NewClientForTarget builds a token-authenticated Client for t, decrypting
@@ -27,10 +28,15 @@ func NewClientForTarget(t *roster.Target, passphrase string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decrypt target %q token: %w", t.ID, err)
 	}
+	var pin tlspin.Pin
+	if t.TLS != nil {
+		pin = tlspin.Pin(t.TLS.SPKISHA256)
+	}
 	return NewClient(ClientConfig{
 		Host:        t.Host,
 		APIPort:     t.APIPort,
 		InsecureTLS: t.InsecureTLS,
+		TLSPin:      pin,
 		TokenID:     t.Token.ID,
 		TokenSecret: string(tokenSecret),
 	})

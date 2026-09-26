@@ -27,6 +27,7 @@ import (
 var dialerSeedCalls = map[string]bool{
 	// This module's real network entry points.
 	"NewClient":        true, // internal/pve
+	"ServedPin":        true, // internal/pve: dials at call time, so a package-level call dials before Install
 	"Dial":             true, // internal/sshexec
 	"DialWithPassword": true, // internal/sshexec
 	// Standard-library helpers that use the global transport directly.

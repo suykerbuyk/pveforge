@@ -9,6 +9,7 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // Load reads and validates the roster file at path.
@@ -86,6 +87,13 @@ func validate(r *Roster) error {
 			}
 			if !looksArmored(t.SSH.PrivateKeyEnc) {
 				return fmt.Errorf("target %q: ssh private_key_enc is not age-armored ciphertext", t.ID)
+			}
+		}
+		if t.TLS != nil {
+			// An empty or malformed pin is refused, never read as "no pin":
+			// only an absent [targets.tls] means that.
+			if _, err := tlspin.Parse(t.TLS.SPKISHA256); err != nil {
+				return fmt.Errorf("target %q: [targets.tls] spki_sha256: %w", t.ID, err)
 			}
 		}
 	}

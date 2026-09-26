@@ -67,7 +67,7 @@ func TestDecode_KeySpelling_Premise(t *testing.T) {
 }
 
 // TestRosterKeys_MatchTheTypes: rosterKeys lists exactly the toml tags of
-// Roster, Target, TokenAuth and SSHAuth, so a field added to the types
+// Roster, Target, TokenAuth, SSHAuth and TLSPin, so a field added to the types
 // cannot be refused at load, and a key dropped from them cannot linger.
 func TestRosterKeys_MatchTheTypes(t *testing.T) {
 	tags := func(v any) []string {
@@ -79,14 +79,14 @@ func TestRosterKeys_MatchTheTypes(t *testing.T) {
 		slices.Sort(out)
 		return out
 	}
-	for table, v := range map[string]any{"": Roster{}, "targets": Target{}, "targets.token": TokenAuth{}, "targets.ssh": SSHAuth{}} {
+	for table, v := range map[string]any{"": Roster{}, "targets": Target{}, "targets.token": TokenAuth{}, "targets.ssh": SSHAuth{}, "targets.tls": TLSPin{}} {
 		got := slices.Clone(rosterKeys[table])
 		slices.Sort(got)
 		if want := tags(v); !slices.Equal(got, want) {
 			t.Errorf("rosterKeys[%q] = %q, the type's toml tags are %q", table, got, want)
 		}
 	}
-	if len(rosterKeys) != 4 {
-		t.Errorf("rosterKeys has %d tables, want 4", len(rosterKeys))
+	if len(rosterKeys) != 5 {
+		t.Errorf("rosterKeys has %d tables, want 5", len(rosterKeys))
 	}
 }

@@ -71,6 +71,20 @@ and any other value is refused when the roster is loaded. The
 `[targets.token]` and `[targets.ssh]` blocks are written by `bootstrap` and
 `import-token`, and their `*_enc` fields must not be edited.
 
+A target may also hold a `[targets.tls]` block, `spki_sha256 =
+"sha256//<base64>"`: the SHA-256 of the API certificate's public key, in
+curl's `--pinnedpubkey` form. When it is present, every REST connection to
+the target must present that key, checked in the TLS handshake before any
+request (the token included) is sent. With `insecure_tls` the pin replaces
+certificate-chain verification; without it, the chain and the pin must both
+hold. An `http://` proxy (`HTTPS_PROXY`) still works with a pin, since the
+pin is checked through its CONNECT tunnel; an `https://` proxy does not, and
+every request to a pinned target through one fails with a pin mismatch.
+A malformed value is refused at load, never read as "no pin". No
+pveforge command writes this block yet, and none requires it: `pveforge
+roster validate --require-tls-pins` lists the `insecure_tls` targets that
+have none.
+
 Keys are case-sensitive. A roster holding a key that is not spelled exactly as
 above (`Export`, `Host_Key_Fingerprint`), or a key pveforge does not know, is
 refused at load with the key and its line. The TOML library alone would match

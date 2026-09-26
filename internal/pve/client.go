@@ -11,18 +11,23 @@ package pve
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
+
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // DefaultAPIPort is Proxmox's default API port when a target doesn't
@@ -39,6 +44,15 @@ type ClientConfig struct {
 	Host        string
 	APIPort     int // 0 => DefaultAPIPort
 	InsecureTLS bool
+	// TLSPin, when set, is the SPKI pin every connection's peer must
+	// present ([targets.tls], tlspin.Pin), checked in the handshake before
+	// any request byte, the token included, is sent. With InsecureTLS it
+	// replaces chain verification; without it, the chain AND the pin must
+	// both hold. Empty: no pin, and the client behaves exactly as it
+	// always has. With a pin, an https:// proxy is unsupported (every
+	// request fails closed); an http:// CONNECT proxy is fine. See
+	// newHTTPClient.
+	TLSPin      tlspin.Pin
 	TokenID     string // full "userid!tokenname", e.g. "root@pam!pveforge"
 	TokenSecret string
 	Timeout     time.Duration // 0 => DefaultTimeout
@@ -87,13 +101,21 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
+	if cfg.TLSPin != "" {
+		if _, err := tlspin.Parse(string(cfg.TLSPin)); err != nil {
+			return nil, fmt.Errorf("pve client: %w", err)
+		}
+	}
 
 	// One *http.Client serves every request this Client makes: RawRequest,
 	// the direct writers (vmconfig.go, schema.go), and go-proxmox itself,
 	// which is handed it (WithHTTPClient). Its transport is the
 	// accessWriteGuard, so no request of any of them can write PVE's
 	// /access API with the roster's token.
-	httpClient := newHTTPClient(timeout, cfg.InsecureTLS)
+	httpClient, err := newHTTPClient(timeout, cfg.InsecureTLS, cfg.TLSPin)
+	if err != nil {
+		return nil, fmt.Errorf("pve client: %w", err)
+	}
 	opts := []proxmox.Option{
 		proxmox.WithAPIToken(cfg.TokenID, cfg.TokenSecret),
 		proxmox.WithHTTPClient(httpClient),
@@ -110,26 +132,119 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // newHTTPClient is the one constructor of an HTTP client in pveforge's
 // production code (cmd/pveforge's transport guard holds that): its
 // transport is always the accessWriteGuard, in front of
-// http.DefaultTransport resolved per request, or, with insecureTLS, a clone
-// of it that skips certificate verification.
-func newHTTPClient(timeout time.Duration, insecureTLS bool) *http.Client {
+// http.DefaultTransport resolved per request, or, with insecureTLS or a
+// pin, a clone of it built once, here, at construction.
+//
+// With a pin, the clone's VerifyConnection checks the peer's leaf key on
+// every handshake, resumed or not, before any request byte is sent. With
+// insecureTLS it is the only check (chain verification is skipped: the pin
+// is the identity); without insecureTLS Go verifies the chain first and
+// the pin must hold as well. Session resumption stays at Go's default (no
+// ClientSessionCache): VerifyConnection runs on a resumed session anyway.
+// Proxies: an http:// proxy is honoured as before. The client sends it a
+// CONNECT and runs TLS with the target through the tunnel, so the pin is
+// checked against the target end to end and the proxy cannot answer as
+// it. An https:// proxy is NOT supported for a pinned target: net/http
+// runs this transport's TLSClientConfig, VerifyConnection included, on the
+// TLS leg to the proxy as well (transport.go, dialConn and addTLS), so the
+// proxy's own certificate is checked against the target's pin and every
+// request fails closed with a pin mismatch. A second TLS config for the
+// proxy leg is deliberately not built.
+func newHTTPClient(timeout time.Duration, insecureTLS bool, pin tlspin.Pin) (*http.Client, error) {
 	var next http.RoundTripper // nil: http.DefaultTransport, at request time
-	if insecureTLS {
-		// Clone http.DefaultTransport rather than starting from a bare
-		// &http.Transport{} literal: DefaultTransport carries
-		// Proxy: http.ProxyFromEnvironment (HTTP_PROXY/HTTPS_PROXY/
-		// NO_PROXY support) among other sane defaults, matching
-		// go-proxmox's own WithInsecureSkipVerify/ensureTransport
-		// approach. A bare literal has a nil Proxy, which would silently
-		// drop proxy support for this raw-HTTP write path (vmconfig.go)
-		// specifically — while reads through go-proxmox (ListNodes etc.)
-		// kept working via the proxy, since only go-proxmox's own
-		// transport was ever affected.
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit opt-in via cfg.InsecureTLS, mirrors go-proxmox's own WithInsecureSkipVerify
+	if insecureTLS || pin != "" {
+		transport := baseTransport()
+		cfg := &tls.Config{InsecureSkipVerify: insecureTLS} //nolint:gosec // explicit opt-in via cfg.InsecureTLS, mirrors go-proxmox's own WithInsecureSkipVerify; with a pin, VerifyConnection is the identity
+		if pin != "" {
+			verify, err := tlspin.VerifyConnection(pin)
+			if err != nil {
+				return nil, err
+			}
+			cfg.VerifyConnection = verify
+			cfg.MinVersion = tls.VersionTLS12
+		}
+		transport.TLSClientConfig = cfg
 		next = transport
 	}
-	return &http.Client{Timeout: timeout, Transport: accessWriteGuard{next: next}}
+	return &http.Client{Timeout: timeout, Transport: accessWriteGuard{next: next}}, nil
+}
+
+// baseTransport is the one clone site: http.DefaultTransport, cloned
+// rather than built from a bare &http.Transport{} literal. DefaultTransport
+// carries Proxy: http.ProxyFromEnvironment (HTTP_PROXY/HTTPS_PROXY/
+// NO_PROXY support) among other sane defaults, matching go-proxmox's own
+// WithInsecureSkipVerify/ensureTransport approach. A bare literal has a nil
+// Proxy, which would silently drop proxy support for the raw-HTTP write
+// path (vmconfig.go) specifically — while reads through go-proxmox
+// (ListNodes etc.) kept working via the proxy, since only go-proxmox's own
+// transport was ever affected. Clone also copies DialContext, which is
+// what netguard's test hook rides on. newHTTPClient and ServedPin share it.
+func baseTransport() *http.Transport {
+	return http.DefaultTransport.(*http.Transport).Clone()
+}
+
+// ErrProxiedProbe: ServedPin was asked to probe a host:port that the
+// REST transport would reach through a proxy. The probe dials directly, so
+// it could not compare what REST will reach; it refuses rather than
+// report a pin of the wrong peer.
+var ErrProxiedProbe = errors.New("a proxy is configured for this address (HTTPS_PROXY/NO_PROXY); the served-pin probe dials directly, so it cannot compare what REST will reach; set NO_PROXY for this host")
+
+// ServedPin reports the pin of the certificate that answers TLS at
+// host:port, with a handshake and nothing else: no HTTP request is made,
+// so no token or header is ever sent. It does not verify the certificate
+// (reading it is the point); a caller compares the pin it returns.
+//
+// It dials through the same clone of http.DefaultTransport that REST uses
+// (baseTransport), so its dialer and its proxy decision are REST's own,
+// and netguard's test hook sees the dial. When that transport would send
+// a request for https://host:port/ through a proxy, it refuses with
+// ErrProxiedProbe before dialing.
+func ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
+	return servedPin(ctx, baseTransport(), host, port)
+}
+
+// servedPin is ServedPin on a given transport: tests hand it a clone whose
+// Proxy and DialContext they control, since http.ProxyFromEnvironment
+// reads the environment once per process and never proxies loopback.
+func servedPin(ctx context.Context, tr *http.Transport, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	if tr.Proxy != nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/", nil)
+		if err != nil {
+			return "", nil, fmt.Errorf("served pin of %s: %w", addr, err)
+		}
+		u, err := tr.Proxy(req)
+		if err != nil {
+			return "", nil, fmt.Errorf("served pin of %s: resolve the proxy: %w", addr, err)
+		}
+		if u != nil {
+			return "", nil, fmt.Errorf("served pin of %s: %w", addr, ErrProxiedProbe)
+		}
+	}
+	if tr.DialContext == nil {
+		// Never fall back to a dialer of its own: that is the dial netguard
+		// could not see.
+		return "", nil, fmt.Errorf("served pin of %s: the transport has no dialer", addr)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
+		defer cancel()
+	}
+	conn, err := tr.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("served pin of %s: %w", addr, err)
+	}
+	defer conn.Close()
+	tc := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: host, MinVersion: tls.VersionTLS12}) //nolint:gosec // the certificate is read, not trusted: the caller compares its pin
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return "", nil, fmt.Errorf("served pin of %s: TLS handshake: %w", addr, err)
+	}
+	certs := tc.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return "", nil, fmt.Errorf("served pin of %s: the peer presented no certificate", addr)
+	}
+	return tlspin.FromCertificate(certs[0]), certs[0], nil
 }
 
 // ErrAccessWriteRefused: a request that would write PVE's /access API

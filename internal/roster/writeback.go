@@ -3,6 +3,7 @@ package roster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/pelletier/go-toml/v2/unstable"
+
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // TokenWrite is the payload for WriteTokenAuth.
@@ -86,6 +89,66 @@ func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase Passphrase) erro
 	return nil
 }
 
+// ErrTLSPinChanged: the TLS pin a compare-and-set write expected is not
+// the one the roster holds. Someone wrote the pin since the caller read
+// it; nothing was written.
+var ErrTLSPinChanged = errors.New("the roster's TLS pin is not the one this write expected (another pveforge wrote it since it was read)")
+
+// WriteTLSPin sets targetID's [targets.tls] spki_sha256 to next, as a
+// COMPARE-AND-SET: the pin the roster holds, read under the roster's lock,
+// must equal old ("" for a target with no pin), or the write is refused
+// with ErrTLSPinChanged and the file is left untouched. A pin is therefore
+// never replaced by a writer that did not first read it, and "never
+// re-pin silently" is a property of this writer, not of each caller.
+//
+// A caller may pass an old it read outside the lock (bootstrap reads the
+// roster before it takes its per-target lock): the CAS, not the caller,
+// makes that safe, by refusing a pin that changed in between.
+//
+// next equal to what the roster holds is a no-op: no write, no error.
+// Both pins must be well-formed (tlspin.Parse); next may not be empty, so
+// this writer cannot remove a pin. The target must already exist. The
+// passphrase is proven as for every other subtable write.
+func WriteTLSPin(path, targetID string, old, next tlspin.Pin, passphrase Passphrase) error {
+	if _, err := tlspin.Parse(string(next)); err != nil {
+		return fmt.Errorf("write tls pin for %q: %w", targetID, err)
+	}
+	if old != "" {
+		if _, err := tlspin.Parse(string(old)); err != nil {
+			return fmt.Errorf("write tls pin for %q: the expected pin: %w", targetID, err)
+		}
+	}
+	pre := func(current *Roster) (bool, error) {
+		t := current.Find(targetID)
+		if t == nil {
+			return false, fmt.Errorf("write tls pin for %q: no such target in roster %s", targetID, path)
+		}
+		var held tlspin.Pin
+		if t.TLS != nil {
+			held = tlspin.Pin(t.TLS.SPKISHA256)
+		}
+		if held != old {
+			heldText := string(held)
+			if heldText == "" {
+				heldText = "no pin"
+			}
+			oldText := string(old)
+			if oldText == "" {
+				oldText = "no pin"
+			}
+			return false, fmt.Errorf("write tls pin for %q: %w: it holds %s, this write expected %s; nothing was written; re-run", targetID, ErrTLSPinChanged, heldText, oldText)
+		}
+		return held == next, nil
+	}
+	post := func(nr *Roster) error {
+		if t := nr.Find(targetID); t == nil || t.TLS == nil || tlspin.Pin(t.TLS.SPKISHA256) != next {
+			return fmt.Errorf("the tls pin written for %q does not read back as %s", targetID, next)
+		}
+		return nil
+	}
+	return spliceSubtableIf(path, targetID, "tls", []field{{key: "spki_sha256", value: string(next)}}, passphrase, pre, post)
+}
+
 // AppendTarget appends a new [[targets]] block for t to the roster at path,
 // with no auth subtables — the starting point for a target `pveforge
 // bootstrap` has not yet run against. It errors if a target with the same
@@ -108,6 +171,9 @@ func AppendTarget(path string, t Target) error {
 	}
 	if t.Token != nil || t.SSH != nil {
 		return fmt.Errorf("append target %q: must not carry auth subtables; use WriteTokenAuth/WriteSSHAuth after appending", t.ID)
+	}
+	if t.TLS != nil {
+		return fmt.Errorf("append target %q: must not carry a TLS pin; use WriteTLSPin after appending", t.ID)
 	}
 	if t.Export != "" {
 		return fmt.Errorf("append target %q: export is set only by editing the roster by hand", t.ID)
@@ -203,6 +269,9 @@ func verifyAppendOnly(oldData, newData []byte, targetID string) error {
 	}
 	if last.Token != nil || last.SSH != nil {
 		return fmt.Errorf("appended target %q unexpectedly carries auth subtables", targetID)
+	}
+	if last.TLS != nil {
+		return fmt.Errorf("appended target %q unexpectedly carries a TLS pin", targetID)
 	}
 	if last.Export != "" {
 		return fmt.Errorf("appended target %q unexpectedly carries export", targetID)
@@ -393,6 +462,9 @@ func verifyOnlyTargetFieldsChanged(oldData, newData []byte, targetID string) err
 			if !sshAuthEqual(ot.SSH, nt.SSH) {
 				return fmt.Errorf("target %q: ssh auth changed unexpectedly while updating fields", targetID)
 			}
+			if !tlsPinEqual(ot.TLS, nt.TLS) {
+				return fmt.Errorf("target %q: tls pin changed unexpectedly while updating fields", targetID)
+			}
 			continue
 		}
 		if !targetDeepEqual(ot, nt) {
@@ -487,6 +559,23 @@ func quoteTOMLBasicString(s string) string {
 // lock, so a secret another process wrote since ProvePassphrase is judged
 // too, and a proof still standing costs no derivation.
 func spliceSubtable(path, targetID, subKey string, fields []field, passphrase Passphrase) error {
+	return spliceSubtableIf(path, targetID, subKey, fields, passphrase, nil, nil)
+}
+
+// subtableSpliceFn is applySubtableSplice, a seam only so a test can hand
+// spliceSubtableIf a splice that lands the wrong value and show that a
+// writer's post check (WriteTLSPin's read-back) refuses it. Nothing but
+// that test replaces it.
+var subtableSpliceFn = applySubtableSplice
+
+// spliceSubtableIf is spliceSubtable with a precondition: pre, when not
+// nil, is judged against the roster as read UNDER the lock, before
+// anything is composed. It returns skip=true for a write that would change
+// nothing (the roster is left untouched and nil returned), or an error to
+// refuse the write. post, when not nil, is judged against the composed
+// roster before it is written, beside verifyOnlyIntendedChange: it checks
+// that what was meant to land did.
+func spliceSubtableIf(path, targetID, subKey string, fields []field, passphrase Passphrase, pre func(current *Roster) (skip bool, err error), post func(next *Roster) error) error {
 	lock := flock.New(path + ".lock")
 	lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -510,14 +599,32 @@ func spliceSubtable(path, targetID, subKey string, fields []field, passphrase Pa
 	if err := passphrase.prove(current, targetID); err != nil {
 		return fmt.Errorf("write %s for %q: %w", subKey, targetID, err)
 	}
+	if pre != nil {
+		skip, err := pre(current)
+		if err != nil {
+			return err
+		}
+		if skip {
+			return nil
+		}
+	}
 
-	newData, err := applySubtableSplice(data, targetID, subKey, fields)
+	newData, err := subtableSpliceFn(data, targetID, subKey, fields)
 	if err != nil {
 		return fmt.Errorf("splice %s into target %q: %w", subKey, targetID, err)
 	}
 
 	if err := verifyOnlyIntendedChange(data, newData, targetID, subKey); err != nil {
 		return fmt.Errorf("safety check failed, roster left untouched: %w", err)
+	}
+	if post != nil {
+		nr, err := Decode(newData)
+		if err != nil {
+			return fmt.Errorf("safety check failed, roster left untouched: %w", err)
+		}
+		if err := post(nr); err != nil {
+			return fmt.Errorf("safety check failed, roster left untouched: %w", err)
+		}
 	}
 
 	if err := atomicWrite(path, newData); err != nil {
@@ -566,6 +673,9 @@ func verifyOnlyIntendedChange(oldData, newData []byte, targetID, modifiedSubtabl
 			if modifiedSubtable != "ssh" && !sshAuthEqual(ot.SSH, nt.SSH) {
 				return fmt.Errorf("target %q: ssh auth changed unexpectedly while writing %s", targetID, modifiedSubtable)
 			}
+			if modifiedSubtable != "tls" && !tlsPinEqual(ot.TLS, nt.TLS) {
+				return fmt.Errorf("target %q: tls pin changed unexpectedly while writing %s", targetID, modifiedSubtable)
+			}
 			continue
 		}
 		if !targetDeepEqual(ot, nt) {
@@ -579,7 +689,7 @@ func targetDeepEqual(a, b Target) bool {
 	if a.ID != b.ID || a.Host != b.Host || a.Node != b.Node || a.APIPort != b.APIPort || a.InsecureTLS != b.InsecureTLS || a.Export != b.Export {
 		return false
 	}
-	return tokenAuthEqual(a.Token, b.Token) && sshAuthEqual(a.SSH, b.SSH)
+	return tokenAuthEqual(a.Token, b.Token) && sshAuthEqual(a.SSH, b.SSH) && tlsPinEqual(a.TLS, b.TLS)
 }
 
 func tokenAuthEqual(a, b *TokenAuth) bool {
@@ -590,6 +700,13 @@ func tokenAuthEqual(a, b *TokenAuth) bool {
 }
 
 func sshAuthEqual(a, b *SSHAuth) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
+func tlsPinEqual(a, b *TLSPin) bool {
 	if (a == nil) != (b == nil) {
 		return false
 	}
