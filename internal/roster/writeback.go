@@ -29,6 +29,9 @@ type SSHWrite struct {
 	PublicKey           string
 	HostKeyFingerprint  string
 	PrivateKeyPlaintext []byte
+	// HostKeySource records how HostKeyFingerprint was obtained
+	// (ssh-verified or ssh-tofu). Empty writes none (an older caller).
+	HostKeySource string
 }
 
 // WriteTokenAuth encrypts w.SecretPlaintext and splices a [targets.token]
@@ -69,8 +72,41 @@ func WriteTokenAuth(path, targetID string, w TokenWrite, passphrase Passphrase) 
 // Same in-place-vs-append, non-clobbering and passphrase-proving behavior
 // as WriteTokenAuth.
 func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase Passphrase) error {
+	return writeSSHAuth(path, targetID, w, passphrase, nil)
+}
+
+// ErrSSHPinChanged: the SSH host key pin a compare-and-set replacement
+// expected is not the one the roster holds; nothing was written.
+var ErrSSHPinChanged = errors.New("the roster's SSH host key pin is not the one this write expected (another pveforge wrote it since it was read)")
+
+// ReplaceSSHAuth replaces targetID's whole [targets.ssh] (a reprovisioned
+// node's new key, keypair and source) as a COMPARE-AND-SET: the block the
+// roster holds, read under its lock, must pin oldFingerprint, or the write
+// is refused with ErrSSHPinChanged and the file is left untouched.
+func ReplaceSSHAuth(path, targetID, oldFingerprint string, w SSHWrite, passphrase Passphrase) error {
+	if oldFingerprint == "" {
+		return fmt.Errorf("replace ssh auth for %q: the expected fingerprint is required (use WriteSSHAuth for a first write)", targetID)
+	}
+	pre := func(current *Roster) (bool, error) {
+		t := current.Find(targetID)
+		held := ""
+		if t != nil && t.SSH != nil {
+			held = t.SSH.HostKeyFingerprint
+		}
+		if held != oldFingerprint {
+			return false, fmt.Errorf("replace ssh auth for %q: %w: it pins %q, this write expected %q; nothing was written; re-run", targetID, ErrSSHPinChanged, held, oldFingerprint)
+		}
+		return false, nil
+	}
+	return writeSSHAuth(path, targetID, w, passphrase, pre)
+}
+
+func writeSSHAuth(path, targetID string, w SSHWrite, passphrase Passphrase, pre func(*Roster) (bool, error)) error {
 	if w.User == "" {
 		return fmt.Errorf("write ssh auth for %q: user is required", targetID)
+	}
+	if err := checkHostKeySource(w.HostKeySource); err != nil {
+		return fmt.Errorf("write ssh auth for %q: %w", targetID, err)
 	}
 	keyEnc, err := EncryptString(w.PrivateKeyPlaintext, passphrase.s)
 	if err != nil {
@@ -82,11 +118,35 @@ func WriteSSHAuth(path, targetID string, w SSHWrite, passphrase Passphrase) erro
 		{key: "host_key_fingerprint", value: w.HostKeyFingerprint},
 		{key: "private_key_enc", value: keyEnc, literal: true},
 	}
-	if err := spliceSubtable(path, targetID, "ssh", fields, passphrase); err != nil {
+	if w.HostKeySource != "" {
+		fields = append(fields, field{key: "host_key_source", value: w.HostKeySource})
+	}
+	post := func(nr *Roster) error {
+		t := nr.Find(targetID)
+		if t == nil || t.SSH == nil || t.SSH.HostKeyFingerprint != w.HostKeyFingerprint || (w.HostKeySource != "" && t.SSH.HostKeySource != w.HostKeySource) {
+			return fmt.Errorf("the ssh auth written for %q does not read back", targetID)
+		}
+		return nil
+	}
+	if err := spliceSubtableIf(path, targetID, "ssh", fields, passphrase, pre, post); err != nil {
 		return err
 	}
 	passphrase.remember(keyEnc, w.PrivateKeyPlaintext)
 	return nil
+}
+
+// ErrUnknownHostKeySource marks a host_key_source that is not one of the
+// SSH pin sources.
+var ErrUnknownHostKeySource = errors.New("not an SSH host key source")
+
+// checkHostKeySource allows "" (unknown: an older roster or writer),
+// ssh-verified and ssh-tofu.
+func checkHostKeySource(s string) error {
+	switch s {
+	case "", string(tlspin.SourceSSHVerified), string(tlspin.SourceSSHTOFU):
+		return nil
+	}
+	return fmt.Errorf("%w: %q is not %s or %s", ErrUnknownHostKeySource, s, tlspin.SourceSSHVerified, tlspin.SourceSSHTOFU)
 }
 
 // ErrTLSPinChanged: the TLS pin a compare-and-set write expected is not

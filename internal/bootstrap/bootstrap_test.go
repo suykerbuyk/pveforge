@@ -372,11 +372,18 @@ type fakeValidator struct {
 	// will dial.
 	servedHost string
 	servedPort int
+	// servedVerified records whether the last probe verified the chain;
+	// chainErr is what a chain-verifying probe returns (an untrusted chain).
+	servedVerified bool
+	chainErr       error
 }
 
-func (v *fakeValidator) ServedPin(_ context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
+func (v *fakeValidator) ServedPin(_ context.Context, host string, port int, verifyChain bool) (tlspin.Pin, *x509.Certificate, error) {
 	v.servedCalls++
-	v.servedHost, v.servedPort = host, port
+	v.servedHost, v.servedPort, v.servedVerified = host, port, verifyChain
+	if verifyChain && v.chainErr != nil {
+		return "", nil, v.chainErr
+	}
 	if v.servedErr != nil {
 		return "", nil, v.servedErr
 	}
@@ -1041,8 +1048,14 @@ func TestRun_ReconnectMismatch_HardStop_NoSilentRePin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Run to fail when the pinned reconnect reports a mismatch")
 	}
-	if !strings.Contains(err.Error(), "deliberate operator reconciliation") {
-		t.Errorf("expected a clear, actionable error explaining this needs manual reconciliation, got: %v", err)
+	// Actionable, and never one paste from pinning the presented key: the
+	// reconcile command takes the key read on the node's CONSOLE.
+	if !strings.Contains(err.Error(), "will not silently re-trust and re-pin") || !strings.Contains(err.Error(), "CONSOLE") ||
+		!strings.Contains(err.Error(), "--reprovisioned --host-key-fingerprint <the console value>") {
+		t.Errorf("expected an actionable error naming the reprovision command with the console value, got: %v", err)
+	}
+	if i := strings.Index(err.Error(), "--host-key-fingerprint"); i >= 0 && strings.Contains(err.Error()[i:], "attacker-controlled") {
+		t.Errorf("the presented key follows --host-key-fingerprint: %v", err)
 	}
 	if transport.installCalls != 0 {
 		t.Error("must not fall back to password auth / pubkey install on a pinned-key mismatch")

@@ -451,14 +451,17 @@ func TestEncryptString_OnlyTheProvingWritersCallIt(t *testing.T) {
 					return true
 				}
 				uses[where]++
-				if where != "WriteTokenAuth" && where != "WriteSSHAuth" {
+				// writeSSHAuth is the one body of WriteSSHAuth and ReplaceSSHAuth
+				// (T2's compare-and-set); both reach it only through
+				// spliceSubtableIf, which proves the passphrase.
+				if where != "WriteTokenAuth" && where != "writeSSHAuth" {
 					t.Errorf("%s: EncryptString used in %s, outside the proving writers", fset.Position(id.Pos()), where)
 				}
 				return true
 			})
 		}
 	}
-	if !declSeen || uses["WriteTokenAuth"] != 1 || uses["WriteSSHAuth"] != 1 {
+	if !declSeen || uses["WriteTokenAuth"] != 1 || uses["writeSSHAuth"] != 1 {
 		t.Errorf("declaration seen %v, uses %v: want the declaration and exactly one use in each writer — the walk is no longer looking at the real code", declSeen, uses)
 	}
 }

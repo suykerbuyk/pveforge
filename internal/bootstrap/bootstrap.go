@@ -128,7 +128,9 @@ type APIValidator interface {
 	// is the network half of a TLS pin capture: what the name serves must
 	// equal what the node serves locally, before anything is written or
 	// any token is sent.
-	ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error)
+	// verifyChain also verifies the certificate chain (a CA-verified
+	// target), so an untrusted chain is refused before anything is written.
+	ServedPin(ctx context.Context, host string, port int, verifyChain bool) (tlspin.Pin, *x509.Certificate, error)
 }
 
 // Options configures one bootstrap run against a single target.
@@ -188,6 +190,14 @@ type Options struct {
 	// fingerprint reported.
 	HostKeyFingerprint string
 
+	// Reprovisioned says the node was rebuilt (--reprovisioned): its SSH
+	// host key, and so the keypair installed on it, and its TLS key are
+	// new. The run dials a password session pinned to HostKeyFingerprint
+	// (required: read on the node's console), installs a fresh keypair,
+	// and replaces both stored pins with compare-and-set writes. Where the
+	// stored pins already match the node, the run is a plain rerun.
+	Reprovisioned bool
+
 	// SSHTOFU is the operator's explicit acceptance (--ssh-tofu) of trust
 	// on first use for a password session that captures a TLS pin: without
 	// it such a run needs HostKeyFingerprint (operator ruling RQ3, option
@@ -240,6 +250,16 @@ type Result struct {
 	// capture).
 	TLSPin       tlspin.Pin
 	TLSPinSource tlspin.Source
+	// Reprovisioned reports that this run replaced a stored pin (the SSH
+	// host key with its keypair, the TLS pin, or both); the Previous*
+	// fields hold what was replaced, each only when it changed.
+	Reprovisioned              bool
+	PreviousHostKeyFingerprint string
+	PreviousTLSPin             tlspin.Pin
+	// ReprovisionAsked reports --reprovisioned was given; with
+	// Reprovisioned false, the stored pins already matched this node and
+	// the run was a plain bootstrap.
+	ReprovisionAsked bool
 	// TokenID is the full "userid!tokenname" of the requested token.
 	TokenID string
 
@@ -399,9 +419,22 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
+	// The stored TLS pin, read again under the lock: the previous pins this
+	// run reports are what the roster held before its first write.
+	if err := storedTLSUnderLock(&opts); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+	// A keyful reprovision: a stored SSH pin that is not the key the
+	// operator read on the rebuilt node's console. Equal is a plain rerun.
+	reprovisionSSH := opts.Reprovisioned && existing != nil && opts.HostKeyFingerprint != existing.HostKeyFingerprint
 
 	r := &runner{ctx: ctx, opts: opts, transport: transport, api: api, fullID: fullTokenID, want: want}
-	tls := &tlsCapture{ctx: ctx, opts: opts, dialsStoredPin: existing != nil, api: api}
+	tls := &tlsCapture{ctx: ctx, opts: opts, dialsStoredPin: existing != nil && !reprovisionSSH, api: api}
+	// A TLS pin is captured for every insecure_tls target, and, under a
+	// reprovision, for a CA-verified target the operator explicitly pinned
+	// (its new key is captured over the operator-verified session; its
+	// chain must still hold as well).
+	captureTLS := opts.InsecureTLS || (opts.Reprovisioned && opts.TLSPin != "")
 
 	switch {
 	case opts.NoSSHKey:
@@ -428,13 +461,13 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		defer func() { _ = r.session.Close() }()
 		r.ident = sshIdentity{addr: addr, user: sshUser, password: opts.PVEPassword, hostKeyFP: fp, keyless: true}
 
-	case existing != nil:
+	case existing != nil && !reprovisionSSH:
 		if opts.HostKeyFingerprint != "" && opts.HostKeyFingerprint != existing.HostKeyFingerprint {
-			return nil, fmt.Errorf("bootstrap %s: --host-key-fingerprint %s is not the host key this target is pinned to (%s); nothing was dialed — reconcile deliberately, pveforge will not re-pin", opts.TargetID, opts.HostKeyFingerprint, existing.HostKeyFingerprint)
+			return nil, fmt.Errorf("bootstrap %s: --host-key-fingerprint %s is not the host key this target is pinned to (%s); nothing was dialed. If %s is the key you read on the node's CONSOLE after a rebuild, add --reprovisioned; pveforge will not re-pin otherwise", opts.TargetID, opts.HostKeyFingerprint, existing.HostKeyFingerprint, opts.HostKeyFingerprint)
 		}
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — this needs deliberate operator reconciliation; pveforge will not silently re-trust and re-pin a different host key", opts.TargetID, err)
+			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — pveforge will not silently re-trust and re-pin a different host key; if the node was rebuilt, read its new key on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub) and run pveforge bootstrap %s --reprovisioned --host-key-fingerprint <the console value>", opts.TargetID, err, opts.TargetID)
 		}
 		r.session = session
 		defer func() { _ = r.session.Close() }()
@@ -463,7 +496,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		// cross-check that fails leaves no stored SSH pin behind, so a rerun
 		// is again a first run, vouched for (or TOFU-accepted) by the
 		// operator, and can never pass the pin off as ssh-stored.
-		if opts.InsecureTLS {
+		if captureTLS {
 			if err := tls.capture(r.session); err != nil {
 				return nil, err
 			}
@@ -471,13 +504,24 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 		// Persist immediately — proven to work, and this is what makes a
 		// later failure in this same Run safe to retry without generating a
-		// second keypair.
-		if err := roster.WriteSSHAuth(opts.RosterPath, opts.TargetID, roster.SSHWrite{
+		// second keypair. A reprovision REPLACES the stored block, compare-
+		// and-set against the pin it read under the lock.
+		w := roster.SSHWrite{
 			User:                sshUser,
 			PublicKey:           keypair.AuthorizedKeyLine,
 			HostKeyFingerprint:  hostKeyFP,
 			PrivateKeyPlaintext: keypair.PrivateKeyPEM,
-		}, opts.Passphrase); err != nil {
+			HostKeySource:       string(sshSource(opts)),
+		}
+		if reprovisionSSH {
+			if err := roster.ReplaceSSHAuth(opts.RosterPath, opts.TargetID, existing.HostKeyFingerprint, w, opts.Passphrase); err != nil {
+				done := ""
+				if tls.replaced {
+					done = fmt.Sprintf("; the TLS pin was already replaced (previous %s), the SSH host key pin was not (still %s): re-run the same command to finish", tls.previous, existing.HostKeyFingerprint)
+				}
+				return nil, fmt.Errorf("bootstrap %s: replace ssh auth: %w%s", opts.TargetID, err, done)
+			}
+		} else if err := roster.WriteSSHAuth(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
 			return nil, fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err)
 		}
 	}
@@ -485,16 +529,26 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 	// The keyless and stored-pin branches capture here; the first-run
 	// branch already did, before it persisted SSH auth.
-	if opts.InsecureTLS && !tls.done {
+	if captureTLS && !tls.done {
 		if err := tls.capture(r.session); err != nil {
 			return nil, err
 		}
 	}
 	r.res.TLSPin, r.res.TLSPinSource = tls.pin, tls.source
 	opts.TLSPin, r.opts.TLSPin = tls.pinOr(opts.TLSPin), tls.pinOr(r.opts.TLSPin)
+	r.res.ReprovisionAsked = opts.Reprovisioned
+	if reprovisionSSH {
+		r.res.Reprovisioned, r.res.PreviousHostKeyFingerprint = true, existing.HostKeyFingerprint
+	}
+	if tls.replaced {
+		r.res.Reprovisioned, r.res.PreviousTLSPin = true, tls.previous
+	}
 
 	present, err := preflight(ctx, r.session, opts, want, sshOwnerReader{r.session})
 	if err != nil {
+		if r.res.Reprovisioned {
+			return nil, fmt.Errorf("bootstrap %s: %w; %s the rebuilt node: recreate the token owner and its ACLs on it (for the nested harness's outer target: D5 G1-G3), then run the same command again", opts.TargetID, err, replacedPins(r.res))
+		}
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 	return r.tokenPhase(present)
@@ -511,11 +565,17 @@ type tlsCapture struct {
 	done           bool
 	pin            tlspin.Pin
 	source         tlspin.Source
+	// replaced and previous: a reprovision replaced the stored pin.
+	replaced bool
+	previous tlspin.Pin
 }
 
 func (c *tlsCapture) capture(session SSHSession) error {
 	o := c.opts
-	pin, err := capturePin(c.ctx, session, c.api, o.Host, o.APIPort, o.CapturePort)
+	// A CA-verified target (a reprovision of one the operator pinned) must
+	// also present a chain the system trusts, checked here, BEFORE either
+	// pin is written.
+	pin, err := capturePin(c.ctx, session, c.api, o.Host, o.APIPort, o.CapturePort, !o.InsecureTLS)
 	if err != nil {
 		return fmt.Errorf("bootstrap %s: %w", o.TargetID, err)
 	}
@@ -526,6 +586,13 @@ func (c *tlsCapture) capture(session SSHSession) error {
 		// obtained, never this run's session, which could otherwise make a
 		// TOFU-born pin read as ssh-stored.
 		source = o.tlsSource
+	case stored != "" && o.Reprovisioned:
+		// A rebuilt node's new key, captured over the operator-verified
+		// session: replace the stored pin, compare-and-set against it.
+		if err := roster.WriteTLSPin(o.RosterPath, o.TargetID, stored, pin, source, o.Passphrase); err != nil {
+			return fmt.Errorf("bootstrap %s: replace the tls pin: %w", o.TargetID, err)
+		}
+		c.replaced, c.previous = true, stored
 	case stored != "":
 		return fmt.Errorf("bootstrap %s: %w", o.TargetID, differsError(o.TargetID, stored, pin, c.dialsStoredPin))
 	default:
@@ -553,6 +620,11 @@ func (c *tlsCapture) pinOr(p tlspin.Pin) tlspin.Pin {
 // applies, so it is refused anywhere else, and together with a
 // fingerprint.
 func checkCaptureTrust(opts Options) error {
+	// The reprovision rules come FIRST, before either early return below:
+	// they hold for a CA-verified target and a stored SSH pin alike.
+	if opts.Reprovisioned {
+		return CheckReprovision(opts)
+	}
 	if opts.SSHTOFU && opts.HostKeyFingerprint != "" {
 		return errors.New("--ssh-tofu and --host-key-fingerprint contradict each other: give the fingerprint you verified, or accept trust on first use, not both")
 	}
@@ -575,6 +647,44 @@ func checkCaptureTrust(opts Options) error {
 	return nil
 }
 
+// CheckReprovision is --reprovisioned's own refusals, on the options and the
+// roster alone: no lock, no write, no connection. Run applies it first; the
+// CLI calls it too, before it prompts for any password. It is nil for a
+// run that is not a reprovision.
+func CheckReprovision(opts Options) error {
+	if !opts.Reprovisioned {
+		return nil
+	}
+	if opts.SSHTOFU {
+		return errors.New("--ssh-tofu does not apply with --reprovisioned: a rebuilt node's host key is never trusted on first use; read it on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub) and pass it with --host-key-fingerprint")
+	}
+	if opts.HostKeyFingerprint == "" {
+		return ErrReprovisionNeedsFingerprint
+	}
+	if !storedAnyPin(opts) {
+		return ErrNothingToReprovision
+	}
+	return nil
+}
+
+// ErrReprovisionNeedsFingerprint: --reprovisioned without the new host key.
+var ErrReprovisionNeedsFingerprint = errors.New("--reprovisioned needs --host-key-fingerprint: read the rebuilt node's host key on its CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub) and pass that value")
+
+// ErrNothingToReprovision: --reprovisioned against a target the roster
+// holds no pin for (or does not hold at all): that is a first bootstrap.
+var ErrNothingToReprovision = errors.New("--reprovisioned: the roster holds no SSH or TLS pin for this target, so there is nothing to replace; drop --reprovisioned for a first bootstrap")
+
+// storedAnyPin reports whether the roster holds the target with an SSH or
+// a TLS pin.
+func storedAnyPin(opts Options) bool {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return false
+	}
+	tg := r.Find(opts.TargetID)
+	return tg != nil && ((tg.SSH != nil && tg.SSH.HostKeyFingerprint != "") || tg.TLS != nil)
+}
+
 // storedSSHPin reports whether the roster holds a pinned SSH host key for
 // the target (Run then dials it). A roster that cannot be read reports
 // false here; the run's own later reads name the problem.
@@ -587,13 +697,66 @@ func storedSSHPin(opts Options) bool {
 	return tg != nil && tg.SSH != nil && tg.SSH.HostKeyFingerprint != ""
 }
 
+// replacedPins names what a reprovision replaced, with the previous values,
+// for an error that stops the run after the pin writes: the only place the
+// operator will see them, since a later plain rerun has nothing to report.
+func replacedPins(res *Result) string {
+	var parts []string
+	if res.PreviousHostKeyFingerprint != "" {
+		parts = append(parts, "the SSH host key pin (previous "+res.PreviousHostKeyFingerprint+")")
+	}
+	if res.PreviousTLSPin != "" {
+		parts = append(parts, "the TLS pin (previous "+string(res.PreviousTLSPin)+")")
+	}
+	if len(parts) == 0 {
+		return "the stored pins already match"
+	}
+	verb := "; they now match"
+	if len(parts) == 1 {
+		verb = "; it now matches"
+	}
+	return "this run replaced " + strings.Join(parts, " and ") + verb
+}
+
+// storedTLSUnderLock re-reads the target's TLS pin and its recorded source
+// under the run's lock. A pin the caller set that is not the roster's is
+// refused: the roster's pin is replaced only by a reprovision's capture.
+func storedTLSUnderLock(opts *Options) error {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return fmt.Errorf("load roster %s: %w", opts.RosterPath, err)
+	}
+	tg := r.Find(opts.TargetID)
+	var pin tlspin.Pin
+	var src tlspin.Source
+	if tg != nil && tg.TLS != nil {
+		pin, src = tlspin.Pin(tg.TLS.SPKISHA256), tlspin.Source(tg.TLS.Source)
+	}
+	if opts.TLSPin != "" && opts.TLSPin != pin {
+		return fmt.Errorf("the TLS pin this run was given (%s) is not the one the roster holds (%s)", opts.TLSPin, pin)
+	}
+	opts.TLSPin, opts.tlsSource = pin, src
+	return nil
+}
+
+// sshSource is how the SSH host key a first run or a reprovision pins was
+// vouched for: the operator's fingerprint, or trust on first use.
+func sshSource(opts Options) tlspin.Source {
+	if opts.HostKeyFingerprint != "" {
+		return tlspin.SourceSSHVerified
+	}
+	return tlspin.SourceSSHTOFU
+}
+
 // captureSource is how this run's session vouches for a pin it captures.
 func captureSource(opts Options, dialsStoredPin bool) tlspin.Source {
 	switch {
-	case opts.HostKeyFingerprint != "":
-		return tlspin.SourceSSHVerified
+	// A session over the roster's stored SSH pin vouches as that pin does,
+	// whether or not the operator also repeated it with the flag.
 	case dialsStoredPin:
 		return tlspin.SourceSSHStored
+	case opts.HostKeyFingerprint != "":
+		return tlspin.SourceSSHVerified
 	default:
 		return tlspin.SourceSSHTOFU
 	}

@@ -208,14 +208,18 @@ var ErrProxiedProbe = errors.New("a proxy is configured for this address (HTTPS_
 // and netguard's test hook sees the dial. When that transport would send
 // a request for https://host:port/ through a proxy, it refuses with
 // ErrProxiedProbe before dialing.
-func ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
-	return servedPin(ctx, baseTransport(), host, port)
+//
+// With verifyChain, the handshake also verifies the certificate chain
+// against the system roots and host (a CA-verified target's rule: the
+// chain AND the pin), and an untrusted chain is an error.
+func ServedPin(ctx context.Context, host string, port int, verifyChain bool) (tlspin.Pin, *x509.Certificate, error) {
+	return servedPin(ctx, baseTransport(), host, port, verifyChain)
 }
 
 // servedPin is ServedPin on a given transport: tests hand it a clone whose
 // Proxy and DialContext they control, since http.ProxyFromEnvironment
 // reads the environment once per process and never proxies loopback.
-func servedPin(ctx context.Context, tr *http.Transport, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
+func servedPin(ctx context.Context, tr *http.Transport, host string, port int, verifyChain bool) (tlspin.Pin, *x509.Certificate, error) {
 	addr := net.JoinHostPort(host, strconv.Itoa(EffectiveAPIPort(port)))
 	if tr.Proxy != nil {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/", nil)
@@ -245,7 +249,7 @@ func servedPin(ctx context.Context, tr *http.Transport, host string, port int) (
 		return "", nil, fmt.Errorf("served pin of %s: %w", addr, err)
 	}
 	defer conn.Close()
-	tc := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, ServerName: host, MinVersion: tls.VersionTLS12}) //nolint:gosec // the certificate is read, not trusted: the caller compares its pin
+	tc := tls.Client(conn, &tls.Config{InsecureSkipVerify: !verifyChain, ServerName: host, MinVersion: tls.VersionTLS12}) //nolint:gosec // without verifyChain the certificate is read, not trusted: the caller compares its pin
 	if err := tc.HandshakeContext(ctx); err != nil {
 		return "", nil, fmt.Errorf("served pin of %s: TLS handshake: %w", addr, err)
 	}

@@ -79,4 +79,9 @@ type SSHAuth struct {
 	// the network every time.
 	HostKeyFingerprint string `toml:"host_key_fingerprint"`
 	PrivateKeyEnc      string `toml:"private_key_enc"`
+	// HostKeySource is how HostKeyFingerprint was obtained: ssh-verified
+	// (the operator gave it, --host-key-fingerprint) or ssh-tofu (trusted
+	// on first use). Written by every pveforge writer since T2; absent in
+	// an older roster, which reads as unknown.
+	HostKeySource string `toml:"host_key_source"`
 }

@@ -150,6 +150,32 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
   `--ssh-tofu` to accept trust on first use of the SSH host key, recorded as
   `tls_pin_source` `ssh-tofu`. A run that dials a stored SSH pin needs
   neither. The result reports `tls_spki_sha256` and `tls_pin_source`.
+- `--reprovisioned` is the one command after a node is REBUILT: it replaces
+  the stored SSH host key pin, the keypair installed on the node, and the TLS
+  pin, together, and mints a fresh token (the old one died with the node).
+  Read the new host key on the node's CONSOLE (`ssh-keygen -lf
+  /etc/ssh/ssh_host_ecdsa_key.pub`) and pass it with `--host-key-fingerprint`.
+  Never pin the key a failing connection presented: that is what an impostor
+  would show, and pveforge's mismatch errors label it so. Every run still needs
+  `--grant` (the roster stores none), `--no-ssh-key` for a keyless target,
+  `--capture-port` if one was used, and the PVE password. Where the stored pins
+  already match the node, the run is a plain bootstrap, so repeating the
+  command after a partial failure converges. Recovery is one command per
+  roster; for a node that two rosters address (qa-pve-02 and its harness
+  target), for example:
+
+      pveforge bootstrap qa-pve-02 --roster ./pveforge.toml --reprovisioned \
+        --host-key-fingerprint SHA256:<console> --grant /:PVEVMAdmin::1
+      pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml \
+        --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console> \
+        --token-owner pveforge-harness@pve --token-id build --grant …
+
+  The second needs its owner, pool and roles recreated first (for the nested
+  harness: D5's G1–G3); a rebuild does not keep them. A disposable roster (a
+  harness nested target) can instead be moved aside and bootstrapped afresh.
+  The result reports `reprovisioned` and the `previous_host_key_fingerprint`
+  and `previous_tls_spki_sha256` it replaced. `[targets.ssh]` records
+  `host_key_source` (`ssh-verified` or `ssh-tofu`) beside its pin.
 - `--host-key-fingerprint SHA256:…` pins the SSH connection that carries the
   password (the key install's, or `--no-ssh-key`'s) to the host key you
   verified, exactly as `ssh-keygen -l -E sha256` prints it and the roster

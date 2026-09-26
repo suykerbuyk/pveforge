@@ -397,3 +397,79 @@ func TestDecode_TLSPinSource(t *testing.T) {
 		}
 	}
 }
+
+// ---- T2: ReplaceSSHAuth and host_key_source ----
+
+func TestReplaceSSHAuth_CompareAndSet(t *testing.T) {
+	withTestWorkFactor(t)
+	path := writeTempRoster(t, fixturePinned(t, "p"))
+	pw := NewPassphrase("p")
+	w := SSHWrite{User: "root", PublicKey: "ssh-ed25519 NEW x", HostKeyFingerprint: "SHA256:new", PrivateKeyPlaintext: []byte("newkey"), HostKeySource: "ssh-verified"}
+	before := readFile(t, path)
+	for name, old := range map[string]string{"stale": "SHA256:other", "the new one": "SHA256:new"} {
+		if err := ReplaceSSHAuth(path, "qa-pve-01", old, w, pw); !errors.Is(err, ErrSSHPinChanged) || !strings.Contains(err.Error(), "nothing was written") {
+			t.Fatalf("%s old: err = %v, want ErrSSHPinChanged", name, err)
+		}
+		if !bytes.Equal(before, readFile(t, path)) {
+			t.Fatalf("%s old: the refused write changed the roster", name)
+		}
+	}
+	if err := ReplaceSSHAuth(path, "qa-pve-01", "", w, pw); err == nil {
+		t.Fatal("an empty expected fingerprint was accepted")
+	}
+	if err := ReplaceSSHAuth(path, "qa-pve-01", "SHA256:abc", w, pw); err != nil {
+		t.Fatalf("the right old: %v", err)
+	}
+	r, _ := Load(path)
+	got := r.Find("qa-pve-01")
+	if got.SSH.HostKeyFingerprint != "SHA256:new" || got.SSH.HostKeySource != "ssh-verified" || got.SSH.PublicKey != "ssh-ed25519 NEW x" {
+		t.Fatalf("[targets.ssh] = %+v", got.SSH)
+	}
+	if got.TLS == nil || tlspin.Pin(got.TLS.SPKISHA256) != testPin(1) || got.Token == nil {
+		t.Fatal("replacing the SSH auth changed the TLS pin or the token")
+	}
+	if secondTargetBlock(t, before) != secondTargetBlock(t, readFile(t, path)) {
+		t.Fatal("the other target changed")
+	}
+}
+
+func TestHostKeySource_ValidatedAndKept(t *testing.T) {
+	withTestWorkFactor(t)
+	head := "[[targets]]\nid = \"a\"\nhost = \"h\"\nnode = \"n\"\n[targets.ssh]\nuser = \"root\"\npublic_key = \"k\"\nhost_key_fingerprint = \"SHA256:abc\"\nprivate_key_enc = '''\n" + sampleArmored(t, "key", "p") + "'''\n"
+	for src, ok := range map[string]bool{"": true, "ssh-verified": true, "ssh-tofu": true, "ssh-stored": false, "expect": false, "tofu": false} {
+		doc := head
+		if src != "" {
+			doc += "host_key_source = \"" + src + "\"\n"
+		}
+		_, err := Decode([]byte(doc))
+		if ok != (err == nil) {
+			t.Errorf("host_key_source %q: err = %v, want accepted %v", src, err, ok)
+		}
+	}
+	if err := WriteSSHAuth(writeTempRoster(t, fixtureTwoTargets), "qa-pve-01", SSHWrite{User: "root", HostKeyFingerprint: "SHA256:x", PrivateKeyPlaintext: []byte("k"), HostKeySource: "expect"}, NewPassphrase("p")); !errors.Is(err, ErrUnknownHostKeySource) {
+		t.Errorf("WriteSSHAuth with source expect: err = %v", err)
+	}
+	// Every other writer keeps it.
+	path := writeTempRoster(t, fixturePinned(t, "p"))
+	if err := ReplaceSSHAuth(path, "qa-pve-01", "SHA256:abc", SSHWrite{User: "root", HostKeyFingerprint: "SHA256:new", PrivateKeyPlaintext: []byte("k"), HostKeySource: "ssh-tofu"}, NewPassphrase("p")); err != nil {
+		t.Fatal(err)
+	}
+	for name, write := range map[string]func() error{
+		"WriteTokenAuth": func() error {
+			return WriteTokenAuth(path, "qa-pve-01", TokenWrite{TokenID: "a@pam!b", SecretPlaintext: []byte("s")}, NewPassphrase("p"))
+		},
+		"WriteTLSPin": func() error {
+			return WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(9), tlspin.SourceExpect, NewPassphrase("p"))
+		},
+		"UpdateTargetFields": func() error { return UpdateTargetFields(path, "qa-pve-01", TargetMeta{Host: "h9", Node: "qa-pve-01"}) },
+		"ClearTokenAuth":     func() error { return ClearTokenAuth(path, "qa-pve-01") },
+	} {
+		if err := write(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		r, _ := Load(path)
+		if got := r.Find("qa-pve-01").SSH.HostKeySource; got != "ssh-tofu" {
+			t.Fatalf("after %s host_key_source is %q", name, got)
+		}
+	}
+}

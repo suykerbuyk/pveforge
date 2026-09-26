@@ -18,8 +18,11 @@ func TestInstallPubkeyViaPassword_Pinned(t *testing.T) {
 	fs.Start()
 	ctx := context.Background()
 	wrong := "SHA256:" + strings.Repeat("A", 43)
-	if _, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey", wrong); err == nil || !strings.Contains(err.Error(), "host key mismatch") {
-		t.Fatalf("a wrong pin: %v; want a host key mismatch", err)
+	if _, err := InstallPubkeyViaPassword(ctx, fs.Addr(), "root", "correct-horse", "ssh-ed25519 AAAAtest testkey", wrong); err == nil || !strings.Contains(err.Error(), "host key mismatch") ||
+		!strings.Contains(err.Error(), "expected "+wrong) || strings.Contains(err.Error(), "the roster pins") {
+		// The install's pin is the operator's own value: an "expected" key,
+		// never called the roster's (the T2 review).
+		t.Fatalf("a wrong pin: %v; want a host key mismatch against the expected key", err)
 	}
 	if n := fs.PasswordAttempts(); n != 0 {
 		t.Fatalf("the password was sent %d times to a host whose key did not match", n)

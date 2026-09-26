@@ -36,6 +36,7 @@ func newBootstrapCmd() *cobra.Command {
 		grantSpecs                               []string
 		apiPort, sshPort                         int
 		insecureTLS, noSSHKey, sshTOFU           bool
+		reprovisioned                            bool
 		capturePort                              int
 		resolveFormat                            func() (kvjson.Format, error)
 	)
@@ -94,28 +95,37 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// --reprovisioned's refusals before any password prompt: a run
+			// that cannot reprovision must not ask for a secret first.
+			if err := bootstrap.CheckReprovision(bootstrap.Options{
+				TargetID: args[0], RosterPath: rosterPath, Reprovisioned: reprovisioned,
+				SSHTOFU: sshTOFU, HostKeyFingerprint: hostKeyFP,
+			}); err != nil {
+				return fmt.Errorf("bootstrap %s: %w", args[0], err)
+			}
 			pvePassword, err := resolvePVEPassword(cmd.Context())
 			if err != nil {
 				return err
 			}
 
 			opts := bootstrap.Options{
-				TargetID:    args[0],
-				Host:        host,
-				Node:        node,
-				APIPort:     apiPort,
-				InsecureTLS: insecureTLS,
-				SSHPort:     sshPort,
-				PVEUsername: pveUser,
-				PVEPassword: pvePassword,
-				TokenOwner:  tokenOwner,
-				NoSSHKey:    noSSHKey,
-				SSHTOFU:     sshTOFU,
-				CapturePort: capturePort,
-				TokenID:     tokenID,
-				Grants:      grants,
-				RosterPath:  rosterPath,
-				Passphrase:  passphrase,
+				TargetID:      args[0],
+				Host:          host,
+				Node:          node,
+				APIPort:       apiPort,
+				InsecureTLS:   insecureTLS,
+				SSHPort:       sshPort,
+				PVEUsername:   pveUser,
+				PVEPassword:   pvePassword,
+				TokenOwner:    tokenOwner,
+				NoSSHKey:      noSSHKey,
+				SSHTOFU:       sshTOFU,
+				Reprovisioned: reprovisioned,
+				CapturePort:   capturePort,
+				TokenID:       tokenID,
+				Grants:        grants,
+				RosterPath:    rosterPath,
+				Passphrase:    passphrase,
 			}
 			opts.HostKeyFingerprint = hostKeyFP
 
@@ -134,6 +144,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with: the SSH LOGIN (must be an @pam user); the token's owner is --token-owner. In keyless mode this login's password is used on every run")
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, "authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster. The host key is trusted on first use on EVERY such run, and the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair")
 	cmd.Flags().StringVar(&hostKeyFP, "host-key-fingerprint", "", "the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: the password connection (the key install's, or --no-ssh-key's) must present that key, checked before the password is sent, instead of trusting the host key on first use. For a target that already holds a pinned key, a different value is refused before any connection. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves.")
+	cmd.Flags().BoolVar(&reprovisioned, "reprovisioned", false, "the node was rebuilt: replace its stored SSH host key pin, the keypair installed on it, and its TLS pin, together. Needs --host-key-fingerprint with the NEW key, read on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub), never the key a failing connection presented. Every run still needs --grant (the roster stores none), --no-ssh-key for a keyless target, --capture-port if one was used, and the PVE password. Where the stored pins already match the node it runs as a plain bootstrap, so repeating it is safe. A non-root token owner, its ACLs, pools and roles do not survive a rebuild: recreate them first")
 	cmd.Flags().BoolVar(&sshTOFU, "ssh-tofu", false, "accept trust on first use of the SSH host key for a run whose password session captures an insecure_tls target's TLS pin (a first run, or --no-ssh-key); without it such a run needs --host-key-fingerprint. The pin is recorded with tls_pin_source ssh-tofu, only as good as that first connection")
 	cmd.Flags().IntVar(&capturePort, "capture-port", 0, "pveproxy's port ON THE NODE, where an insecure_tls target's TLS key is captured over SSH (default 8006); give it when --api-port reaches the node through a forward. It is not stored: repeat it on a later run that captures again")
 	cmd.Flags().StringVar(&tokenOwner, "token-owner", "", "PVE principal that will own the token, as name@realm (default: --pve-user). It is not the SSH login and needs no SSH account. A non-root owner must itself hold the whole role at each granted path, or bootstrap refuses before touching anything. Changing it deliberately leaves the previous token live on PVE, held by nobody (orphaned_token), never revoked; omitting it when the roster holds another owner's token is refused")
@@ -208,6 +219,14 @@ func finishBootstrap(out, errOut io.Writer, f kvjson.Format, target string, res 
 	return runErr
 }
 
+func reprovisionedView(res *bootstrap.Result) *bool {
+	if !res.ReprovisionAsked {
+		return nil
+	}
+	v := res.Reprovisioned
+	return &v
+}
+
 // bootstrapView is what `pveforge bootstrap` prints: a dedicated view, never
 // bootstrap.Result itself (which carries an error value and Go field names).
 type bootstrapView struct {
@@ -216,16 +235,23 @@ type bootstrapView struct {
 	HostKeyFingerprint string `json:"host_key_fingerprint,omitempty"`
 	// TLSPin and TLSPinSource are the target's TLS pin after the run and how
 	// this run's capture was vouched for; absent when no pin was captured.
-	TLSPin         string `json:"tls_spki_sha256,omitempty"`
-	TLSPinSource   string `json:"tls_pin_source,omitempty"`
-	TokenOutcome   string `json:"token_outcome"`
-	Validation     string `json:"validation"`
-	ReplacedReason string `json:"replaced_reason,omitempty"`
-	OrphanedToken  string `json:"orphaned_token,omitempty"`
-	LeftoverToken  string `json:"leftover_token,omitempty"`
-	LeftoverState  string `json:"leftover_state,omitempty"`
-	RosterToken    string `json:"roster_token,omitempty"`
-	PriorToken     string `json:"prior_token,omitempty"`
+	TLSPin       string `json:"tls_spki_sha256,omitempty"`
+	TLSPinSource string `json:"tls_pin_source,omitempty"`
+	// Reprovisioned and the previous pins it replaced (each only when it
+	// changed); absent for an ordinary run.
+	// Reprovisioned is set only when --reprovisioned was given, so a plain
+	// rerun under it reads reprovisioned=false explicitly.
+	Reprovisioned              *bool  `json:"reprovisioned,omitempty"`
+	PreviousHostKeyFingerprint string `json:"previous_host_key_fingerprint,omitempty"`
+	PreviousTLSPin             string `json:"previous_tls_spki_sha256,omitempty"`
+	TokenOutcome               string `json:"token_outcome"`
+	Validation                 string `json:"validation"`
+	ReplacedReason             string `json:"replaced_reason,omitempty"`
+	OrphanedToken              string `json:"orphaned_token,omitempty"`
+	LeftoverToken              string `json:"leftover_token,omitempty"`
+	LeftoverState              string `json:"leftover_state,omitempty"`
+	RosterToken                string `json:"roster_token,omitempty"`
+	PriorToken                 string `json:"prior_token,omitempty"`
 	// Grants is the scope the surviving token holds (bootstrap.Result.Grants);
 	// absent when no token survives the run.
 	Grants []grantView `json:"grants,omitempty"`
@@ -245,19 +271,22 @@ type grantView struct {
 // a reason, can never forge a second line.
 func renderBootstrapResult(out, errOut io.Writer, f kvjson.Format, target string, res *bootstrap.Result) error {
 	view := bootstrapView{
-		Target:             target,
-		TokenID:            res.TokenID,
-		HostKeyFingerprint: res.HostKeyFingerprint,
-		TLSPin:             string(res.TLSPin),
-		TLSPinSource:       string(res.TLSPinSource),
-		TokenOutcome:       res.TokenOutcome,
-		Validation:         res.Validation,
-		ReplacedReason:     res.ReplacedReason,
-		OrphanedToken:      res.OrphanedToken,
-		LeftoverToken:      res.LeftoverToken,
-		LeftoverState:      res.LeftoverState,
-		RosterToken:        res.RosterToken,
-		PriorToken:         res.PriorToken,
+		Target:                     target,
+		TokenID:                    res.TokenID,
+		HostKeyFingerprint:         res.HostKeyFingerprint,
+		TLSPin:                     string(res.TLSPin),
+		TLSPinSource:               string(res.TLSPinSource),
+		Reprovisioned:              reprovisionedView(res),
+		PreviousHostKeyFingerprint: res.PreviousHostKeyFingerprint,
+		PreviousTLSPin:             string(res.PreviousTLSPin),
+		TokenOutcome:               res.TokenOutcome,
+		Validation:                 res.Validation,
+		ReplacedReason:             res.ReplacedReason,
+		OrphanedToken:              res.OrphanedToken,
+		LeftoverToken:              res.LeftoverToken,
+		LeftoverState:              res.LeftoverState,
+		RosterToken:                res.RosterToken,
+		PriorToken:                 res.PriorToken,
 	}
 	for _, g := range res.Grants {
 		view.Grants = append(view.Grants, grantView{Path: g.Path, Role: g.Role, Propagate: g.Propagate, Privs: g.Privs})
@@ -267,6 +296,9 @@ func renderBootstrapResult(out, errOut io.Writer, f kvjson.Format, target string
 	}
 	q := kvjson.QuoteValue
 	id := q(res.TokenID)
+	if res.ReprovisionAsked && !res.Reprovisioned {
+		fmt.Fprintf(errOut, "note: the stored pins already match this node: ran as a normal bootstrap\n")
+	}
 	switch res.TokenOutcome {
 	case bootstrap.OutcomeReplaced:
 		if res.PriorRevoked {

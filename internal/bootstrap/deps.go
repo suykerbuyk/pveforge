@@ -60,7 +60,7 @@ func (realSSHTransport) DialWithPassword(ctx context.Context, addr, user, passwo
 	cb := sshexec.CaptureHostKeyCallback(&captured)
 	if pin != "" {
 		var err error
-		if cb, err = sshexec.PinnedHostKeyCallback(pin); err != nil {
+		if cb, err = sshexec.ExpectedHostKeyCallback(pin); err != nil {
 			return nil, "", fmt.Errorf("dial with password: %w", err)
 		}
 	}
@@ -104,8 +104,8 @@ func NewAPIValidator() APIValidator { return realAPIValidator{} }
 
 type realAPIValidator struct{}
 
-func (realAPIValidator) ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
-	return pve.ServedPin(ctx, host, port)
+func (realAPIValidator) ServedPin(ctx context.Context, host string, port int, verifyChain bool) (tlspin.Pin, *x509.Certificate, error) {
+	return pve.ServedPin(ctx, host, port, verifyChain)
 }
 
 func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, want []Grant) error {

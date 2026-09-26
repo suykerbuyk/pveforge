@@ -114,6 +114,9 @@ never listed. Nothing is contacted and nothing is written.`,
 				case t.SSH != nil:
 					status = "ssh configured"
 				}
+				if t.SSH != nil && t.SSH.HostKeySource != "" {
+					status += ", ssh host key " + t.SSH.HostKeySource
+				}
 				if t.TLS != nil {
 					status += ", tls pinned"
 				}
@@ -143,7 +146,7 @@ func requireTLSPinsIn(path string, r *roster.Roster) error {
 	if len(unpinned) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%s: %d insecure_tls target(s) hold no [targets.tls] pin: %s", path, len(unpinned), strings.Join(unpinned, ", "))
+	return fmt.Errorf("%s: %d insecure_tls target(s) hold no [targets.tls] pin: %s; pin each with pveforge roster pin-tls <target> (over its stored SSH pin, or --expect for a target without SSH auth)", path, len(unpinned), strings.Join(unpinned, ", "))
 }
 
 // resolveRosterPath resolves the roster file path shared by every roster
