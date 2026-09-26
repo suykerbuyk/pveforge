@@ -16,10 +16,11 @@
 #              record what the storage does — PVE refuses that on zfspool, a
 #              named storage property, not a failure — then cascade (delete s2,
 #              roll back to s1), delete both snapshots, destroy 690, prove it
-#              gone (lib's harness_vm_gone: /cluster/nextid answers 690 and
-#              the pool no longer lists it; PVE answers a pool token 403, never
-#              "does not exist", for a VM outside the pool), and poll until the
-#              storage shows nothing left.
+#              gone (lib's harness_vm_gone: its destroy task ended exactly
+#              OK, /cluster/nextid answers 690, and the pool no longer lists
+#              it; PVE answers a pool token 403, never "does not exist", for a
+#              VM outside the pool), and wait for the storage's usage to come
+#              back, which can only detect a leftover (lib).
 #
 # --static-only runs the static layer alone: at reset, 690 is the built
 # pvh-n1, so no VM may be created.
@@ -131,12 +132,9 @@ jqe "$status" '.content | split(",") | any(. == "images")' || refuse_storage "it
 stype=$("$HARNESS_TOOL_JQ" -r .type <<<"$status") || _harness_die 1 "storage $S: cannot read its type"
 case "$stype" in
 zfspool) ;;
-# The pool token cannot see a destroyed VM's volumes, so the harness proves
-# them gone by the storage's usage (lib), which needs thick accounting: a
-# zvol's refreservation shows in used the moment it is created. A thin LV's
-# used barely moves at create, so on lvmthin that proof would be vacuous.
-lvmthin) refuse_storage "type lvmthin cannot hold the harness: the pool token's proof that a destroyed VM's volumes are gone needs zfspool's thick accounting (a thin LV's used barely moves at create)" ;;
-*) refuse_storage "type $stype cannot hold the harness: it needs zfspool (snapshots of raw disks, and thick accounting for the pool token's gone-proof)" ;;
+# The harness is proven on zfspool only; lvmthin support is a follow-up.
+lvmthin) refuse_storage "type lvmthin is not supported: the harness is proven on zfspool only (lvmthin support is a follow-up task)" ;;
+*) refuse_storage "type $stype cannot hold the harness: it needs zfspool (snapshots of raw disks)" ;;
 esac
 jqe "$status" --argjson min "$min_free_gib" '.avail >= $min * 1073741824' ||
 	refuse_storage "$("$HARNESS_TOOL_JQ" -r '.avail / 1073741824 | floor' <<<"$status") GiB free, below HARNESS_PROBE_MIN_FREE_GIB=$min_free_gib"
@@ -158,7 +156,7 @@ if jqe "$pool" --argjson v "$VMID" 'any(.[0].members[]; .vmid == $v)'; then
 fi
 # A VMID held outside the pool, on any node, is invisible to the pool token
 # but still refuses the create: the cluster must hold no VM $VMID (lib).
-harness_vmid_free "$VMID" 2>>"$EVID/nextid.stderr" || refuse_storage "VMID $VMID is not free in the cluster: $HARNESS_NOT_FREE"
+harness_vmid_free "$VMID" "$EVID/nextid.log" 2>>"$EVID/nextid.stderr" || refuse_storage "VMID $VMID is not free in the cluster: $HARNESS_NOT_FREE"
 content=$(harness_get "$CONTENT_PATH" "vmid=$VMID")
 evidence content-before.json "$content"
 jqe "$content" 'type == "array"' || _harness_die 1 "storage $S: the content answer has an unexpected shape"
@@ -170,6 +168,9 @@ harness_storage_baseline "$status" || refuse_storage "$HARNESS_NOT_FREE"
 
 gone=0
 done_ok=0
+# The main path's destroy answer: cleanup proves 690 gone by that task when a
+# re-destroy has nothing to say (690 already left the pool).
+destroy_ans=""
 # cleanup runs on every exit: on success it does nothing; otherwise it undoes
 # what this run created, in order, and reports what is left. Each step runs in
 # a subshell, so one failure does not stop the report.
@@ -209,23 +210,29 @@ cleanup() {
 		for n in "${names[@]}"; do
 			(harness_vm_delete "$VMID" "snapshot/$n") >>"$log" 2>&1 || echo "cleanup: delete snapshot $n failed" >>"$log"
 		done
-		(harness_vm_destroy "$VMID" purge=1) >>"$log" 2>&1 || echo "cleanup: destroy failed" >>"$log"
-		if ! harness_vm_gone "$VMID" 2>>"$log"; then
+		local ans=""
+		ans=$( (harness_vm_destroy "$VMID") 2>>"$log") || echo "cleanup: destroy failed" >>"$log"
+		printf 'destroy answered: %s\n' "$ans" >>"$log" 2>/dev/null
+		# A re-destroy lib refused (690 already left the pool) answers
+		# nothing: the main path's own destroy task is then the one to judge,
+		# and its real outcome (WARNINGS, say) is what the report names.
+		[ -n "$ans" ] || ans=$destroy_ans
+		if ! harness_vm_gone "$VMID" "$ans" "$log" 2>>"$log"; then
 			report_leftover "VM $VMID is not proven gone after cleanup: $HARNESS_NOT_FREE"
 			exit "$rc"
 		fi
 	fi
-	# ZFS frees a destroyed VM's volumes asynchronously: lib's bounded poll
-	# of the storage's usage before anything is called left. 690 proven gone
-	# means the probe's own poll already waited its full bound: one read, no
-	# second wait.
+	# ZFS frees a destroyed VM's volumes asynchronously: lib's bounded wait,
+	# which can only DETECT a leftover (the destroy task above is the proof).
+	# 690 proven gone means the probe's own wait already ran its full bound:
+	# one read, no second wait.
 	local secs=180
 	[ "$gone" = 0 ] || secs=0
-	if harness_storage_recovered "$secs" "$log" "$VMID" 2>>"$log"; then
-		note CLEANUP "VM $VMID destroyed; storage $S lists nothing of it"
-		say "probe: cleanup: VM $VMID destroyed; storage $S lists nothing of it"
+	if harness_storage_leftover "$secs" "$log" "$VMID" 2>>"$log"; then
+		report_leftover "VM $VMID is destroyed, but the storage shows a leftover: $HARNESS_NOT_FREE"
 	else
-		report_leftover "VM $VMID is destroyed, but its volumes are not proven gone: $HARNESS_NOT_FREE"
+		note CLEANUP "VM $VMID destroyed: its destroy task ended OK"
+		say "probe: cleanup: VM $VMID destroyed: its destroy task ended OK"
 	fi
 	exit "$rc"
 }
@@ -263,9 +270,18 @@ trap 'exit 129' HUP
 trap 'exit 141' PIPE
 
 harness_vm_create "$VMID" "{\"scsi0\":\"$S:1\",\"name\":\"pveforge-probe\",\"memory\":\"512\",\"cores\":\"1\"}" >"$EVID/create.out"
-# The storage must account the 1 GiB disk just made, or its usage could never
-# prove that disk gone (the live assumption lib's usage proof rests on).
-harness_storage_accounts "$GIB" 2>>"$EVID/accounts.stderr" || fail "$HARNESS_NOT_FREE"
+# How the storage accounts the 1 GiB disk just made, as evidence only: thick
+# (a zvol's refreservation, the whole disk in `used` at once) or thin
+# (pveforge-harness is 'sparse 1': a few KiB). The destroy task, not the usage,
+# proves the disk gone later.
+if used_after=$(harness_storage_used 2>>"$EVID/accounts.stderr"); then
+	delta=$((used_after - HARNESS_USED_BASE))
+	kind=thin
+	[ "$delta" -lt $((GIB - HARNESS_USED_SLACK)) ] || kind=thick
+	evidence accounts.txt "baseline $HARNESS_USED_BASE after-create $used_after delta $delta: $kind (evidence only)"
+else
+	evidence accounts.txt "baseline $HARNESS_USED_BASE after-create unreadable (evidence only)"
+fi
 harness_vm_post "$VMID" snapshot snapname=s1 vmstate=0 >"$EVID/snapshot-s1.out"
 harness_vm_post "$VMID" snapshot snapname=s2 vmstate=0 >"$EVID/snapshot-s2.out"
 
@@ -296,18 +312,22 @@ say "probe: storage $S ($stype): $rule"
 harness_vm_delete "$VMID" snapshot/s2 >"$EVID/delete-s2.out"
 harness_vm_post "$VMID" snapshot/s1/rollback >"$EVID/rollback-s1.out"
 harness_vm_delete "$VMID" snapshot/s1 >"$EVID/delete-s1.out"
-harness_vm_destroy "$VMID" purge=1 >"$EVID/destroy.out"
+destroy_ans=$(harness_vm_destroy "$VMID")
+evidence destroy.out "$destroy_ans"
 
-# Prove gone (lib): the VMID is free in the whole cluster, and the pool no
-# longer lists it. The reads' own errors, if any, are in gone.stderr.
+# Prove gone (lib): the destroy task ended exactly OK, the VMID is free in the
+# whole cluster, and the pool no longer lists it. Every answer read is in
+# gone.log; the reads' own errors, if any, in gone.stderr.
 evidence gone.stderr ""
-harness_vm_gone "$VMID" 2>>"$EVID/gone.stderr" || fail "VM $VMID is not proven gone after the destroy: $HARNESS_NOT_FREE; see gone.stderr"
+harness_vm_gone "$VMID" "$destroy_ans" "$EVID/gone.log" 2>>"$EVID/gone.stderr" || fail "VM $VMID is not proven gone after the destroy: $HARNESS_NOT_FREE; see gone.log"
 gone=1
 
-# ZFS frees space asynchronously: lib's poll, every 5 s for at most 180 s by
-# the clock, until the storage's usage is back within 1 MiB of its baseline
-# and it lists nothing of 690.
-harness_storage_recovered 180 "$EVID/poll.log" "$VMID" 2>>"$EVID/poll.log" || fail "VM $VMID's volumes are not proven gone: $HARNESS_NOT_FREE; see poll.log"
+# ZFS frees space asynchronously: lib's wait, every 5 s for at most 180 s by
+# the clock, which can only DETECT a leftover: a volume still listed, or the
+# usage still above its baseline at the end.
+if harness_storage_leftover 180 "$EVID/poll.log" "$VMID" 2>>"$EVID/poll.log"; then
+	fail "VM $VMID is destroyed, but the storage shows a leftover: $HARNESS_NOT_FREE; see poll.log"
+fi
 evidence storage-status-after.json "$HARNESS_STORAGE_STATUS"
 
 # The rule, for the reset: atomically, and only now, after a complete probe.

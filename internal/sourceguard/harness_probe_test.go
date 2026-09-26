@@ -34,7 +34,9 @@ const (
 	pSnapS2   = "post /nodes/qa-pve-02/qemu/690/snapshot snapname=s2 vmstate=0"
 	pDelS2    = "delete /nodes/qa-pve-02/qemu/690/snapshot/s2"
 	pDelS1    = "delete /nodes/qa-pve-02/qemu/690/snapshot/s1"
-	pDestroy  = "delete /nodes/qa-pve-02/qemu/690 purge=1"
+	pDestroy  = "delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1"
+	upid690   = "UPID:qa-pve-02:000107D0:0FA3B38F:6AB7381B:qmdestroy:690:pveforge-harness@pve!build:"
+	pTask     = "get /nodes/qa-pve-02/tasks/" + upid690 + "/status"
 	pCreate   = "vm create 690"
 
 	gib600      = int64(600) << 30
@@ -44,6 +46,11 @@ const (
 	poolWith690 = `[{"poolid":"pveforge-harness","comment":"","members":[{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-02"}]}]`
 	oneVolume   = `[{"volid":"pveforge-harness:vm-690-disk-0","vmid":690,"size":1073741824}]`
 )
+
+// taskStatus is PVE's status of a destroy task, exitstatus as given.
+func taskStatus(upid, node, typ, id, status, exit string) string {
+	return fmt.Sprintf(`{"upid":%q,"node":%q,"pid":67536,"pstart":262386575,"starttime":1790000000,"type":%q,"id":%q,"user":"pveforge-harness@pve","tokenid":"build","status":%q,"exitstatus":%q}`, upid, node, typ, id, status, exit)
+}
 
 func storageStatus(typ string, avail int64, extra string) string {
 	// A quota'd dataset, as pveforge-harness is: used + avail = total.
@@ -83,6 +90,9 @@ type probeSpec struct {
 	// keepInPool: VMIDs the pool still lists after their destroy (the fake
 	// drops every other destroyed VM from /pools, as PVE does).
 	keepInPool []string
+	// destroyLands: VMIDs whose destroy takes effect even when the call
+	// exits non-zero (a pveforge wait that failed while PVE's task finished).
+	destroyLands []string
 	// out is where stdout and stderr go: "" (captured), "pipe" (one pipe,
 	// as "2>&1 | head" gives; the test can close its reading end) or "pty"
 	// (a terminal; the test can hang it up).
@@ -109,6 +119,8 @@ func zfsWorld() probeSpec {
 			pConf:    `{"cores":"1","tags":"pveforge-harness"}`,
 			pSnaps:   `[{"name":"current"}]`,
 			pNextID:  `"690"`,
+			pDestroy: `"` + upid690 + `"`,
+			pTask:    taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK"),
 		},
 		gone: map[string]string{},
 		seq: map[string]map[int]string{
@@ -249,6 +261,14 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(fakeDir, "keep-in-pool", v), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range s.destroyLands {
+		if err := os.MkdirAll(filepath.Join(fakeDir, "destroy-lands"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fakeDir, "destroy-lands", v), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -420,7 +440,7 @@ const (
 	rollback   = "api post /nodes/qa-pve-02/qemu/690/snapshot/s1/rollback qa-pve-02-harness --roster R -o json"
 	delS2      = "api delete /nodes/qa-pve-02/qemu/690/snapshot/s2 qa-pve-02-harness --roster R -o json"
 	delS1      = "api delete /nodes/qa-pve-02/qemu/690/snapshot/s1 qa-pve-02-harness --roster R -o json"
-	destroy    = "api delete /nodes/qa-pve-02/qemu/690 qa-pve-02-harness --roster R -o json --data purge=1"
+	destroy    = "api delete /nodes/qa-pve-02/qemu/690 qa-pve-02-harness --roster R -o json --data purge=1 --data destroy-unreferenced-disks=1"
 )
 
 var fullWrites = []string{createCall, tagCall, snapS1, snapS2, rollback, delS2, rollback, delS1, destroy}
@@ -455,6 +475,19 @@ func TestProbe_ZFSPool(t *testing.T) {
 	}
 	for _, f := range []string{"storage-status-before.json", "content-before.json", "storage-type", "rollback-rule", "gone.stderr", "poll.log", "storage-status-after.json", "SUMMARY"} {
 		r.evidence(t, f)
+	}
+	// The answers the proof decided on, recorded as read.
+	gone := r.evidence(t, "gone.log")
+	for _, want := range []string{"task " + upid690 + ": " + taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK"), `nextid vmid=690: "690"`, "pool pveforge-harness: " + emptyPool} {
+		if !strings.Contains(gone, want) {
+			t.Errorf("gone.log lacks %q:\n%s", want, gone)
+		}
+	}
+	if got := r.evidence(t, "nextid.log"); got != `nextid vmid=690: "690"`+"\n" {
+		t.Errorf("nextid.log %q", got)
+	}
+	if got := r.evidence(t, "accounts.txt"); !strings.Contains(got, ": thick (evidence only)") {
+		t.Errorf("accounts.txt %q", got)
 	}
 	fi, err := os.Stat(r.evidenceDir(t))
 	if err != nil || fi.Mode().Perm() != 0o700 {
@@ -507,7 +540,7 @@ func TestProbe_StaticRefusals(t *testing.T) {
 		"no images":             {strings.Replace(storageStatus("zfspool", gib600, ""), `"images,rootdir"`, `"rootdir,iso"`, 1), nil, 3, "does not include images"},
 		"images only as prefix": {strings.Replace(storageStatus("zfspool", gib600, ""), `"images,rootdir"`, `"imagesx"`, 1), nil, 3, "does not include images"},
 		"a dir storage":         {storageStatus("dir", gib600, ""), nil, 3, "type dir cannot hold the harness: it needs zfspool"},
-		"an lvmthin storage":    {storageStatus("lvmthin", gib600, ""), nil, 3, "type lvmthin cannot hold the harness: the pool token's proof that a destroyed VM's volumes are gone needs zfspool's thick accounting"},
+		"an lvmthin storage":    {storageStatus("lvmthin", gib600, ""), nil, 3, "type lvmthin is not supported: the harness is proven on zfspool only"},
 		"an nfs storage":        {storageStatus("nfs", gib600, ""), nil, 3, "type nfs cannot hold the harness"},
 		"too little space":      {storageStatus("zfspool", 519<<30, ""), nil, 3, "519 GiB free, below HARNESS_PROBE_MIN_FREE_GIB=520"},
 		"a raised threshold":    {storageStatus("zfspool", gib600, ""), map[string]string{"HARNESS_PROBE_MIN_FREE_GIB": "601"}, 3, "below HARNESS_PROBE_MIN_FREE_GIB=601"},
@@ -722,20 +755,23 @@ func TestProbe_CreateFailedButVMAppeared(t *testing.T) {
 	}
 }
 
-// P11: the poll is bounded by the clock, 180 s at 5 s, then a named failure:
-// the usage must come back to within 1 MiB of its baseline, not merely fall,
-// and the storage must first have shown the disk in its usage at all.
+// P11: after the destroy is proven, lib's wait on the storage (bounded by
+// the clock, 180 s at 5 s) can only DETECT a leftover: a volume still listed,
+// or the usage still above its baseline when the wait ends. A status it
+// cannot read detects nothing, and the probe completes on the task's proof.
+// How the storage accounted the disk (thick or thin) is evidence, never a
+// gate.
 func TestProbe_PollIsBounded(t *testing.T) {
-	const notGone = "VM 690's volumes are not proven gone: "
+	const leftover = "VM 690 is destroyed, but the storage shows a leftover: "
 	s := zfsWorld()
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
 	r := runProbe(t, s)
-	if r.code != 4 || !strings.Contains(r.stderr, notGone+"storage pveforge-harness still lists volumes of VM(s) 690, after 180s") || r.sleeps != 36 {
+	if r.code != 4 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (after 180s)") || r.sleeps != 36 {
 		t.Errorf("volumes never go: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
 	if _, ok := r.rule(); ok {
-		t.Error("a probe whose poll timed out wrote the rule")
+		t.Error("a probe that detected a leftover wrote the rule")
 	}
 	// The bound is the clock's, not a count of sleeps: a slow sleep ends it
 	// sooner.
@@ -743,17 +779,17 @@ func TestProbe_PollIsBounded(t *testing.T) {
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
 	s.stubs = map[string]string{"sleep": "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nc=0\n[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\nprintf '%s' $((c + 60)) >\"$FAKE_PVEFORGE_DIR/clock\"\n"}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "after 180s") || r.sleeps != 3 {
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "(after 180s)") || r.sleeps != 3 {
 		t.Errorf("a slow clock: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
-	// A hidden leftover: nothing listed, but the usage 2 MiB high.
+	// A hidden leftover: nothing listed, but the usage 2 MiB high at the end.
 	s = zfsWorld()
 	delete(s.seq, pContent)
 	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(5<<30), "")}
 	for n := 3; n < 60; n++ {
 		s.seq[pStatus][n] = storageStatus("zfspool", gib600-(2<<20), "")
 	}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, notGone+"storage pveforge-harness's used is 2097152, not back within 1 MiB of its baseline 0, after 180s") {
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness's used is 2097152, not back within 1 MiB of its baseline 0 (after 180s)") {
 		t.Errorf("usage 2 MiB high: exit %d\n%s", r.code, r.stderr)
 	}
 	s = zfsWorld()
@@ -762,7 +798,8 @@ func TestProbe_PollIsBounded(t *testing.T) {
 	if r := runProbe(t, s); r.code != 0 || r.sleeps != 0 {
 		t.Errorf("usage exactly 1 MiB high is within the slack: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
-	// A status that cannot be read, or has no usable used, is never "back".
+	// A status the wait cannot read, or with no usable used, detects
+	// nothing: the task's proof stands, and the log says so.
 	for name, edit := range map[string]func(s *probeSpec){
 		"unreadable": func(s *probeSpec) {
 			s.rc[pStatus] = map[int]int{}
@@ -784,33 +821,32 @@ func TestProbe_PollIsBounded(t *testing.T) {
 		s = zfsWorld()
 		delete(s.seq, pContent)
 		edit(&s)
-		if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, notGone+"storage pveforge-harness's status could not be read, after 180s") {
-			t.Errorf("%s: exit %d\n%s", name, r.code, r.stderr)
+		r := runProbe(t, s)
+		if r.code != 0 || r.sleeps != 36 || !strings.Contains(r.evidence(t, "poll.log"), "the status could not be read (after 180s): nothing detected, nothing proven") {
+			t.Errorf("%s: exit %d sleeps %d\n%s", name, r.code, r.sleeps, r.stderr)
 		}
 	}
-	// A non-zero baseline (the empty dataset's metadata, up to 1 MiB): both
-	// checks are relative to it. Accounting: 1 GiB less 512 KiB over an
-	// ABSOLUTE zero would pass, but over a 1 MiB baseline it is short.
-	s = zfsWorld()
-	s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20), "")
-	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(1<<30)+(512<<10), "")}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "not at least 1073741824 bytes over its baseline 1048576") {
-		t.Errorf("a short disk over a 1 MiB baseline: exit %d\n%s", r.code, r.stderr)
-	}
-	// Recovery: 1.5 MiB used is back within 1 MiB of a 1 MiB baseline.
-	s = zfsWorld()
-	delete(s.seq, pContent)
-	s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20), "")
-	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(1<<20)-(5<<30), ""), 3: storageStatus("zfspool", gib600-(3<<19), "")}
-	if r := runProbe(t, s); r.code != 0 || r.sleeps != 0 {
-		t.Errorf("recovery over a 1 MiB baseline: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
-	}
-	// A disk the storage does not show in its usage (a sparse zvol, say):
-	// its recovery could prove nothing, so the probe stops before the rule.
-	s = zfsWorld()
-	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(512<<20), "")}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "used is 536870912 after the create, not at least 1073741824 bytes over its baseline 0: it does not account the disk") {
-		t.Errorf("an unaccounted disk: exit %d\n%s", r.code, r.stderr)
+	// Accounting is evidence: thick (the whole disk in used at once), or thin
+	// (pveforge-harness is 'sparse 1': 96544 bytes for the live 1 GiB zvol),
+	// and the probe completes either way.
+	for name, c := range map[string]struct {
+		base, after int64
+		want        string
+	}{
+		"thick":                  {0, 5 << 30, "baseline 0 after-create 5368709120 delta 5368709120: thick (evidence only)"},
+		"thin, as measured live": {165504, 262048, "baseline 165504 after-create 262048 delta 96544: thin (evidence only)"},
+		// 1 GiB less 512 KiB over a 1 MiB baseline is short of thick, though
+		// it would pass over an absolute zero.
+		"short over a 1 MiB baseline": {1 << 20, (1 << 30) - (512 << 10), "baseline 1048576 after-create 1073217536 delta 1072168960: thin (evidence only)"},
+	} {
+		s = zfsWorld()
+		delete(s.seq, pContent)
+		s.resp[pStatus] = storageStatus("zfspool", gib600-c.base, "")
+		s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-c.after, "")}
+		r := runProbe(t, s)
+		if got := r.evidence(t, "accounts.txt"); r.code != 0 || got != c.want+"\n" {
+			t.Errorf("%s: exit %d accounts.txt %q, want %q\n%s", name, r.code, got, c.want, r.stderr)
+		}
 	}
 }
 
@@ -819,6 +855,11 @@ func TestProbe_PollIsBounded(t *testing.T) {
 // its text, is a named failure and no rule is written.
 func TestProbe_VerifyGone(t *testing.T) {
 	const notGone = "VM 690 is not proven gone after the destroy: "
+	const taskNotOK = "the destroy task " + upid690 + " is not a stopped qmdestroy of VM 690 on qa-pve-02 with exitstatus OK"
+	upidFor := func(old, new string) string { return strings.Replace(upid690, old, new, 1) }
+	printed := func(u string) string {
+		return "the destroy of VM 690 printed " + u + ", which is not a qmdestroy task for VM 690 on qa-pve-02"
+	}
 	for name, c := range map[string]struct {
 		edit func(s *probeSpec)
 		want string
@@ -845,6 +886,45 @@ func TestProbe_VerifyGone(t *testing.T) {
 		}, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
 		"another pool's answer": {func(s *probeSpec) { s.gone[pPool] = `[{"poolid":"other","members":[]}]` }, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
 		"an empty answer":       {func(s *probeSpec) { s.gone[pPool] = `[]` }, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
+		// The destroy's own task: exactly this task, stopped, exitstatus OK.
+		"task WARNINGS": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "WARNINGS: 1")
+		}, taskNotOK},
+		"task OK with space": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK ")
+		}, taskNotOK},
+		"task ok lowercase": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "ok")
+		}, taskNotOK},
+		"task running": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "running", "OK")
+		}, taskNotOK},
+		"task no exitstatus": {func(s *probeSpec) {
+			s.resp[pTask] = strings.Replace(taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK"), `,"exitstatus":"OK"`, "", 1)
+		}, taskNotOK},
+		"task unreadable": {func(s *probeSpec) { s.rc[pTask] = map[int]int{0: 1} }, "the status of the destroy task " + upid690 + " could not be read"},
+		"another task's upid": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(strings.Replace(upid690, "6AB7381B", "6AB7381C", 1), "qa-pve-02", "qmdestroy", "690", "stopped", "OK")
+		}, taskNotOK},
+		"another task's type": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmstart", "690", "stopped", "OK")
+		}, taskNotOK},
+		"another task's id": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "691", "stopped", "OK")
+		}, taskNotOK},
+		"another task's node": {func(s *probeSpec) {
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-01", "qmdestroy", "690", "stopped", "OK")
+		}, taskNotOK},
+		"the destroy printed no UPID": {func(s *probeSpec) { s.resp[pDestroy] = `null` }, "the destroy of VM 690 printed no task UPID"},
+		"a UPID for another VM": {func(s *probeSpec) {
+			s.resp[pDestroy] = `"` + strings.Replace(upid690, ":690:", ":691:", 1) + `"`
+		}, printed(upidFor(":690:", ":691:"))},
+		"a UPID of another type": {func(s *probeSpec) {
+			s.resp[pDestroy] = `"` + strings.Replace(upid690, "qmdestroy", "qmstop", 1) + `"`
+		}, printed(upidFor("qmdestroy", "qmstop"))},
+		"a UPID on another node": {func(s *probeSpec) {
+			s.resp[pDestroy] = `"` + strings.Replace(upid690, "qa-pve-02", "qa-pve-01", 1) + `"`
+		}, printed(upidFor("qa-pve-02", "qa-pve-01"))},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := zfsWorld()
@@ -884,9 +964,10 @@ func TestProbe_SignalCleansUp(t *testing.T) {
 }
 
 // P14: after cleanup's destroy the volumes linger (ZFS frees
-// asynchronously): cleanup waits, bounded by the clock, until the storage's
-// usage is back at its baseline and it lists nothing of 690.
+// asynchronously): cleanup waits, bounded by the clock, and names a leftover
+// only when it detects one; the destroy task is the proof.
 func TestProbe_CleanupWaitsForVolumes(t *testing.T) {
+	const leftover = "LEFTOVER: VM 690 is destroyed, but the storage shows a leftover: "
 	dies := func() probeSpec {
 		s := cleanupWorld()
 		s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
@@ -896,7 +977,7 @@ func TestProbe_CleanupWaitsForVolumes(t *testing.T) {
 	s := dies()
 	s.seq[pContent] = map[int]string{2: oneVolume, 3: oneVolume}
 	r := runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "cleanup: VM 690 destroyed") || strings.Contains(r.stderr, "LEFTOVER") || r.sleeps != 2 {
+	if r.code != 5 || !strings.Contains(r.stderr, "cleanup: VM 690 destroyed: its destroy task ended OK") || strings.Contains(r.stderr, "LEFTOVER") || r.sleeps != 2 {
 		t.Errorf("exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
 	// A hidden leftover: the token is not shown a destroyed VM's volume, so
@@ -904,7 +985,7 @@ func TestProbe_CleanupWaitsForVolumes(t *testing.T) {
 	s = dies()
 	s.gone[pStatus] = storageStatus("zfspool", gib600-(1<<30), "")
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is destroyed, but its volumes are not proven gone: storage pveforge-harness's used is 1073741824, not back within 1 MiB of its baseline 0, after 180s") || r.sleeps != 36 {
+	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness's used is 1073741824, not back within 1 MiB of its baseline 0 (after 180s)") || r.sleeps != 36 {
 		t.Errorf("a hidden leftover: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
 	// A listed volume is a leftover even when the usage has come back.
@@ -912,16 +993,16 @@ func TestProbe_CleanupWaitsForVolumes(t *testing.T) {
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is destroyed, but its volumes are not proven gone: storage pveforge-harness still lists volumes of VM(s) 690, after 180s") || r.sleeps != 36 {
+	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (after 180s)") || r.sleeps != 36 {
 		t.Errorf("volumes never go: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
-	// A sleep that fails ends the wait as unproven, never as a shorter one;
-	// cleanup still reports.
+	// A sleep that fails ends the wait there, and what was last seen is
+	// reported; cleanup still reports.
 	s = dies()
 	s.seq[pContent] = map[int]string{2: oneVolume, 3: oneVolume}
 	s.stubs = map[string]string{"sleep": "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nexit 1\n"}
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "still lists volumes of VM(s) 690; then sleep failed") || !strings.Contains(r.stderr, "LEFTOVER") || r.sleeps != 1 {
+	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (sleep failed)") || r.sleeps != 1 {
 		t.Errorf("a failing sleep: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
 }
@@ -1066,7 +1147,7 @@ func TestProbe_UnwritableEvidenceDuringCleanup(t *testing.T) {
 	s.onBlock = lock
 	stillThere(s)
 	r = runProbe(t, s)
-	if r.code != 4 || !strings.Contains(r.stderr, "probe: VM 690 is not proven gone after the destroy") || !strings.Contains(r.stderr, notProven) {
+	if r.code != 4 || !strings.Contains(r.stderr, "probe: VM 690 is not proven gone after the destroy") || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is not proven gone after cleanup: ") {
 		t.Errorf("exit %d\n%s", r.code, r.stderr)
 	}
 	// A refusal into an unwritable evidence directory keeps its status too.
@@ -1167,6 +1248,36 @@ func TestProbe_CleanupGoneNeedsPositiveProof(t *testing.T) {
 				t.Errorf("exit %d\n%s", r.code, r.stderr)
 			}
 		})
+	}
+}
+
+// P22b: a destroy whose pveforge call fails with nothing on stdout (a wait
+// that failed or timed out) is never proven gone, even when nextid and the
+// pool both say gone: only the task shows whether PVE freed the disks.
+func TestProbe_DestroyWithoutAnswerIsNotProven(t *testing.T) {
+	s := zfsWorld()
+	s.rc[pDestroy] = map[int]int{0: 1}
+	s.resp[pDestroy] = ""
+	s.destroyLands = []string{"690"}
+	r := runProbe(t, s)
+	if r.code != 1 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is not proven gone after cleanup: the destroy of VM 690 printed no task UPID") ||
+		strings.Contains(r.stderr, "cleanup: VM 690 destroyed") {
+		t.Errorf("exit %d\n%s", r.code, r.stderr)
+	}
+	if _, ok := r.rule(); ok {
+		t.Error("an unproven destroy wrote the rule")
+	}
+}
+
+// P22c: the main destroy ended in WARNINGS, and cleanup's re-destroy is
+// refused (690 left the pool): the report keeps the real cause, the task.
+func TestProbe_CleanupKeepsTheRealCause(t *testing.T) {
+	s := zfsWorld()
+	s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "WARNINGS: 1")
+	r := runProbe(t, s)
+	want := "LEFTOVER: VM 690 is not proven gone after cleanup: the destroy task " + upid690 + " is not a stopped qmdestroy of VM 690 on qa-pve-02 with exitstatus OK"
+	if r.code != 4 || !strings.Contains(r.stderr, want) || strings.Contains(r.stderr, "printed no task UPID") {
+		t.Errorf("exit %d, want %q\n%s", r.code, want, r.stderr)
 	}
 }
 

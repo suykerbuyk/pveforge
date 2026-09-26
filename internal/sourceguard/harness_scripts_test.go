@@ -457,10 +457,10 @@ func harnessCases() []harnessCase {
 			"harness_vm_post 690 snapshot snapname=s1 vmstate=0\n" +
 			"harness_vm_post 690 snapshot/s1/rollback\n" +
 			"harness_vm_delete 690 snapshot/s1\n" +
-			"harness_vm_destroy 690 purge=1\n" +
+			"harness_vm_destroy 690\n" +
 			"harness_vm_get 690 status/current >/dev/null\n",
 			resp:    map[string]string{"get /nodes/qa-pve-02/qemu/690/status/current": `{"status":"stopped"}`},
-			wantErr: "harness: delete /nodes/qa-pve-02/qemu/690 purge=1",
+			wantErr: "harness: delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1",
 			wantCalls: []string{
 				`vm create qa-pve-02-harness 690 --roster R --json {"cores":"1","scsi0":"pveforge-harness:1","pool":"pveforge-harness"}`,
 				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
@@ -476,7 +476,7 @@ func harnessCases() []harnessCase {
 				"api delete /nodes/qa-pve-02/qemu/690/snapshot/s1 qa-pve-02-harness --roster R -o json",
 				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
 				"api get /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json",
-				"api delete /nodes/qa-pve-02/qemu/690 qa-pve-02-harness --roster R -o json --data purge=1",
+				"api delete /nodes/qa-pve-02/qemu/690 qa-pve-02-harness --roster R -o json --data purge=1 --data destroy-unreferenced-disks=1",
 				"api get /nodes/qa-pve-02/qemu/690/status/current qa-pve-02-harness --roster R -o json",
 			}},
 	}
@@ -629,8 +629,13 @@ func fieldCases() []harnessCase {
 			cs = append(cs, harnessCase{name: "endpoint field allowed: " + c.call, body: stdInit + c.call + "\n", wantCalls: append(append([]string(nil), guardReads...), c.want)})
 		}
 	}
-	cs = append(cs, harnessCase{name: "destroy field refused: skiplock", body: stdInit + create + "harness_vm_destroy 690 skiplock=1\n", wantCode: 2, wantErr: "is not allowed here",
-		wantLast: "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness"})
+	// A destroy takes no fields: lib itself sends purge=1 and
+	// destroy-unreferenced-disks=1, so PVE's worker frees every disk and a
+	// failure shows in its task's exit status.
+	for _, f := range []string{"skiplock=1", "purge=1", "destroy-unreferenced-disks=0"} {
+		cs = append(cs, harnessCase{name: "destroy field refused: " + f, body: stdInit + create + "harness_vm_destroy 690 " + f + "\n", wantCode: 2, wantErr: "harness_vm_destroy takes only a VMID",
+			wantLast: "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness"})
+	}
 	// NEW-1: no control character in any field name or value, a newline least
 	// of all: it would start a second line of disk options.
 	for name, body := range map[string]string{
@@ -689,7 +694,7 @@ func ifNotCases() []harnessCase {
 		{name: "harness_vm_put", pre: stdInit, call: "harness_vm_put 690 config cores=2", rc: map[string]int{"put /nodes/qa-pve-02/qemu/690/config cores=2": 1}, code: 1},
 		{name: "harness_vm_post", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{"post /nodes/qa-pve-02/qemu/690/status/stop": 1}, code: 1},
 		{name: "harness_vm_delete", pre: stdInit, call: "harness_vm_delete 690 snapshot/s1", rc: map[string]int{"delete /nodes/qa-pve-02/qemu/690/snapshot/s1": 1}, code: 1},
-		{name: "harness_vm_destroy", pre: stdInit + created, call: "harness_vm_destroy 690", rc: map[string]int{"delete /nodes/qa-pve-02/qemu/690": 1}, code: 1},
+		{name: "harness_vm_destroy", pre: stdInit + created, call: "harness_vm_destroy 690", rc: map[string]int{"delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1": 1}, code: 1},
 		{name: "harness_vm_create", pre: stdInit, call: `harness_vm_create 690 '{"cores":"1"}'`, rc: map[string]int{"vm create 690": 1}, code: 1},
 		{name: "a guard's pool read", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{keyPool: 1}, code: 1},
 		{name: "a guard's config read", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{keyConf: 1}, code: 1},

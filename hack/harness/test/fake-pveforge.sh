@@ -18,7 +18,9 @@
 # on the fifo $F/block.fifo before answering, so a test can act mid-run.
 # After a VM destroy (`api delete /nodes/<node>/qemu/<vmid>`) that exits 0,
 # the VM leaves the pool, as on PVE: every /pools answer drops it from
-# members, unless keep-in-pool/<vmid> exists. And every key answers from
+# members, unless keep-in-pool/<vmid> exists. With destroy-lands/<vmid>, a
+# destroy of it takes effect even when the call exits non-zero: a pveforge
+# wait that failed or timed out while PVE's task went on to finish. And every key answers from
 # <dir>/<key>.destroyed where one exists, unless a numbered variant for that
 # call does: how a test says what PVE shows once a VM is gone. With none of
 # these files present, and no destroy, every answer is exactly what it
@@ -88,7 +90,7 @@ answer() { # key default-stdout
 		echo "fake pveforge: no answer for '$1'" >&2
 		exit 99
 	fi
-	if [ "$rc" = 0 ] && [[ $1 =~ ^delete\ /nodes/[^/\ ]+/qemu/([0-9]+)(\ |$) ]]; then
+	if [[ $1 =~ ^delete\ /nodes/[^/\ ]+/qemu/([0-9]+)(\ |$) ]] && { [ "$rc" = 0 ] || [ -e "$F/destroy-lands/${BASH_REMATCH[1]}" ]; }; then
 		mkdir -p "$F/destroyed.d"
 		: >"$F/destroyed.d/${BASH_REMATCH[1]}"
 		: >"$F/destroyed"
