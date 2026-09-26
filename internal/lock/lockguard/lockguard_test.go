@@ -29,6 +29,7 @@ var expectedCalls = map[string]string{
 	"cmd/pveforge/accept_alias.go:12":       "", // cb "github.com/spf13/cobra", c.Context()
 	"cmd/pveforge/accept_constructor.go:14": "", // the constructor's own cmd := &cobra.Command{}
 	"internal/bootstrap/bootstrap.go:11":    "", // Run's own ctx, directly
+	"internal/bootstrap/pintls.go:11":       "", // PinTLS's own ctx, directly
 	"internal/idempotent/op.go:27":          "", // helper's own ctx (a TakerProblem, not a context problem)
 	// refused
 	"cmd/pveforge/refuse_background.go:15":    wantNotCommandCtx, // lock.Read(context.Background(), ...)
@@ -101,12 +102,13 @@ func TestScanModule_TakersAndViolations(t *testing.T) {
 		"github.com/suykerbuyk/pveforge/internal/idempotent.Run",
 		"github.com/suykerbuyk/pveforge/internal/idempotent.Shadow",
 		"github.com/suykerbuyk/pveforge/internal/bootstrap.Run",
+		"github.com/suykerbuyk/pveforge/internal/bootstrap.PinTLS",
 	} {
 		if !sc.Sinks[sink] {
 			t.Errorf("%s was not derived as a sink; Sinks = %v", sink, sc.Sinks)
 		}
 	}
-	if len(sc.Sinks) != 5 {
-		t.Errorf("Sinks = %v, want exactly 5", sc.Sinks)
+	if len(sc.Sinks) != 6 {
+		t.Errorf("Sinks = %v, want exactly 6", sc.Sinks)
 	}
 }

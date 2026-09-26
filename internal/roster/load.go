@@ -95,6 +95,11 @@ func validate(r *Roster) error {
 			if _, err := tlspin.Parse(t.TLS.SPKISHA256); err != nil {
 				return fmt.Errorf("target %q: [targets.tls] spki_sha256: %w", t.ID, err)
 			}
+			if t.TLS.Source != "" {
+				if _, err := tlspin.ParseSource(t.TLS.Source); err != nil {
+					return fmt.Errorf("target %q: [targets.tls] source: %w", t.ID, err)
+				}
+			}
 		}
 	}
 	return nil

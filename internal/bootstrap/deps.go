@@ -2,10 +2,12 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // NewSSHTransport returns the production SSHTransport, backed by
@@ -101,6 +103,10 @@ func (s *realSSHSession) Close() error { return s.c.Close() }
 func NewAPIValidator() APIValidator { return realAPIValidator{} }
 
 type realAPIValidator struct{}
+
+func (realAPIValidator) ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
+	return pve.ServedPin(ctx, host, port)
+}
 
 func (realAPIValidator) ValidateTokenGrants(ctx context.Context, cfg APIConfig, want []Grant) error {
 	c, err := pve.NewClient(pve.ClientConfig{

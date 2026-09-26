@@ -243,3 +243,45 @@ func TestVerifyConnection_Handshake(t *testing.T) {
 		t.Fatalf("a refused handshake still reached the handler (%d requests)", *hitsA)
 	}
 }
+
+func TestCaptureCommand(t *testing.T) {
+	cmd := CaptureCommand(8443)
+	for _, want := range []string{"openssl s_client -connect 127.0.0.1:8443 ", "</dev/null", "| openssl x509 -outform PEM"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("CaptureCommand(8443) = %q, missing %q", cmd, want)
+		}
+	}
+	if DefaultCapturePort != 8006 {
+		t.Errorf("DefaultCapturePort = %d, want pveproxy's 8006", DefaultCapturePort)
+	}
+}
+
+func TestParseCapture(t *testing.T) {
+	_, c := newCert(t)
+	pin, cert, err := ParseCapture(pemOf(c))
+	if err != nil || pin != FromCertificate(c) || cert == nil {
+		t.Fatalf("ParseCapture = %s, %v, %v", pin, cert != nil, err)
+	}
+	for name, in := range map[string][]byte{"empty (openssl missing, or nothing served)": nil, "not PEM": []byte("unable to load certificate")} {
+		_, _, err := ParseCapture(in)
+		if !errors.Is(err, ErrCapture) || !errors.Is(err, ErrBadCertificatePEM) {
+			t.Errorf("%s: err = %v, want ErrCapture wrapping ErrBadCertificatePEM", name, err)
+		}
+		if err != nil && len(in) > 0 && strings.Contains(err.Error(), string(in)) {
+			t.Errorf("%s: the error quotes the output: %v", name, err)
+		}
+	}
+}
+
+func TestParseSource(t *testing.T) {
+	for _, s := range []Source{SourceSSHVerified, SourceSSHStored, SourceSSHTOFU, SourceExpect} {
+		if got, err := ParseSource(string(s)); err != nil || got != s {
+			t.Errorf("ParseSource(%q) = %q, %v", s, got, err)
+		}
+	}
+	for _, bad := range []string{"", "tofu", "SSH-VERIFIED", "ssh-verified "} {
+		if _, err := ParseSource(bad); !errors.Is(err, ErrUnknownSource) {
+			t.Errorf("ParseSource(%q) = %v, want ErrUnknownSource", bad, err)
+		}
+	}
+}

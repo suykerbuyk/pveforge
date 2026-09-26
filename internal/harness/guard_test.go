@@ -2,6 +2,8 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,22 @@ import (
 
 type ftarget struct{ id, host, node, fp, token string }
 
+// tlsPinFor is a fixture target's TLS pin: every target carries one,
+// distinct per id, unless a test overrides it (setTLS).
+func tlsPinFor(id string) string {
+	sum := sha256.Sum256([]byte("fixture tls pin: " + id))
+	return "sha256//" + base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// tlsOverride replaces a target's fixture pin by id ("" for none).
+var tlsOverride = map[string]string{}
+
+func setTLS(t *testing.T, id, pin string) {
+	t.Helper()
+	tlsOverride[id] = pin
+	t.Cleanup(func() { delete(tlsOverride, id) })
+}
+
 func writeRoster(t *testing.T, dir, name string, targets ...ftarget) string {
 	t.Helper()
 	var b strings.Builder
@@ -30,6 +48,13 @@ func writeRoster(t *testing.T, dir, name string, targets ...ftarget) string {
 		fmt.Fprintf(&b, "[[targets]]\nid = %q\nhost = %q\nnode = %q\n", x.id, x.host, x.node)
 		if x.token != "" {
 			fmt.Fprintf(&b, "[targets.token]\nid = %q\nsecret_enc = '''\n-----BEGIN AGE ENCRYPTED FILE-----\nZmFrZQ==\n-----END AGE ENCRYPTED FILE-----\n'''\n", x.token)
+		}
+		pin, ok := tlsOverride[x.id]
+		if !ok {
+			pin = tlsPinFor(x.id)
+		}
+		if pin != "" {
+			fmt.Fprintf(&b, "[targets.tls]\nspki_sha256 = %q\n", pin)
 		}
 		if x.fp != "" {
 			fmt.Fprintf(&b, "[targets.ssh]\nuser = \"root\"\npublic_key = \"ssh-ed25519 AAAA test\"\nhost_key_fingerprint = %q\nprivate_key_enc = '''\n-----BEGIN AGE ENCRYPTED FILE-----\nZmFrZQ==\n-----END AGE ENCRYPTED FILE-----\n'''\n", x.fp)
@@ -250,6 +275,18 @@ func TestOpen_StaticRefusals(t *testing.T) {
 		"a node that is an outer node": {func(t *testing.T, w *world) {
 			w.set(OuterRostersVar, writeRoster(t, w.dir, "o.toml", ftarget{"outer-a", "outer-a.example.com", "pvh-n2", "", ""}))
 		}, "is also a target, host or node"},
+		"a target with no TLS pin": {func(t *testing.T, w *world) {
+			setTLS(t, "pvh-n1", "")
+			w.set(RosterVar, writeRoster(t, w.dir, "h.toml", pvh1, pvh2))
+		}, "harness target pvh-n1 has no TLS pin"},
+		"a TLS pin shared with an outer target": {func(t *testing.T, w *world) {
+			setTLS(t, "pvh-n2", tlsPinFor(outerA.id))
+			w.set(RosterVar, writeRoster(t, w.dir, "h.toml", pvh1, pvh2))
+		}, "harness target pvh-n2 pins the same TLS key as a target in outer roster"},
+		"a TLS pin shared between nested targets": {func(t *testing.T, w *world) {
+			setTLS(t, "pvh-n2", tlsPinFor(pvh1.id))
+			w.set(RosterVar, writeRoster(t, w.dir, "h.toml", pvh1, pvh2))
+		}, "harness targets pvh-n1 and pvh-n2 pin the same TLS key"},
 		"a shared SSH fingerprint": {func(t *testing.T, w *world) {
 			w.set(RosterVar, writeRoster(t, w.dir, "h.toml", ftarget{"pvh-n1", "pvh-n1.example.com", "pvh-n1", outerA.fp, ""}))
 		}, "same SSH host key"},

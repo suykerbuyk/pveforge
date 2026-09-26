@@ -565,3 +565,33 @@ func caModeChild(t *testing.T) {
 	}
 	fmt.Println("CA-MODE-CHILD: 3 cases checked")
 }
+
+// Port 0 is read as REST reads it: the probe dials host:8006, the address
+// NewClient builds for the same target (EffectiveAPIPort, one rule).
+func TestServedPin_PortZeroIsTheDefaultAPIPort(t *testing.T) {
+	srv := newPinnedServer(t, jsonOK(`{}`))
+	var dials atomic.Int32
+	tr := stubTransport(srv, func(*http.Request) (*url.URL, error) { return nil, nil }, &dials)
+	var dialed string
+	inner := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = addr
+		return inner(ctx, network, addr)
+	}
+	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 0); err != nil {
+		t.Fatal(err)
+	}
+	if dialed != "pve.example.test:8006" {
+		t.Fatalf("port 0 dialled %q, want pve.example.test:8006", dialed)
+	}
+	c, err := NewClient(ClientConfig{Host: "pve.example.test", TokenID: "a@pam!b", TokenSecret: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.baseURL != "https://pve.example.test:8006/api2/json" {
+		t.Fatalf("REST's base URL for the same target is %q", c.baseURL)
+	}
+	if EffectiveAPIPort(0) != DefaultAPIPort || EffectiveAPIPort(8443) != 8443 {
+		t.Fatal("EffectiveAPIPort")
+	}
+}

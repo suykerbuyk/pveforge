@@ -114,7 +114,7 @@ func TestWriteTLSPin_FirstPin(t *testing.T) {
 	path := writeTempRoster(t, fixtureTokenAndSSH(t))
 	before := readFile(t, path)
 	b4, _ := Decode(before)
-	if err := WriteTLSPin(path, "qa-pve-01", "", testPin(3), NewPassphrase(pass)); err != nil {
+	if err := WriteTLSPin(path, "qa-pve-01", "", testPin(3), tlspin.SourceExpect, NewPassphrase(pass)); err != nil {
 		t.Fatalf("WriteTLSPin: %v", err)
 	}
 	after := readFile(t, path)
@@ -147,7 +147,7 @@ func TestWriteTLSPin_CompareAndSet(t *testing.T) {
 	// pin: refused, the file byte-identical.
 	for name, old := range map[string]tlspin.Pin{"stale": testPin(9), "none": "", "the other target's": testPin(2)} {
 		before := readFile(t, path)
-		err := WriteTLSPin(path, "qa-pve-01", old, testPin(4), pw)
+		err := WriteTLSPin(path, "qa-pve-01", old, testPin(4), tlspin.SourceExpect, pw)
 		if !errors.Is(err, ErrTLSPinChanged) {
 			t.Fatalf("%s old: err = %v, want ErrTLSPinChanged", name, err)
 		}
@@ -161,7 +161,7 @@ func TestWriteTLSPin_CompareAndSet(t *testing.T) {
 
 	// The right old: replaced, and only that value.
 	before := readFile(t, path)
-	if err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(4), pw); err != nil {
+	if err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(4), tlspin.SourceExpect, pw); err != nil {
 		t.Fatalf("replace with the right old: %v", err)
 	}
 	if got := pinOf(t, path, "qa-pve-01"); got != testPin(4) {
@@ -176,7 +176,7 @@ func TestWriteTLSPin_CompareAndSet(t *testing.T) {
 
 	// The same pin again: a no-op, not a write.
 	before = readFile(t, path)
-	if err := WriteTLSPin(path, "qa-pve-01", testPin(4), testPin(4), pw); err != nil {
+	if err := WriteTLSPin(path, "qa-pve-01", testPin(4), testPin(4), tlspin.SourceExpect, pw); err != nil {
 		t.Fatalf("an equal pin: %v", err)
 	}
 	if !bytes.Equal(before, readFile(t, path)) {
@@ -200,7 +200,7 @@ func TestWriteTLSPin_Refusals(t *testing.T) {
 		"malformed old":           {"qa-pve-01", "SHA256:abc", testPin(5), "the expected pin"},
 		"unknown target":          {"qa-pve-09", "", testPin(5), "no such target"},
 	} {
-		err := WriteTLSPin(path, c.id, c.old, c.next, pw)
+		err := WriteTLSPin(path, c.id, c.old, c.next, tlspin.SourceExpect, pw)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want one naming %q", name, err, c.want)
 		}
@@ -211,7 +211,7 @@ func TestWriteTLSPin_Refusals(t *testing.T) {
 		}
 	}
 	// The passphrase is proven, as for every subtable write.
-	if err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(5), NewPassphrase("wrong")); !errors.Is(err, ErrWrongPassphrase) {
+	if err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(5), tlspin.SourceExpect, NewPassphrase("wrong")); !errors.Is(err, ErrWrongPassphrase) {
 		t.Errorf("a wrong passphrase: err = %v, want ErrWrongPassphrase", err)
 	}
 	if !bytes.Equal(before, readFile(t, path)) {
@@ -335,7 +335,7 @@ func TestWriteTLSPin_ReadBackRefusesAWrongLanding(t *testing.T) {
 		// other safety net passes.
 		return bytes.Replace(out, []byte(testPin(4)), []byte(testPin(5)), 1), nil
 	}
-	err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(4), NewPassphrase(pass))
+	err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(4), tlspin.SourceExpect, NewPassphrase(pass))
 	if err == nil || !strings.Contains(err.Error(), "does not read back as "+string(testPin(4))) {
 		t.Fatalf("err = %v, want the read-back refusal", err)
 	}
@@ -344,7 +344,56 @@ func TestWriteTLSPin_ReadBackRefusesAWrongLanding(t *testing.T) {
 	}
 	// The seam as it stands (the real splice) lands the pin asked for.
 	subtableSpliceFn = orig
-	if err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(4), NewPassphrase(pass)); err != nil || pinOf(t, path, "qa-pve-01") != testPin(4) {
+	if err := WriteTLSPin(path, "qa-pve-01", testPin(1), testPin(4), tlspin.SourceExpect, NewPassphrase(pass)); err != nil || pinOf(t, path, "qa-pve-01") != testPin(4) {
 		t.Fatalf("with the real splice: err %v, pin %q", err, pinOf(t, path, "qa-pve-01"))
+	}
+}
+
+// The source is written beside the pin, read back, and validated at load.
+func TestWriteTLSPin_RecordsTheSource(t *testing.T) {
+	withTestWorkFactor(t)
+	path := writeTempRoster(t, fixtureTokenAndSSH(t))
+	if err := WriteTLSPin(path, "qa-pve-01", "", testPin(3), tlspin.SourceSSHTOFU, NewPassphrase("p")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tg := r.Find("qa-pve-01"); tg.TLS == nil || tg.TLS.Source != string(tlspin.SourceSSHTOFU) {
+		t.Fatalf("TLS = %+v, want source ssh-tofu", tg.TLS)
+	}
+	// An equal pin is a no-op, whatever source this write names: the
+	// source records how the pin was FIRST obtained.
+	before := readFile(t, path)
+	if err := WriteTLSPin(path, "qa-pve-01", testPin(3), testPin(3), tlspin.SourceSSHVerified, NewPassphrase("p")); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, readFile(t, path)) {
+		t.Fatal("an equal pin with another source rewrote the roster")
+	}
+	for _, bad := range []tlspin.Source{"", "tofu"} {
+		if err := WriteTLSPin(path, "qa-pve-01", testPin(3), testPin(4), bad, NewPassphrase("p")); !errors.Is(err, tlspin.ErrUnknownSource) {
+			t.Errorf("source %q: err = %v, want ErrUnknownSource", bad, err)
+		}
+	}
+}
+
+func TestDecode_TLSPinSource(t *testing.T) {
+	head := "[[targets]]\nid = \"a\"\nhost = \"h\"\nnode = \"n\"\n[targets.tls]\nspki_sha256 = \"" + string(testPin(1)) + "\"\n"
+	if _, err := Decode([]byte(head)); err != nil {
+		t.Fatalf("no source (a hand-written pin): %v", err)
+	}
+	if r, err := Decode([]byte(head + "source = \"ssh-verified\"\n")); err != nil || r.Find("a").TLS.Source != "ssh-verified" {
+		t.Fatalf("a known source: %v", err)
+	}
+	for body, want := range map[string]string{
+		"source = \"tofu\"\n":         "not a TLS pin source",
+		"Source = \"ssh-tofu\"\n":     "must be spelled \"source\"",
+		"provenance = \"ssh-tofu\"\n": "not a roster key in [targets.tls]",
+	} {
+		if _, err := Decode([]byte(head + body)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: err = %v, want one naming %q", body, err, want)
+		}
 	}
 }

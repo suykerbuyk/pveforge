@@ -19,6 +19,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,6 +123,12 @@ type APIConfig struct {
 // implementation, backed by internal/pve.
 type APIValidator interface {
 	ValidateTokenGrants(ctx context.Context, cfg APIConfig, want []Grant) error
+	// ServedPin reports the pin of the certificate that answers TLS at
+	// host:port, by a handshake that sends no request (pve.ServedPin). It
+	// is the network half of a TLS pin capture: what the name serves must
+	// equal what the node serves locally, before anything is written or
+	// any token is sent.
+	ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error)
 }
 
 // Options configures one bootstrap run against a single target.
@@ -138,6 +145,9 @@ type Options struct {
 	// REST client this run builds (the token validator's) carries it, so a
 	// pinned target is never validated through an unpinned connection.
 	TLSPin tlspin.Pin
+	// tlsSource is the roster's recorded source for TLSPin, filled with
+	// it: what a run reports when the pin it captures is the stored one.
+	tlsSource tlspin.Source
 
 	// PVEUsername is the SSH LOGIN: a PAM/realm username, e.g. "root@pam".
 	// Only @pam (or bare, defaulting to pam: "root" becomes "root@pam")
@@ -178,6 +188,17 @@ type Options struct {
 	// fingerprint reported.
 	HostKeyFingerprint string
 
+	// SSHTOFU is the operator's explicit acceptance (--ssh-tofu) of trust
+	// on first use for a password session that captures a TLS pin: without
+	// it such a run needs HostKeyFingerprint (operator ruling RQ3, option
+	// B′), and with it the pin is recorded as tls_pin_source ssh-tofu.
+	SSHTOFU bool
+
+	// CapturePort is pveproxy's port ON THE NODE, where the TLS pin is
+	// captured over SSH (0: tlspin.DefaultCapturePort, 8006). It is not
+	// persisted: a later capture that needs another port names it again.
+	CapturePort int
+
 	// TokenOwner is the PVE principal that owns the token, e.g.
 	// "pveforge-harness@pve". It is NOT a Linux login and needs no SSH
 	// account: the run logs in as PVEUsername and addresses this principal
@@ -213,6 +234,12 @@ type Options struct {
 // Validation always say what happened to the credential.
 type Result struct {
 	HostKeyFingerprint string
+	// TLSPin is the target's TLS pin after this run, and TLSPinSource how
+	// this run's capture was vouched for; both are empty when no pin was
+	// captured (a CA-verified target, or a run that stopped before the
+	// capture).
+	TLSPin       tlspin.Pin
+	TLSPinSource tlspin.Source
 	// TokenID is the full "userid!tokenname" of the requested token.
 	TokenID string
 
@@ -326,6 +353,11 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	if err != nil {
 		return nil, err
 	}
+	// Before the lock, the roster write that creates a new target, or any
+	// connection (operator ruling RQ3, B′).
+	if err := checkCaptureTrust(opts); err != nil {
+		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
 
 	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
 	if err != nil {
@@ -369,6 +401,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	}
 
 	r := &runner{ctx: ctx, opts: opts, transport: transport, api: api, fullID: fullTokenID, want: want}
+	tls := &tlsCapture{ctx: ctx, opts: opts, dialsStoredPin: existing != nil, api: api}
 
 	switch {
 	case opts.NoSSHKey:
@@ -426,6 +459,16 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		defer func() { _ = r.session.Close() }()
 		r.ident = sshIdentity{addr: addr, user: sshUser, privateKeyPEM: keypair.PrivateKeyPEM, hostKeyFP: hostKeyFP}
 
+		// The TLS pin BEFORE the SSH auth is persisted: a capture or
+		// cross-check that fails leaves no stored SSH pin behind, so a rerun
+		// is again a first run, vouched for (or TOFU-accepted) by the
+		// operator, and can never pass the pin off as ssh-stored.
+		if opts.InsecureTLS {
+			if err := tls.capture(r.session); err != nil {
+				return nil, err
+			}
+		}
+
 		// Persist immediately — proven to work, and this is what makes a
 		// later failure in this same Run safe to retry without generating a
 		// second keypair.
@@ -440,11 +483,120 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	}
 	r.res = &Result{HostKeyFingerprint: r.ident.hostKeyFP, TokenID: fullTokenID}
 
+	// The keyless and stored-pin branches capture here; the first-run
+	// branch already did, before it persisted SSH auth.
+	if opts.InsecureTLS && !tls.done {
+		if err := tls.capture(r.session); err != nil {
+			return nil, err
+		}
+	}
+	r.res.TLSPin, r.res.TLSPinSource = tls.pin, tls.source
+	opts.TLSPin, r.opts.TLSPin = tls.pinOr(opts.TLSPin), tls.pinOr(r.opts.TLSPin)
+
 	present, err := preflight(ctx, r.session, opts, want, sshOwnerReader{r.session})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
 	return r.tokenPhase(present)
+}
+
+// tlsCapture is one run's TLS pin capture: over the run's verified
+// session, checked against what the target's address serves, and written
+// with the compare-and-set, all before any token command.
+type tlsCapture struct {
+	ctx            context.Context
+	opts           Options
+	dialsStoredPin bool
+	api            APIValidator
+	done           bool
+	pin            tlspin.Pin
+	source         tlspin.Source
+}
+
+func (c *tlsCapture) capture(session SSHSession) error {
+	o := c.opts
+	pin, err := capturePin(c.ctx, session, c.api, o.Host, o.APIPort, o.CapturePort)
+	if err != nil {
+		return fmt.Errorf("bootstrap %s: %w", o.TargetID, err)
+	}
+	source := captureSource(o, c.dialsStoredPin)
+	switch stored := o.TLSPin; {
+	case stored == pin:
+		// The pin the roster already holds: report how it was FIRST
+		// obtained, never this run's session, which could otherwise make a
+		// TOFU-born pin read as ssh-stored.
+		source = o.tlsSource
+	case stored != "":
+		return fmt.Errorf("bootstrap %s: %w", o.TargetID, differsError(o.TargetID, stored, pin, c.dialsStoredPin))
+	default:
+		if err := roster.WriteTLSPin(o.RosterPath, o.TargetID, "", pin, source, o.Passphrase); err != nil {
+			return fmt.Errorf("bootstrap %s: persist the tls pin: %w", o.TargetID, err)
+		}
+	}
+	c.done, c.pin, c.source = true, pin, source
+	return nil
+}
+
+func (c *tlsCapture) pinOr(p tlspin.Pin) tlspin.Pin {
+	if c.done {
+		return c.pin
+	}
+	return p
+}
+
+// captureTrust is B′ (operator ruling RQ3) as a rule on the options and
+// the roster: a TLS pin captured over a PASSWORD session (a first run, or
+// a keyless one) needs the operator to vouch for the host key with
+// HostKeyFingerprint, or to accept trust on first use with SSHTOFU. A run
+// that dials a stored SSH pin is exempt, and so is a CA-verified target,
+// whose pin is never captured. SSHTOFU means something only where it
+// applies, so it is refused anywhere else, and together with a
+// fingerprint.
+func checkCaptureTrust(opts Options) error {
+	if opts.SSHTOFU && opts.HostKeyFingerprint != "" {
+		return errors.New("--ssh-tofu and --host-key-fingerprint contradict each other: give the fingerprint you verified, or accept trust on first use, not both")
+	}
+	if !opts.InsecureTLS {
+		if opts.SSHTOFU {
+			return errors.New("--ssh-tofu applies only to an insecure_tls target, whose TLS pin is captured over SSH; this target verifies its certificate against the system CAs")
+		}
+		return nil
+	}
+	stored := !opts.NoSSHKey && storedSSHPin(opts)
+	if stored {
+		if opts.SSHTOFU {
+			return errors.New("--ssh-tofu does not apply: the target holds a pinned SSH host key, which this run dials")
+		}
+		return nil
+	}
+	if opts.HostKeyFingerprint == "" && !opts.SSHTOFU {
+		return ErrHostKeyFingerprintRequired
+	}
+	return nil
+}
+
+// storedSSHPin reports whether the roster holds a pinned SSH host key for
+// the target (Run then dials it). A roster that cannot be read reports
+// false here; the run's own later reads name the problem.
+func storedSSHPin(opts Options) bool {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return false
+	}
+	tg := r.Find(opts.TargetID)
+	return tg != nil && tg.SSH != nil && tg.SSH.HostKeyFingerprint != ""
+}
+
+// captureSource is how this run's session vouches for a pin it captures.
+func captureSource(opts Options, dialsStoredPin bool) tlspin.Source {
+	switch {
+	case opts.HostKeyFingerprint != "":
+		return tlspin.SourceSSHVerified
+	case dialsStoredPin:
+		return tlspin.SourceSSHStored
+	default:
+		return tlspin.SourceSSHTOFU
+	}
 }
 
 // persistTargetMeta writes opts' resolved Host/Node/APIPort/InsecureTLS
@@ -555,6 +707,7 @@ func defaultHostNodeFromRoster(opts *Options) {
 	// compare-and-set, never by a run that simply did not mention it).
 	if opts.TLSPin == "" && tg.TLS != nil {
 		opts.TLSPin = tlspin.Pin(tg.TLS.SPKISHA256)
+		opts.tlsSource = tlspin.Source(tg.TLS.Source)
 	}
 }
 

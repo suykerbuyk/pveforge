@@ -80,10 +80,25 @@ certificate-chain verification; without it, the chain and the pin must both
 hold. An `http://` proxy (`HTTPS_PROXY`) still works with a pin, since the
 pin is checked through its CONNECT tunnel; an `https://` proxy does not, and
 every request to a pinned target through one fails with a pin mismatch.
-A malformed value is refused at load, never read as "no pin". No
-pveforge command writes this block yet, and none requires it: `pveforge
-roster validate --require-tls-pins` lists the `insecure_tls` targets that
-have none.
+A malformed value is refused at load, never read as "no pin". Beside the
+pin, `source` records how it was first obtained: `ssh-verified` (over an SSH
+session pinned to the host key you gave), `ssh-stored` (pinned to the host key
+the roster held), `ssh-tofu` (an SSH host key trusted on first use, by
+`--ssh-tofu`) or `expect` (given with `pin-tls --expect`). No command requires
+a pin yet: `pveforge roster validate --require-tls-pins` lists the
+`insecure_tls` targets that have none.
+
+The pin is captured, never trusted on first REST contact. `bootstrap` of an
+`insecure_tls` target reads the certificate pveproxy serves on the node itself
+(`openssl s_client` to `127.0.0.1:8006` over the run's SSH session;
+`--capture-port` names another node-local port), requires the target's address
+to serve the same key, and writes the pin, all before any token is minted or
+sent; a mismatch stops the run there. A CA-verified target (no `insecure_tls`)
+is never pinned implicitly. `pveforge roster pin-tls <target>` pins a target
+bootstrapped before pins existed, without touching its token: over the stored
+SSH pin for a target with SSH auth, or, for one without, from `--expect
+sha256//…`, which the address must serve exactly. It refuses a different stored
+pin unless `--repin` (SSH auth only), and `--print` writes nothing.
 
 Keys are case-sensitive. A roster holding a key that is not spelled exactly as
 above (`Export`, `Host_Key_Fingerprint`), or a key pveforge does not know, is
@@ -130,6 +145,11 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
 - `--no-ssh-key` uses the PVE password for this run only. No key is installed
   on the target or stored in the roster, and the host key is trusted on first
   use every run. Such a target needs the flag on every later run.
+- For an `insecure_tls` target, a run whose password session captures the TLS
+  pin (a first run, or `--no-ssh-key`) needs `--host-key-fingerprint`, or
+  `--ssh-tofu` to accept trust on first use of the SSH host key, recorded as
+  `tls_pin_source` `ssh-tofu`. A run that dials a stored SSH pin needs
+  neither. The result reports `tls_spki_sha256` and `tls_pin_source`.
 - `--host-key-fingerprint SHA256:…` pins the SSH connection that carries the
   password (the key install's, or `--no-ssh-key`'s) to the host key you
   verified, exactly as `ssh-keygen -l -E sha256` prints it and the roster

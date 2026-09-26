@@ -2,8 +2,10 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -357,6 +359,31 @@ type fakeValidator struct {
 	// onCall, if set, runs at the start of each call (0-indexed): tests use
 	// it to change the roster at an exact point in a run.
 	onCall func(call int)
+
+	// served is the TLS pin ServedPin reports (a capture test sets it with
+	// scriptCapture); servedErr fails the probe. An unscripted probe is an
+	// error, never a default pin: a fake answering every target with one
+	// pin would make the capture's cross-check compare a value with itself.
+	served      tlspin.Pin
+	servedErr   error
+	servedCalls int
+	// servedHost and servedPort are the address the last probe was asked
+	// for, exactly as passed: a test compares them with the address REST
+	// will dial.
+	servedHost string
+	servedPort int
+}
+
+func (v *fakeValidator) ServedPin(_ context.Context, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
+	v.servedCalls++
+	v.servedHost, v.servedPort = host, port
+	if v.servedErr != nil {
+		return "", nil, v.servedErr
+	}
+	if v.served == "" {
+		return "", nil, fmt.Errorf("fakeValidator: ServedPin(%s:%d) was not scripted", host, port)
+	}
+	return v.served, nil, nil
 }
 
 func (v *fakeValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, want []Grant) error {
@@ -611,6 +638,8 @@ func TestRun_DefaultsAPIPortInsecureTLSFromExistingRosterEntry(t *testing.T) {
 		"pveum user token add": {res: RunResult{Stdout: tokenAddJSON("s"), ExitCode: 0}},
 	}}}
 	validator := &fakeValidator{}
+	// insecure_tls defaulted from the roster: this run captures a TLS pin.
+	scriptCapture(transport.session, validator, newCapturePair(t))
 
 	opts := baseOptions(rosterPath)
 	opts.APIPort = 0
@@ -1386,6 +1415,10 @@ func TestRun_PersistsInsecureTLSAgainstExistingBareTarget(t *testing.T) {
 	}}
 	transport := &fakeTransport{installFingerprint: "SHA256:abc", session: session}
 	validator := &fakeValidator{}
+	// A first run captures a TLS pin over its password session: B′ needs
+	// the host key vouched for, or trust on first use accepted.
+	opts.SSHTOFU = true
+	scriptCapture(session, validator, newCapturePair(t))
 
 	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1452,6 +1485,7 @@ func TestRun_RetryWithoutInsecureTLSFlag_DoesNotClearPersistedValue(t *testing.T
 	}}
 	transport := &fakeTransport{session: session}
 	validator := &fakeValidator{} // existing token "validates" -> skip-recreate fast path
+	scriptCapture(session, validator, newCapturePair(t))
 
 	if _, err := Run(context.Background(), opts, transport, validator); err != nil {
 		t.Fatalf("Run: %v", err)

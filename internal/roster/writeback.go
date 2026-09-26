@@ -105,12 +105,17 @@ var ErrTLSPinChanged = errors.New("the roster's TLS pin is not the one this writ
 // roster before it takes its per-target lock): the CAS, not the caller,
 // makes that safe, by refusing a pin that changed in between.
 //
-// next equal to what the roster holds is a no-op: no write, no error.
+// source records how next was obtained, and is written beside it. It
+// records how the pin was FIRST obtained: next equal to what the roster
+// holds is a no-op (no write, no error), whatever source says.
 // Both pins must be well-formed (tlspin.Parse); next may not be empty, so
 // this writer cannot remove a pin. The target must already exist. The
 // passphrase is proven as for every other subtable write.
-func WriteTLSPin(path, targetID string, old, next tlspin.Pin, passphrase Passphrase) error {
+func WriteTLSPin(path, targetID string, old, next tlspin.Pin, source tlspin.Source, passphrase Passphrase) error {
 	if _, err := tlspin.Parse(string(next)); err != nil {
+		return fmt.Errorf("write tls pin for %q: %w", targetID, err)
+	}
+	if _, err := tlspin.ParseSource(string(source)); err != nil {
 		return fmt.Errorf("write tls pin for %q: %w", targetID, err)
 	}
 	if old != "" {
@@ -141,12 +146,12 @@ func WriteTLSPin(path, targetID string, old, next tlspin.Pin, passphrase Passphr
 		return held == next, nil
 	}
 	post := func(nr *Roster) error {
-		if t := nr.Find(targetID); t == nil || t.TLS == nil || tlspin.Pin(t.TLS.SPKISHA256) != next {
-			return fmt.Errorf("the tls pin written for %q does not read back as %s", targetID, next)
+		if t := nr.Find(targetID); t == nil || t.TLS == nil || tlspin.Pin(t.TLS.SPKISHA256) != next || tlspin.Source(t.TLS.Source) != source {
+			return fmt.Errorf("the tls pin written for %q does not read back as %s (source %s)", targetID, next, source)
 		}
 		return nil
 	}
-	return spliceSubtableIf(path, targetID, "tls", []field{{key: "spki_sha256", value: string(next)}}, passphrase, pre, post)
+	return spliceSubtableIf(path, targetID, "tls", []field{{key: "spki_sha256", value: string(next)}, {key: "source", value: string(source)}}, passphrase, pre, post)
 }
 
 // AppendTarget appends a new [[targets]] block for t to the roster at path,

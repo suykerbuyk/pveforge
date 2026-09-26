@@ -1,0 +1,72 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-roster-pin-tls - Pin a target's TLS key without touching its token
+
+
+.SH SYNOPSIS
+\fBpveforge roster pin-tls <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+Pin a target's API TLS key ([targets.tls] spki_sha256): the migration path
+for a target bootstrapped before TLS pins existed. No token is read, written,
+validated or sent.
+
+.PP
+For a target with SSH auth, the key pveproxy serves on the node itself is
+captured over an SSH session pinned to the roster's stored host key, and the
+target's address must serve the same key (source ssh-stored). For a target
+without SSH auth, give the pin you verified by other means with --expect; the
+address must serve exactly it (source expect). There is no trust-on-first-use
+path. A CA-verified target (insecure_tls false) is pinned only explicitly,
+with --expect: its chain is its identity, and a pin is the operator's choice.
+
+.PP
+A different stored pin is refused. --repin replaces it, for a target with SSH
+auth only, whose pinned session vouches for the new key. --print captures and
+checks, and writes nothing. The pin is written with a compare-and-set, under
+the target's bootstrap lock.
+
+
+.SH OPTIONS
+\fB--capture-port\fP=0
+	pveproxy's port ON THE NODE, where the key is captured over SSH (default 8006)
+
+.PP
+\fB--expect\fP=""
+	for a target without SSH auth: the pin you verified, sha256//<base64>; the target's address must serve exactly that key
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for pin-tls
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--print\fP[=false]
+	capture and check the pin, and write nothing
+
+.PP
+\fB--repin\fP[=false]
+	replace a different stored pin (a target with SSH auth only: its pinned session vouches for the new key)
+
+.PP
+\fB--ssh-port\fP=0
+	SSH port on the target host (default: the port pveforge dials a target's stored SSH pin on, 22; the roster stores none)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-roster(1)\fP
