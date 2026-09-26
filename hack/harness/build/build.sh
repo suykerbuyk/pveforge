@@ -11,7 +11,8 @@
 #   build.sh --storage <outer storage> [--keep-on-failure] [--repin]
 #
 # Before anything is created it checks, read-only: none of 690-692 exists in
-# the pool, the storage holds no volume of theirs, local:iso/ holds both
+# the pool or anywhere in the cluster (/cluster/nextid, lib's
+# harness_vmid_free), the storage holds no volume of theirs, local:iso/ holds both
 # prepared ISOs (prepare-iso.sh) and local:import/ the cloud image, the nested
 # SSH key exists, and no host key is already pinned for the three addresses.
 # Then it creates the VMs, starts them, and polls TCP 22 (and 8006 on the
@@ -212,11 +213,19 @@ for v in "${VMIDS[@]}"; do
 	if jqe "$pool" --argjson v "$v" 'any(.[0].members[]; .vmid == $v)'; then
 		refuse "VM $v already exists in pool $HARNESS_POOL: the build runs on a clean slate, and removing an earlier build's VM needs an operator ask"
 	fi
+	# A VMID held outside the pool, on any node, is invisible to the pool
+	# token but still refuses the create: the cluster must hold no VM $v.
+	harness_vmid_free "$v" 2>>"$EVID/nextid.stderr" || refuse "VMID $v is not free in the cluster: $HARNESS_NOT_FREE"
 	content=$(harness_get "/nodes/$HARNESS_NODE/storage/$S/content" "vmid=$v")
 	evidence "content-$v-before.json" "$content"
 	jqe "$content" 'type == "array"' || _harness_die 1 "storage $S: the content answer has an unexpected shape"
 	jqe "$content" 'length == 0' || refuse "storage $S already holds volumes of VM $v (a leftover): see content-$v-before.json"
 done
+# The storage's usage before anything is created, from an EMPTY storage (the
+# pool empty, used at most 1 MiB): cleanup proves this run's volumes gone by
+# its return to it (lib: a pool token is not shown a destroyed VM's volumes).
+jqe "$pool" '.[0].members | length == 0' || refuse "pool $HARNESS_POOL is not empty: the build runs on an empty harness storage"
+harness_storage_baseline || refuse "$HARNESS_NOT_FREE"
 isos=$(harness_get "/nodes/$HARNESS_NODE/storage/local/content" content=iso)
 evidence local-iso.json "$isos"
 for v in 690 691; do
@@ -242,7 +251,7 @@ cleanup() {
 	if [ "$done_ok" = 1 ] || [ "$creating" = 0 ]; then
 		exit "$rc"
 	fi
-	local log=$EVID/cleanup.log v err mine=() left=() members=""
+	local log=$EVID/cleanup.log v mine=() left=() members=""
 	# A redirect that fails skips its command: an unwritable evidence
 	# directory must cost the log, never a cleanup step.
 	{ : >>"$log"; } 2>/dev/null || log=/dev/null
@@ -264,20 +273,47 @@ cleanup() {
 			(harness_vm_post "$v" status/stop) >>"$log" 2>&1 || echo "cleanup: stop $v failed" >>"$log"
 		fi
 		(harness_vm_destroy "$v" purge=1 destroy-unreferenced-disks=1) >>"$log" 2>&1 || echo "cleanup: destroy $v failed" >>"$log"
-		err=""
-		if err=$( { harness_vm_get "$v" status/current >/dev/null; } 2>&1); then
-			left+=("$v")
-		elif [[ $err != *"does not exist"* ]]; then
-			left+=("$v")
+	done
+	# Destroyed means proven gone (lib): the VMID free in the cluster and the
+	# pool not listing it, then the storage's usage back at its baseline. A
+	# pool token is answered 403, never "does not exist", for a destroyed VM,
+	# and is not shown its volumes. Usage is one figure for all of them: while
+	# any is unproven, those proven gone stay named too.
+	# 600 s, not the probe's 180: ZFS frees a zvol's blocks asynchronously, and
+	# here it frees up to three large ones (two 128 GiB system disks and a
+	# 200 GiB data disk) where the probe frees one 1 GiB disk.
+	local gone_vms=() secs=600
+	for ((i = ${#mine[@]} - 1; i >= 0; i--)); do
+		v=${mine[$i]}
+		if harness_vm_gone "$v" 2>>"$log"; then
+			gone_vms+=("$v")
 		else
-			note result.txt "DESTROYED $v"
+			echo "cleanup: VM $v is not proven gone: $HARNESS_NOT_FREE" >>"$log"
+			left+=("$v")
 		fi
 	done
-	# A VM this run did not record (its create failed after it appeared).
+	if [ "${#gone_vms[@]}" -gt 0 ]; then
+		# A VM still there holds its volumes: one read, no wait.
+		[ "${#left[@]}" = 0 ] || secs=0
+		if harness_storage_recovered "$secs" "$log" "${gone_vms[@]}" 2>>"$log"; then
+			for v in "${gone_vms[@]}"; do
+				note result.txt "DESTROYED $v"
+			done
+		else
+			echo "cleanup: the volumes of VM(s) ${gone_vms[*]} are not proven gone: $HARNESS_NOT_FREE" >>"$log"
+			left+=("${gone_vms[@]}")
+		fi
+	fi
+	# A VM this run did not record (its create failed after it appeared). A
+	# pool that cannot be read leaves each of them unknown: named, not clean.
 	members=$( (harness_get /pools "poolid=$HARNESS_POOL") 2>>"$log") || members=""
+	if [ -z "$members" ] || ! jqe "$members" --arg p "$HARNESS_POOL" 'type == "array" and length == 1 and .[0].poolid == $p and (.[0].members | type == "array")'; then
+		echo "cleanup: pool $HARNESS_POOL could not be read: whether an unrecorded VM exists is unknown" >>"$log"
+		members=""
+	fi
 	for v in "${VMIDS[@]}"; do
 		[[ " ${mine[*]} " != *" $v "* ]] || continue
-		if [ -n "$members" ] && jqe "$members" --argjson v "$v" 'any(.[0].members[]?; .vmid == $v)'; then
+		if [ -z "$members" ] || jqe "$members" --argjson v "$v" 'any(.[0].members[]; .vmid == $v)'; then
 			left+=("$v")
 		fi
 	done

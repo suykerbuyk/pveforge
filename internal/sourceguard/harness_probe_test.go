@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,7 +28,8 @@ const (
 	pPool     = "get /pools poolid=pveforge-harness"
 	pConf     = "get /nodes/qa-pve-02/qemu/690/config"
 	pSnaps    = "get /nodes/qa-pve-02/qemu/690/snapshot"
-	pGone     = "get /nodes/qa-pve-02/qemu/690/status/current"
+	pGone     = "get /nodes/qa-pve-02/qemu/690/status/current" // never read: a pool token gets 403 for a destroyed VM
+	pNextID   = "get /cluster/nextid vmid=690"
 	pRollback = "post /nodes/qa-pve-02/qemu/690/snapshot/s1/rollback"
 	pSnapS2   = "post /nodes/qa-pve-02/qemu/690/snapshot snapname=s2 vmstate=0"
 	pDelS2    = "delete /nodes/qa-pve-02/qemu/690/snapshot/s2"
@@ -37,14 +39,15 @@ const (
 
 	gib600      = int64(600) << 30
 	zfsRefusal  = "task UPID:fake failed: can't rollback, 's1' is not most recent snapshot on 'pveforge-harness:vm-690-disk-0'"
-	goneAnswer  = "get vm 690 status: 500 Internal Server Error: Configuration file 'nodes/qa-pve-02/qemu-server/690.conf' does not exist"
+	nextIDInUse = "api get /cluster/nextid: pve returned 400 Parameter verification failed: vmid: VM 690 already exists"
 	emptyPool   = `[{"poolid":"pveforge-harness","comment":"","members":[]}]`
 	poolWith690 = `[{"poolid":"pveforge-harness","comment":"","members":[{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-02"}]}]`
 	oneVolume   = `[{"volid":"pveforge-harness:vm-690-disk-0","vmid":690,"size":1073741824}]`
 )
 
 func storageStatus(typ string, avail int64, extra string) string {
-	return fmt.Sprintf(`{"type":%q,"enabled":1,"active":1,"content":"images,rootdir","avail":%d,"total":%d,"used":0,"shared":0%s}`, typ, avail, gib600, extra)
+	// A quota'd dataset, as pveforge-harness is: used + avail = total.
+	return fmt.Sprintf(`{"type":%q,"enabled":1,"active":1,"content":"images,rootdir","avail":%d,"total":%d,"used":%d,"shared":0%s}`, typ, avail, gib600, gib600-avail, extra)
 }
 
 // probeSpec is one probe run's fake world: answers by key, and by the n-th
@@ -65,11 +68,21 @@ type probeSpec struct {
 	// PATH, by name.
 	setup func(t *testing.T, home string)
 	stubs map[string]string
-	// block is a key whose first call waits until onBlock has returned.
+	// block is a key whose first call (blockAt, when set) waits until
+	// onBlock has returned.
 	block   string
+	blockAt int
 	onBlock func(t *testing.T, b blocked)
 	// stdin, when set, is the script's standard input.
 	stdin string
+	// gone and goneRC answer a key once a VM destroy has succeeded (the
+	// fake's .destroyed variants), unless a numbered one answers that call:
+	// what PVE shows once a VM is gone.
+	gone   map[string]string
+	goneRC map[string]int
+	// keepInPool: VMIDs the pool still lists after their destroy (the fake
+	// drops every other destroyed VM from /pools, as PVE does).
+	keepInPool []string
 	// out is where stdout and stderr go: "" (captured), "pipe" (one pipe,
 	// as "2>&1 | head" gives; the test can close its reading end) or "pty"
 	// (a terminal; the test can hang it up).
@@ -83,8 +96,10 @@ type blocked struct {
 }
 
 // zfsWorld: a healthy zfspool; the first rollback is refused as ZFS refuses
-// it; the pool lists 690 only between its create and its destroy; the first
-// poll still shows the volume and less free space.
+// it; the pool lists 690 only between its create and its destroy (the fake
+// drops a destroyed VM from it), and /cluster/nextid offers 690; the first poll still shows the
+// volume and less free space. status/current has no answer at all: the probe
+// must never ask it whether 690 is gone.
 func zfsWorld() probeSpec {
 	return probeSpec{
 		resp: map[string]string{
@@ -93,14 +108,16 @@ func zfsWorld() probeSpec {
 			pPool:    poolWith690,
 			pConf:    `{"cores":"1","tags":"pveforge-harness"}`,
 			pSnaps:   `[{"name":"current"}]`,
+			pNextID:  `"690"`,
 		},
+		gone: map[string]string{},
 		seq: map[string]map[int]string{
-			pPool:    {1: emptyPool, 10: emptyPool},
+			pPool:    {1: emptyPool},
 			pContent: {2: oneVolume},
 			pStatus:  {2: storageStatus("zfspool", gib600-(5<<30), "")},
 		},
-		rc:   map[string]map[int]int{pRollback: {1: 1}, pGone: {0: 1}},
-		err:  map[string]map[int]string{pRollback: {1: zfsRefusal}, pGone: {0: goneAnswer}},
+		rc:   map[string]map[int]int{pRollback: {1: 1}},
+		err:  map[string]map[int]string{pRollback: {1: zfsRefusal}},
 		args: []string{"--storage", "pveforge-harness"},
 	}
 }
@@ -179,9 +196,13 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 	if err := os.WriteFile(filepath.Join(cfg, "harness-outer.toml"), []byte("# test roster\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// sleep is stubbed so the 180 s poll runs at once; each call is counted.
-	if err := os.WriteFile(filepath.Join(stub, "sleep"), []byte("#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\n"), 0o700); err != nil {
-		t.Fatal(err)
+	// sleep and `date +%s` share a fake clock (clockStubs), so a poll bounded
+	// by the clock runs at once; each sleep is counted. A spec's own stubs
+	// replace them.
+	for name, body := range clockStubs(t, map[string]string{}) {
+		if err := os.WriteFile(filepath.Join(stub, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if s.setup != nil {
 		s.setup(t, home)
@@ -218,6 +239,24 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 			put("err", k, n, v+"\n")
 		}
 	}
+	for k, v := range s.gone {
+		if err := os.WriteFile(filepath.Join(fakeDir, "resp", fakeKey(k)+".destroyed"), []byte(v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range s.keepInPool {
+		if err := os.MkdirAll(filepath.Join(fakeDir, "keep-in-pool"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fakeDir, "keep-in-pool", v), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for k, v := range s.goneRC {
+		if err := os.WriteFile(filepath.Join(fakeDir, "rc", fakeKey(k)+".destroyed"), []byte(fmt.Sprint(v)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for k, m := range s.kill {
 		for n, v := range m {
 			put("kill", k, n, v)
@@ -240,7 +279,11 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 	}
 	var fifo *os.File
 	if s.block != "" {
-		put("block", s.block, 1, "")
+		at := s.blockAt
+		if at == 0 {
+			at = 1
+		}
+		put("block", s.block, at, "")
 		fp := filepath.Join(fakeDir, "block.fifo")
 		if err := syscall.Mkfifo(fp, 0o600); err != nil {
 			t.Fatal(err)
@@ -425,17 +468,22 @@ func TestProbe_ZFSPool(t *testing.T) {
 		if strings.Contains(c, "--unsafe-no-lock") {
 			t.Errorf("a call bypasses the lock: %s", c)
 		}
+		if strings.Contains(c, "/qemu/690/status/current") {
+			t.Errorf("690's status was read: a pool token gets 403 for a destroyed VM, so its answer proves nothing: %s", c)
+		}
+	}
+	if !slices.Contains(r.calls, "api get /cluster/nextid qa-pve-02-harness --roster R -o json --data vmid=690") {
+		t.Errorf("690 was never proven free by /cluster/nextid: %q", r.calls)
 	}
 }
 
-// P2: on lvmthin the same rollback succeeds: rule rollback-any, and the
-// cascade still runs.
-func TestProbe_LVMThin(t *testing.T) {
+// P2: a storage on which the rollback to s1 while s2 exists succeeds: rule
+// rollback-any, and the cascade still runs. (No zfspool does; lvmthin, which
+// would, is refused before this. The branch stays covered.)
+func TestProbe_RollbackAny(t *testing.T) {
 	s := zfsWorld()
-	s.resp[pStatus] = storageStatus("lvmthin", gib600, "")
-	s.seq[pStatus] = map[int]string{2: storageStatus("lvmthin", gib600-(5<<30), "")}
-	s.rc = map[string]map[int]int{pGone: {0: 1}}
-	s.err = map[string]map[int]string{pGone: {0: goneAnswer}}
+	s.rc = map[string]map[int]int{}
+	s.err = map[string]map[int]string{}
 	r := runProbe(t, s)
 	if r.code != 0 || r.stdout != "rollback-rule=rollback-any storage=pveforge-harness\n" {
 		t.Fatalf("exit %d stdout %q stderr:\n%s", r.code, r.stdout, r.stderr)
@@ -458,7 +506,8 @@ func TestProbe_StaticRefusals(t *testing.T) {
 		"not active":            {strings.Replace(storageStatus("zfspool", gib600, ""), `"active":1`, `"active":0`, 1), nil, 3, "it is not active on qa-pve-02"},
 		"no images":             {strings.Replace(storageStatus("zfspool", gib600, ""), `"images,rootdir"`, `"rootdir,iso"`, 1), nil, 3, "does not include images"},
 		"images only as prefix": {strings.Replace(storageStatus("zfspool", gib600, ""), `"images,rootdir"`, `"imagesx"`, 1), nil, 3, "does not include images"},
-		"a dir storage":         {storageStatus("dir", gib600, ""), nil, 3, "type dir cannot hold the harness: it needs zfspool or lvmthin"},
+		"a dir storage":         {storageStatus("dir", gib600, ""), nil, 3, "type dir cannot hold the harness: it needs zfspool"},
+		"an lvmthin storage":    {storageStatus("lvmthin", gib600, ""), nil, 3, "type lvmthin cannot hold the harness: the pool token's proof that a destroyed VM's volumes are gone needs zfspool's thick accounting"},
 		"an nfs storage":        {storageStatus("nfs", gib600, ""), nil, 3, "type nfs cannot hold the harness"},
 		"too little space":      {storageStatus("zfspool", 519<<30, ""), nil, 3, "519 GiB free, below HARNESS_PROBE_MIN_FREE_GIB=520"},
 		"a raised threshold":    {storageStatus("zfspool", gib600, ""), map[string]string{"HARNESS_PROBE_MIN_FREE_GIB": "601"}, 3, "below HARNESS_PROBE_MIN_FREE_GIB=601"},
@@ -485,7 +534,8 @@ func TestProbe_StaticRefusals(t *testing.T) {
 	}
 	// The minimum is exactly 520 GiB.
 	s := zfsWorld()
-	s.resp[pStatus] = storageStatus("zfspool", 520<<30, "")
+	// (A storage smaller than its quota: 520 GiB free, and empty.)
+	s.resp[pStatus] = storageStatus("zfspool", 520<<30, `,"used":0`)
 	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", 515<<30, "")}
 	if r := runProbe(t, s); r.code != 0 {
 		t.Errorf("exactly 520 GiB free: exit %d\n%s", r.code, r.stderr)
@@ -527,6 +577,34 @@ func TestProbe_690MustNotExist(t *testing.T) {
 	if r.code != 3 || !strings.Contains(r.stderr, "already holds volumes of VM 690") || len(r.writes()) != 0 {
 		t.Errorf("a leftover volume: exit %d writes %q\n%s", r.code, r.writes(), r.stderr)
 	}
+	// Not an empty harness storage: another VM in the pool, or used above
+	// the empty dataset's 1 MiB (an orphan the token cannot list, or a free
+	// still in progress): refused before anything, naming the figure.
+	s = zfsWorld()
+	s.seq[pPool] = map[int]string{1: strings.Replace(poolWith690, `"vmid":690`, `"vmid":691`, 1)}
+	r = runProbe(t, s)
+	if r.code != 3 || !strings.Contains(r.stderr, "pool pveforge-harness is not empty") || len(r.writes()) != 0 {
+		t.Errorf("another VM in the pool: exit %d writes %q\n%s", r.code, r.writes(), r.stderr)
+	}
+	s = zfsWorld()
+	s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20)-1, "")
+	s.seq[pStatus] = nil
+	r = runProbe(t, s)
+	if r.code != 3 || !strings.Contains(r.stderr, "storage pveforge-harness is not empty: its used is 1048577 bytes") || len(r.writes()) != 0 {
+		t.Errorf("used above 1 MiB: exit %d writes %q\n%s", r.code, r.writes(), r.stderr)
+	}
+	// 690 held anywhere in the cluster, outside the pool the token sees.
+	for name, edit := range map[string]func(s *probeSpec){
+		"nextid 400":   func(s *probeSpec) { s.rc[pNextID] = map[int]int{0: 1}; s.err[pNextID] = map[int]string{0: nextIDInUse} },
+		"another VMID": func(s *probeSpec) { s.resp[pNextID] = `"691"` },
+	} {
+		s = zfsWorld()
+		edit(&s)
+		r = runProbe(t, s)
+		if r.code != 3 || !strings.Contains(r.stderr, "refusing storage pveforge-harness: VMID 690 is not free in the cluster") || len(r.writes()) != 0 {
+			t.Errorf("%s: exit %d writes %q\n%s", name, r.code, r.writes(), r.stderr)
+		}
+	}
 }
 
 // cleanupWorld: a world in which cleanup finds s1 and s2 and destroys 690.
@@ -537,12 +615,20 @@ func cleanupWorld() probeSpec {
 	return s
 }
 
-// stillThere makes 690 answer after the destroy: cleanup could not remove it.
-func stillThere(s probeSpec, conf string) {
-	s.rc[pGone] = nil
-	s.err[pGone] = nil
-	s.resp[pGone] = conf
+// stillThere keeps 690 in the cluster after the destroy: /cluster/nextid
+// refuses it (400), as PVE does for a VMID in use.
+func stillThere(s probeSpec) {
+	// Free at the preflight's read (call 1), in use at every later one.
+	s.rc[pNextID] = map[int]int{}
+	s.err[pNextID] = map[int]string{}
+	for n := 2; n < 8; n++ {
+		s.rc[pNextID][n] = 1
+		s.err[pNextID][n] = nextIDInUse
+	}
 }
+
+// notProven is cleanup's report for a 690 that stillThere keeps.
+const notProven = "LEFTOVER: VM 690 is not proven gone after cleanup: /cluster/nextid did not answer 200 for VMID 690"
 
 // P6: an unrecognised rollback error aborts; cleanup deletes the snapshots
 // newest first and destroys 690; no rule is written.
@@ -571,12 +657,12 @@ func TestProbe_LockAfterRefusal(t *testing.T) {
 	s.rc[pDelS1] = map[int]int{0: 1}
 	s.rc[pDestroy] = map[int]int{0: 1}
 	s.err[pDestroy] = map[int]string{0: "VM is locked (rollback)"}
-	stillThere(s, `{"status":"stopped","lock":"rollback"}`)
+	stillThere(s)
 	r := runProbe(t, s)
 	if r.code != 4 {
 		t.Fatalf("exit %d\n%s", r.code, r.stderr)
 	}
-	for _, want := range []string{"carries lock 'rollback' after the refused rollback", "qm unlock 690", "LEFTOVER: VM 690 still exists after cleanup",
+	for _, want := range []string{"carries lock 'rollback' after the refused rollback", "qm unlock 690", notProven,
 		"lock:      rollback", "snapshots: s1 s2", "qm destroy 690 --purge"} {
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, r.stderr)
@@ -607,14 +693,14 @@ func TestProbe_CleanupFailsReportsLeftover(t *testing.T) {
 	s := cleanupWorld()
 	s.rc[pSnapS2] = map[int]int{0: 5}
 	s.rc[pDestroy] = map[int]int{0: 7}
-	stillThere(s, `{"status":"stopped"}`)
+	stillThere(s)
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
 	r := runProbe(t, s)
 	if r.code != 5 {
 		t.Fatalf("exit %d\n%s", r.code, r.stderr)
 	}
-	for _, want := range []string{"LEFTOVER: VM 690 still exists after cleanup", "volumes:   pveforge-harness:vm-690-disk-0", "Removing it needs an operator ask", "pvesm list pveforge-harness --vmid 690"} {
+	for _, want := range []string{notProven, "volumes:   pveforge-harness:vm-690-disk-0", "Removing it needs an operator ask", "pvesm list pveforge-harness --vmid 690"} {
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, r.stderr)
 		}
@@ -636,59 +722,147 @@ func TestProbe_CreateFailedButVMAppeared(t *testing.T) {
 	}
 }
 
-// P11: the poll is bounded: 180 s at 5 s, then a named failure; the free
-// space must come back to within 1 MiB, not merely rise.
+// P11: the poll is bounded by the clock, 180 s at 5 s, then a named failure:
+// the usage must come back to within 1 MiB of its baseline, not merely fall,
+// and the storage must first have shown the disk in its usage at all.
 func TestProbe_PollIsBounded(t *testing.T) {
+	const notGone = "VM 690's volumes are not proven gone: "
 	s := zfsWorld()
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
 	r := runProbe(t, s)
-	if r.code != 4 || !strings.Contains(r.stderr, "after 180s, storage pveforge-harness still lists volumes of VM 690") || r.sleeps != 36 {
+	if r.code != 4 || !strings.Contains(r.stderr, notGone+"storage pveforge-harness still lists volumes of VM(s) 690, after 180s") || r.sleeps != 36 {
 		t.Errorf("volumes never go: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
 	if _, ok := r.rule(); ok {
 		t.Error("a probe whose poll timed out wrote the rule")
 	}
+	// The bound is the clock's, not a count of sleeps: a slow sleep ends it
+	// sooner.
 	s = zfsWorld()
-	s.seq[pStatus] = map[int]string{}
-	s.resp[pStatus] = storageStatus("zfspool", gib600, "")
-	for n := 2; n < 60; n++ {
+	s.resp[pContent] = oneVolume
+	s.seq[pContent] = map[int]string{1: `[]`}
+	s.stubs = map[string]string{"sleep": "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nc=0\n[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\nprintf '%s' $((c + 60)) >\"$FAKE_PVEFORGE_DIR/clock\"\n"}
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "after 180s") || r.sleeps != 3 {
+		t.Errorf("a slow clock: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	}
+	// A hidden leftover: nothing listed, but the usage 2 MiB high.
+	s = zfsWorld()
+	delete(s.seq, pContent)
+	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(5<<30), "")}
+	for n := 3; n < 60; n++ {
 		s.seq[pStatus][n] = storageStatus("zfspool", gib600-(2<<20), "")
 	}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "within 1 MiB") {
-		t.Errorf("space 2 MiB short: exit %d\n%s", r.code, r.stderr)
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, notGone+"storage pveforge-harness's used is 2097152, not back within 1 MiB of its baseline 0, after 180s") {
+		t.Errorf("usage 2 MiB high: exit %d\n%s", r.code, r.stderr)
 	}
 	s = zfsWorld()
 	delete(s.seq, pContent)
-	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(1<<20), "")}
+	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(5<<30), ""), 3: storageStatus("zfspool", gib600-(1<<20), "")}
 	if r := runProbe(t, s); r.code != 0 || r.sleeps != 0 {
-		t.Errorf("space exactly 1 MiB short is within tolerance: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+		t.Errorf("usage exactly 1 MiB high is within the slack: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	}
+	// A status that cannot be read, or has no usable used, is never "back".
+	for name, edit := range map[string]func(s *probeSpec){
+		"unreadable": func(s *probeSpec) {
+			s.rc[pStatus] = map[int]int{}
+			for n := 3; n < 60; n++ {
+				s.rc[pStatus][n] = 1
+			}
+		},
+		"no used": func(s *probeSpec) {
+			for n := 3; n < 60; n++ {
+				s.seq[pStatus][n] = `{"type":"zfspool","avail":1}`
+			}
+		},
+		"a string used": func(s *probeSpec) {
+			for n := 3; n < 60; n++ {
+				s.seq[pStatus][n] = `{"type":"zfspool","used":"0"}`
+			}
+		},
+	} {
+		s = zfsWorld()
+		delete(s.seq, pContent)
+		edit(&s)
+		if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, notGone+"storage pveforge-harness's status could not be read, after 180s") {
+			t.Errorf("%s: exit %d\n%s", name, r.code, r.stderr)
+		}
+	}
+	// A non-zero baseline (the empty dataset's metadata, up to 1 MiB): both
+	// checks are relative to it. Accounting: 1 GiB less 512 KiB over an
+	// ABSOLUTE zero would pass, but over a 1 MiB baseline it is short.
+	s = zfsWorld()
+	s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20), "")
+	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(1<<30)+(512<<10), "")}
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "not at least 1073741824 bytes over its baseline 1048576") {
+		t.Errorf("a short disk over a 1 MiB baseline: exit %d\n%s", r.code, r.stderr)
+	}
+	// Recovery: 1.5 MiB used is back within 1 MiB of a 1 MiB baseline.
+	s = zfsWorld()
+	delete(s.seq, pContent)
+	s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20), "")
+	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(1<<20)-(5<<30), ""), 3: storageStatus("zfspool", gib600-(3<<19), "")}
+	if r := runProbe(t, s); r.code != 0 || r.sleeps != 0 {
+		t.Errorf("recovery over a 1 MiB baseline: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	}
+	// A disk the storage does not show in its usage (a sparse zvol, say):
+	// its recovery could prove nothing, so the probe stops before the rule.
+	s = zfsWorld()
+	s.seq[pStatus] = map[int]string{2: storageStatus("zfspool", gib600-(512<<20), "")}
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "used is 536870912 after the create, not at least 1073741824 bytes over its baseline 0: it does not account the disk") {
+		t.Errorf("an unaccounted disk: exit %d\n%s", r.code, r.stderr)
 	}
 }
 
-// P12: 690 still answers after the destroy, or answers with another error,
-// or stays in the pool: named failures.
+// P12: 690 is gone only on a positive proof: /cluster/nextid answers 200
+// with exactly 690, and the pool no longer lists it. Anything else, whatever
+// its text, is a named failure and no rule is written.
 func TestProbe_VerifyGone(t *testing.T) {
+	const notGone = "VM 690 is not proven gone after the destroy: "
+	for name, c := range map[string]struct {
+		edit func(s *probeSpec)
+		want string
+	}{
+		"nextid 400": {func(s *probeSpec) {
+			s.goneRC = map[string]int{pNextID: 1}
+			s.err[pNextID] = map[int]string{0: nextIDInUse}
+		}, "/cluster/nextid did not answer 200"},
+		"nextid fails saying does not exist": {func(s *probeSpec) {
+			s.goneRC = map[string]int{pNextID: 1}
+			s.err[pNextID] = map[int]string{0: "Configuration file 'nodes/qa-pve-02/qemu-server/690.conf' does not exist"}
+		}, "/cluster/nextid did not answer 200"},
+		"another VMID":        {func(s *probeSpec) { s.gone[pNextID] = `"691"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"a longer VMID":       {func(s *probeSpec) { s.gone[pNextID] = `"6900"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"a prefix":            {func(s *probeSpec) { s.gone[pNextID] = `"69"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"null":                {func(s *probeSpec) { s.gone[pNextID] = `null` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"an array":            {func(s *probeSpec) { s.gone[pNextID] = `["690"]` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"two values":          {func(s *probeSpec) { s.gone[pNextID] = "\"690\"\n\"690\"" }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"not JSON":            {func(s *probeSpec) { s.gone[pNextID] = `690 free` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"still in the pool":   {func(s *probeSpec) { s.keepInPool = []string{"690"} }, "pool pveforge-harness still lists VM 690"},
+		"the pool unreadable": {func(s *probeSpec) { s.goneRC = map[string]int{pPool: 1} }, "reading pool pveforge-harness failed"},
+		"the pool lists 690 as a string": {func(s *probeSpec) {
+			s.gone[pPool] = `[{"poolid":"pveforge-harness","members":[{"id":"qemu/690","type":"qemu","vmid":"690","node":"qa-pve-02"}]}]`
+		}, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
+		"another pool's answer": {func(s *probeSpec) { s.gone[pPool] = `[{"poolid":"other","members":[]}]` }, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
+		"an empty answer":       {func(s *probeSpec) { s.gone[pPool] = `[]` }, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := zfsWorld()
+			c.edit(&s)
+			r := runProbe(t, s)
+			if r.code != 4 || !strings.Contains(r.stderr, notGone+c.want) {
+				t.Errorf("exit %d, want 4 and %q:\n%s", r.code, notGone+c.want, r.stderr)
+			}
+			if _, ok := r.rule(); ok {
+				t.Error("a probe that could not prove 690 gone wrote the rule")
+			}
+		})
+	}
+	// PVE's integer form is 690 too.
 	s := zfsWorld()
-	s.rc[pGone] = nil
-	s.err[pGone] = nil
-	s.resp[pGone] = `{"status":"stopped"}`
-	r := runProbe(t, s)
-	if r.code != 4 || !strings.Contains(r.stderr, "still answers after the destroy") {
-		t.Errorf("still answers: exit %d\n%s", r.code, r.stderr)
-	}
-	if _, ok := r.rule(); ok {
-		t.Error("a probe that could not verify 690 gone wrote the rule")
-	}
-	s = zfsWorld()
-	s.err[pGone] = map[int]string{0: "get vm 690 status: 403 Forbidden"}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "not with 'does not exist'") {
-		t.Errorf("another error: exit %d\n%s", r.code, r.stderr)
-	}
-	s = zfsWorld()
-	s.seq[pPool] = map[int]string{1: emptyPool}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "still lists VM 690 after the destroy") {
-		t.Errorf("still in the pool: exit %d\n%s", r.code, r.stderr)
+	s.resp[pNextID] = `690`
+	if r := runProbe(t, s); r.code != 0 {
+		t.Errorf("nextid 690 as a number: exit %d\n%s", r.code, r.stderr)
 	}
 }
 
@@ -709,36 +883,46 @@ func TestProbe_SignalCleansUp(t *testing.T) {
 	}
 }
 
-// P14: after cleanup's destroy the volume lingers (ZFS frees asynchronously):
-// cleanup waits, bounded, before calling anything left.
+// P14: after cleanup's destroy the volumes linger (ZFS frees
+// asynchronously): cleanup waits, bounded by the clock, until the storage's
+// usage is back at its baseline and it lists nothing of 690.
 func TestProbe_CleanupWaitsForVolumes(t *testing.T) {
-	s := cleanupWorld()
-	s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
-	s.rc[pSnapS2] = map[int]int{0: 5}
+	dies := func() probeSpec {
+		s := cleanupWorld()
+		s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
+		s.rc[pSnapS2] = map[int]int{0: 5}
+		return s
+	}
+	s := dies()
 	s.seq[pContent] = map[int]string{2: oneVolume, 3: oneVolume}
 	r := runProbe(t, s)
 	if r.code != 5 || !strings.Contains(r.stderr, "cleanup: VM 690 destroyed") || strings.Contains(r.stderr, "LEFTOVER") || r.sleeps != 2 {
 		t.Errorf("exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
-	// A command that fails inside cleanup (here its sleep) never stops it.
-	s = cleanupWorld()
-	s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
-	s.rc[pSnapS2] = map[int]int{0: 5}
-	s.seq[pContent] = map[int]string{2: oneVolume, 3: oneVolume}
-	s.stubs = map[string]string{"sleep": "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nexit 1\n"}
+	// A hidden leftover: the token is not shown a destroyed VM's volume, so
+	// the listing is empty, but the usage never comes back.
+	s = dies()
+	s.gone[pStatus] = storageStatus("zfspool", gib600-(1<<30), "")
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "cleanup: VM 690 destroyed") || r.sleeps != 2 {
-		t.Errorf("a failing sleep: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is destroyed, but its volumes are not proven gone: storage pveforge-harness's used is 1073741824, not back within 1 MiB of its baseline 0, after 180s") || r.sleeps != 36 {
+		t.Errorf("a hidden leftover: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
-	// Volumes that never go are left over after the same 180 s bound.
-	s = cleanupWorld()
-	s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
-	s.rc[pSnapS2] = map[int]int{0: 5}
+	// A listed volume is a leftover even when the usage has come back.
+	s = dies()
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is destroyed, but storage pveforge-harness still lists its volumes") || r.sleeps != 36 {
+	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is destroyed, but its volumes are not proven gone: storage pveforge-harness still lists volumes of VM(s) 690, after 180s") || r.sleeps != 36 {
 		t.Errorf("volumes never go: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	}
+	// A sleep that fails ends the wait as unproven, never as a shorter one;
+	// cleanup still reports.
+	s = dies()
+	s.seq[pContent] = map[int]string{2: oneVolume, 3: oneVolume}
+	s.stubs = map[string]string{"sleep": "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nexit 1\n"}
+	r = runProbe(t, s)
+	if r.code != 5 || !strings.Contains(r.stderr, "still lists volumes of VM(s) 690; then sleep failed") || !strings.Contains(r.stderr, "LEFTOVER") || r.sleeps != 1 {
+		t.Errorf("a failing sleep: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
 	}
 }
 
@@ -811,9 +995,9 @@ func TestProbe_BrokenPipeCleansUp(t *testing.T) {
 	s = dieAtS2()
 	s.out = "pipe"
 	s.onBlock = func(t *testing.T, b blocked) { b.hangup() }
-	stillThere(s, `{"status":"stopped"}`)
+	stillThere(s)
 	r = runProbe(t, s)
-	if got := r.evidence(t, "LEFTOVER"); !strings.Contains(got, "LEFTOVER: VM 690 still exists after cleanup") || !strings.Contains(got, "qm destroy 690 --purge") {
+	if got := r.evidence(t, "LEFTOVER"); !strings.Contains(got, notProven) || !strings.Contains(got, "qm destroy 690 --purge") {
 		t.Errorf("exit %d, LEFTOVER %q", r.code, got)
 	}
 }
@@ -835,9 +1019,9 @@ func TestProbe_CtrlCDuringCleanup(t *testing.T) {
 	}
 	// The same, with 690 left: the report is made.
 	s.kill = map[string]map[int]string{pDelS1: {1: "group:INT"}, pDestroy: {1: "group:TERM"}}
-	stillThere(s, `{"status":"stopped"}`)
+	stillThere(s)
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 still exists after cleanup") {
+	if r.code != 5 || !strings.Contains(r.stderr, notProven) {
 		t.Errorf("exit %d\n%s", r.code, r.stderr)
 	}
 	equalCalls(t, "writes", r.writes(), dieAtS2Writes)
@@ -868,20 +1052,21 @@ func TestProbe_UnwritableEvidenceDuringCleanup(t *testing.T) {
 	equalCalls(t, "writes", r.writes(), dieAtS2Writes)
 	s = dieAtS2()
 	s.onBlock = lock
-	stillThere(s, `{"status":"stopped"}`)
+	stillThere(s)
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 still exists after cleanup") || !strings.Contains(r.stderr, "qm destroy 690 --purge") {
+	if r.code != 5 || !strings.Contains(r.stderr, notProven) || !strings.Contains(r.stderr, "qm destroy 690 --purge") {
 		t.Errorf("exit %d\n%s", r.code, r.stderr)
 	}
 	equalCalls(t, "writes", r.writes(), dieAtS2Writes)
 	// A failure found by the probe itself keeps its status too.
-	// (690 still answers after the destroy.)
+	// (690 is not proven gone after the destroy.)
 	s = cleanupWorld()
-	s.block = pGone
+	s.block = pNextID
+	s.blockAt = 2 // the proof after the destroy; call 1 is the preflight's
 	s.onBlock = lock
-	stillThere(s, `{"status":"stopped"}`)
+	stillThere(s)
 	r = runProbe(t, s)
-	if r.code != 4 || !strings.Contains(r.stderr, "probe: VM 690 still answers after the destroy") || !strings.Contains(r.stderr, "LEFTOVER: VM 690 still exists after cleanup") {
+	if r.code != 4 || !strings.Contains(r.stderr, "probe: VM 690 is not proven gone after the destroy") || !strings.Contains(r.stderr, notProven) {
 		t.Errorf("exit %d\n%s", r.code, r.stderr)
 	}
 	// A refusal into an unwritable evidence directory keeps its status too.
@@ -957,17 +1142,31 @@ func TestProbe_RuleWriteVerified(t *testing.T) {
 	}
 }
 
-// P22: cleanup takes 690 as gone only on PVE's own "does not exist": any
-// other error, even one that says "exists", is a leftover that could not be
-// read.
-func TestProbe_CleanupGoneNeedsDoesNotExist(t *testing.T) {
-	s := cleanupWorld()
-	s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
-	s.rc[pSnapS2] = map[int]int{0: 5}
-	s.err[pGone] = map[int]string{0: "get vm 690 status: 500 Internal Server Error: VM 690 exists, but its status could not be read"}
-	r := runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690: whether cleanup destroyed it could not be read") {
-		t.Errorf("exit %d\n%s", r.code, r.stderr)
+// P22: cleanup takes 690 as gone only on a positive proof: an error that
+// says "does not exist", another VMID, or a pool that still lists it is a
+// leftover, never "destroyed".
+func TestProbe_CleanupGoneNeedsPositiveProof(t *testing.T) {
+	for name, c := range map[string]struct {
+		edit func(s *probeSpec)
+		want string
+	}{
+		"does-not-exist text": {func(s *probeSpec) {
+			s.goneRC = map[string]int{pNextID: 1}
+			s.err[pNextID] = map[int]string{0: "Configuration file 'nodes/qa-pve-02/qemu-server/690.conf' does not exist"}
+		}, "/cluster/nextid did not answer 200 for VMID 690"},
+		"another VMID":      {func(s *probeSpec) { s.gone[pNextID] = `"691"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
+		"still in the pool": {func(s *probeSpec) { s.keepInPool = []string{"690"} }, "pool pveforge-harness still lists VM 690"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := cleanupWorld()
+			s.resp[pSnaps] = `[{"name":"current"},{"name":"s1","snaptime":100}]`
+			s.rc[pSnapS2] = map[int]int{0: 5}
+			c.edit(&s)
+			r := runProbe(t, s)
+			if r.code != 5 || !strings.Contains(r.stderr, "LEFTOVER: VM 690 is not proven gone after cleanup: "+c.want) || strings.Contains(r.stderr, "cleanup: VM 690 destroyed") {
+				t.Errorf("exit %d\n%s", r.code, r.stderr)
+			}
+		})
 	}
 }
 

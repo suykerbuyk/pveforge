@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,7 @@ func bContent(v string) string {
 }
 func bConf(v string) string   { return "get /nodes/qa-pve-02/qemu/" + v + "/config" }
 func bStatus(v string) string { return "get /nodes/qa-pve-02/qemu/" + v + "/status/current" }
+func bNextID(v string) string { return "get /cluster/nextid vmid=" + v }
 func bStart(v string) string  { return "post /nodes/qa-pve-02/qemu/" + v + "/status/start" }
 func hostKey(v string) string {
 	return buildIPs[v] + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey" + v
@@ -211,12 +213,15 @@ func TestMain(m *testing.M) {
 }
 
 // buildWorld: a clean slate on qa-pve-02. The pool is empty at the preflight
-// and then lists all three; each VM carries the tag and is running.
+// and then lists all three; each VM carries the tag and is running; each
+// VMID is free in the cluster (/cluster/nextid offers it) before the create
+// and again once it is destroyed, when the fake drops it from the pool.
 func buildWorld(t *testing.T, h buildHome) probeSpec {
 	s := probeSpec{
 		script: "build/build.sh",
 		resp: map[string]string{
 			pPool:   allMembers,
+			pStatus: storageStatus("zfspool", gib600, ""),
 			bISO:    `[{"volid":"local:iso/proxmox-ve_9.2-1.iso"},{"volid":"local:iso/pvh-n1-auto.iso"},{"volid":"local:iso/pvh-n2-auto.iso"}]`,
 			bImport: `[{"volid":"local:import/debian-13-genericcloud-amd64.qcow2"}]`,
 		},
@@ -231,6 +236,7 @@ func buildWorld(t *testing.T, h buildHome) probeSpec {
 		}),
 		setup: h.setup,
 		env:   map[string]string{"HARNESS_PINS_BIN": pinsTool(t)},
+		gone:  map[string]string{},
 	}
 	if h.pins != "" {
 		p := filepath.Join(t.TempDir(), "pins")
@@ -241,6 +247,7 @@ func buildWorld(t *testing.T, h buildHome) probeSpec {
 		s.resp[bContent(v)] = `[]`
 		s.resp[bConf(v)] = `{"name":"x","tags":"pveforge-harness"}`
 		s.resp[bStatus(v)] = `{"status":"running"}`
+		s.resp[bNextID(v)] = `"` + v + `"`
 	}
 	return s
 }
@@ -257,16 +264,6 @@ func clockStubs(t *testing.T, stubs map[string]string) map[string]string {
 	stubs["date"] = "#!/usr/bin/env bash\nif [ \"$*\" = +%s ]; then\n\tc=0\n\t[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\n\techo $((1790000000 + c))\n\texit 0\nfi\nexec " + realDate + " \"$@\"\n"
 	stubs["sleep"] = "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nc=0\n[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\nprintf '%s' $((c + $1)) >\"$FAKE_PVEFORGE_DIR/clock\"\n"
 	return stubs
-}
-
-// goneAfter makes VM v answer "does not exist" from its status read n on.
-func goneAfter(s probeSpec, v string, n int) {
-	s.rc[bStatus(v)] = map[int]int{}
-	s.err[bStatus(v)] = map[int]string{}
-	for i := n; i < n+8; i++ {
-		s.rc[bStatus(v)][i] = 1
-		s.err[bStatus(v)][i] = "get vm " + v + " status: 500 Internal Server Error: Configuration file 'nodes/qa-pve-02/qemu-server/" + v + ".conf' does not exist"
-	}
 }
 
 func bCall(verb, sub, data string) string {
@@ -376,14 +373,22 @@ func TestBuild_PreflightRefusals(t *testing.T) {
 		edit func(s probeSpec)
 		want string
 	}{
-		"691 exists":     {edit: func(s probeSpec) { s.seq[pPool] = nil }, want: "VM 690 already exists in pool pveforge-harness: the build runs on a clean slate"},
-		"a leftover":     {edit: func(s probeSpec) { s.resp[bContent("692")] = oneVolume }, want: "storage pveforge-harness already holds volumes of VM 692"},
-		"no n2 ISO":      {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n1-auto.iso"}]` }, want: "local:iso/pvh-n2-auto.iso is not on qa-pve-02"},
-		"no n1 ISO":      {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n2-auto.iso"}]` }, want: "local:iso/pvh-n1-auto.iso is not on qa-pve-02"},
-		"no image":       {edit: func(s probeSpec) { s.resp[bImport] = `[]` }, want: "local:import/debian-13-genericcloud-amd64.qcow2 is not on qa-pve-02"},
-		"no key":         {h: buildHome{noKey: true}, want: "harness-nested_ed25519.pub does not exist: run prepare-iso.sh first"},
-		"already pinned": {h: buildHome{known: otherPin + "\n" + hostKey("691") + "\n"}, want: "already pins a host key for 192.0.2.91 (pvh-n2); a new build makes new host keys: run with --repin"},
-		"loose pins":     {h: buildHome{known: otherPin + "\n", knownM: 0o644}, want: "has mode 644, want 600"},
+		"691 exists": {edit: func(s probeSpec) { s.seq[pPool] = nil }, want: "VM 690 already exists in pool pveforge-harness: the build runs on a clean slate"},
+		"a leftover": {edit: func(s probeSpec) { s.resp[bContent("692")] = oneVolume }, want: "storage pveforge-harness already holds volumes of VM 692"},
+		"no n2 ISO":  {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n1-auto.iso"}]` }, want: "local:iso/pvh-n2-auto.iso is not on qa-pve-02"},
+		"no n1 ISO":  {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n2-auto.iso"}]` }, want: "local:iso/pvh-n1-auto.iso is not on qa-pve-02"},
+		"no image":   {edit: func(s probeSpec) { s.resp[bImport] = `[]` }, want: "local:import/debian-13-genericcloud-amd64.qcow2 is not on qa-pve-02"},
+		// Not an empty harness storage: used above the empty dataset's 1 MiB.
+		"used above 1 MiB": {edit: func(s probeSpec) { s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20)-1, "") }, want: "storage pveforge-harness is not empty: its used is 1048577 bytes"},
+		"another VM in the pool": {edit: func(s probeSpec) {
+			s.seq[pPool] = map[int]string{1: strings.Replace(emptyPool, `"members":[]`, `"members":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"qa-pve-02"}]`, 1)}
+		}, want: "pool pveforge-harness is not empty: the build runs on an empty harness storage"},
+		// A VMID held anywhere in the cluster, outside the pool the token sees.
+		"691 in use in the cluster":  {edit: func(s probeSpec) { s.rc[bNextID("691")] = map[int]int{0: 1} }, want: "VMID 691 is not free in the cluster: /cluster/nextid did not answer 200 for VMID 691"},
+		"nextid offers another VMID": {edit: func(s probeSpec) { s.resp[bNextID("692")] = `"693"` }, want: "VMID 692 is not free in the cluster: /cluster/nextid answered 200 for VMID 692, but not with 692"},
+		"no key":                     {h: buildHome{noKey: true}, want: "harness-nested_ed25519.pub does not exist: run prepare-iso.sh first"},
+		"already pinned":             {h: buildHome{known: otherPin + "\n" + hostKey("691") + "\n"}, want: "already pins a host key for 192.0.2.91 (pvh-n2); a new build makes new host keys: run with --repin"},
+		"loose pins":                 {h: buildHome{known: otherPin + "\n", knownM: 0o644}, want: "has mode 644, want 600"},
 		"pins a directory": {h: buildHome{extra: func(t *testing.T, home string) {
 			os.MkdirAll(filepath.Join(home, ".config/pveforge/harness-nested.known_hosts"), 0o700)
 		}}, want: "harness-nested.known_hosts is not a regular file"},
@@ -485,9 +490,6 @@ func TestBuild_Repin(t *testing.T) {
 // cleanup stops and destroys this run's three VMs, newest first.
 func TestBuild_PollTimeoutCleansUp(t *testing.T) {
 	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
-	for v := range buildIPs {
-		goneAfter(s, v, 2)
-	}
 	r := runProbe(t, s)
 	// A clock, not a count: each round's timed-out attempt (5 s) and sleep
 	// (10 s) spend 15 s of the 1800, so 120 sleeps, never 180.
@@ -530,7 +532,6 @@ func TestBuild_CreateFailsMidway(t *testing.T) {
 	s.rc["vm create 691"] = map[int]int{0: 5}
 	s.resp[pPool] = strings.Replace(allMembers, `,{"id":"qemu/692","type":"qemu","vmid":692,"node":"qa-pve-02"}`, "", 1)
 	s.resp[bStatus("690")] = `{"status":"stopped"}`
-	goneAfter(s, "690", 2)
 	r := runProbe(t, s)
 	if r.code != 5 {
 		t.Fatalf("exit %d, want pveforge's 5\n%s", r.code, r.stderr)
@@ -544,9 +545,8 @@ func TestBuild_CreateFailsMidway(t *testing.T) {
 // B8: cleanup cannot destroy a VM: the report names it and the status stands.
 func TestBuild_CleanupFailsReportsLeftover(t *testing.T) {
 	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.90_22": "never"}})
-	goneAfter(s, "691", 2)
-	goneAfter(s, "692", 2)
 	s.rc["delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1"] = map[int]int{0: 7}
+	s.rc[bNextID("690")] = map[int]int{2: 1} // in use, after the preflight's read
 	r := runProbe(t, s)
 	if r.code != 4 {
 		t.Fatalf("exit %d\n%s", r.code, r.stderr)
@@ -573,9 +573,6 @@ func TestBuild_KeyscanRefused(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := buildWorld(t, buildHome{keyscan: map[string]string{"692": out}})
-			for v := range buildIPs {
-				goneAfter(s, v, 2)
-			}
 			r := runProbe(t, s)
 			if r.code != 4 || !strings.Contains(r.stderr, "ssh-keyscan 192.0.2.92 did not give exactly one ed25519 host key") {
 				t.Fatalf("exit %d\n%s", r.code, r.stderr)
@@ -595,9 +592,6 @@ func TestBuild_SignalCleansUp(t *testing.T) {
 	s := buildWorld(t, buildHome{})
 	s.kill = map[string]map[int]string{bStart("691"): {1: "INT"}}
 	s.resp[bStatus("692")] = `{"status":"stopped"}` // never started
-	for v := range buildIPs {
-		goneAfter(s, v, 2)
-	}
 	r := runProbe(t, s)
 	if r.code != 130 {
 		t.Fatalf("exit %d\n%s", r.code, r.stderr)
@@ -611,9 +605,6 @@ func TestBuild_SignalCleansUp(t *testing.T) {
 func TestBuild_PinsVerifiedAndPrivate(t *testing.T) {
 	s := buildWorld(t, buildHome{})
 	s.stubs["mv"] = "#!/usr/bin/env bash\nexit 0\n"
-	for v := range buildIPs {
-		goneAfter(s, v, 2)
-	}
 	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, "is not a regular file holding the pins after the write") {
 		t.Errorf("an mv that writes nothing: exit %d\n%s", r.code, r.stderr)
 	}
@@ -946,12 +937,9 @@ func TestBuild_SiteFileSymlink(t *testing.T) {
 }
 
 // B13: cleanup runs to its end: a Ctrl-C to the process group during it is
-// ignored, and a VM is taken as gone only on PVE's "does not exist".
+// ignored, and a VM is taken as gone only on a positive proof.
 func TestBuild_CleanupRunsToItsEnd(t *testing.T) {
 	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
-	for v := range buildIPs {
-		goneAfter(s, v, 2)
-	}
 	s.kill = map[string]map[int]string{"post /nodes/qa-pve-02/qemu/692/status/stop": {1: "group:INT"}}
 	r := runProbe(t, s)
 	if r.code != 4 || !strings.Contains(r.stderr, "build: cleanup: this run's VM(s) 690 691 692 destroyed") {
@@ -959,10 +947,7 @@ func TestBuild_CleanupRunsToItsEnd(t *testing.T) {
 	}
 	equalCalls(t, "writes", r.writes(), bTornDown)
 	s = buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
-	for v := range buildIPs {
-		goneAfter(s, v, 2)
-	}
-	s.err[bStatus("691")][2] = "get vm 691 status: 500 Internal Server Error: VM 691 exists, but its status could not be read"
+	s.rc[bNextID("691")] = map[int]int{2: 1}
 	r = runProbe(t, s)
 	if r.code != 4 || !strings.Contains(r.stderr, "LEFTOVER:") || !strings.Contains(r.stderr, "VM 691 (pvh-n2)") || strings.Contains(r.stderr, "VM 690 (pvh-n1)") {
 		t.Errorf("exit %d\n%s", r.code, r.stderr)
@@ -1059,9 +1044,6 @@ func TestBuild_SignalsDuringCleanup(t *testing.T) {
 	for _, sig := range []string{"INT", "TERM", "HUP"} {
 		t.Run(sig, func(t *testing.T) {
 			s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
-			for v := range buildIPs {
-				goneAfter(s, v, 2)
-			}
 			s.kill = map[string]map[int]string{"post /nodes/qa-pve-02/qemu/692/status/stop": {1: "group:" + sig}}
 			r := runProbe(t, s)
 			if r.code != 4 || !strings.Contains(r.stderr, "build: cleanup: this run's VM(s) 690 691 692 destroyed") {
@@ -1141,5 +1123,85 @@ func TestBuild_IgnoresInheritedHB(t *testing.T) {
 				t.Fatalf("exit %d\n%s", r.code, r.stderr)
 			}
 		})
+	}
+}
+
+// B16: cleanup says a VM is destroyed only on a positive proof: /cluster/nextid
+// offers its VMID and the pool no longer lists it, then the storage's usage is
+// back at its baseline and it lists none of their volumes (a poll bounded by
+// the clock, 600 s). Anything else, whatever its text, leaves VMs named in LEFTOVER:
+// usage is one figure, so while it is not back, every VM proven gone is too.
+func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
+	all := []string{"690", "691", "692"}
+	firstDestroyOnly := append(append([]string{}, bCreated...), bStopC("692"), bDestroy("692"))
+	for name, c := range map[string]struct {
+		edit   func(s *probeSpec)
+		left   []string // named in LEFTOVER; the rest DESTROYED
+		sleeps int
+		writes []string // nil: bTornDown
+	}{
+		"nextid 400": {edit: func(s *probeSpec) { s.rc[bNextID("691")] = map[int]int{2: 1} }, left: []string{"691"}},
+		"nextid fails saying does not exist": {edit: func(s *probeSpec) {
+			s.rc[bNextID("691")] = map[int]int{2: 1}
+			s.err[bNextID("691")] = map[int]string{2: "Configuration file 'nodes/qa-pve-02/qemu-server/691.conf' does not exist"}
+		}, left: []string{"691"}},
+		"nextid offers another VMID": {edit: func(s *probeSpec) { s.seq[bNextID("691")] = map[int]string{2: `"692"`} }, left: []string{"691"}},
+		"still in the pool":          {edit: func(s *probeSpec) { s.keepInPool = []string{"691"} }, left: []string{"691"}},
+		// From 692's destroy on: lib's guard then refuses to touch 691 and
+		// 690 as well, and 692 is not proven gone.
+		"/pools fails": {edit: func(s *probeSpec) { s.goneRC = map[string]int{pPool: 1} }, left: all, writes: firstDestroyOnly},
+		"/pools empty": {edit: func(s *probeSpec) { s.gone[pPool] = `[]` }, left: all, writes: firstDestroyOnly},
+		// The listing is empty (the token is not shown them), but the usage
+		// stays 128 GiB up: a hidden leftover.
+		"the usage stays up": {edit: func(s *probeSpec) { s.gone[pStatus] = storageStatus("zfspool", gib600-(128<<30), "") }, left: all, sleeps: 120},
+		"a volume still listed": {edit: func(s *probeSpec) {
+			s.gone[bContent("691")] = `[{"volid":"pveforge-harness:vm-691-disk-0","vmid":691}]`
+		}, left: all, sleeps: 120},
+		"the status unreadable": {edit: func(s *probeSpec) { s.goneRC = map[string]int{pStatus: 1} }, left: all, sleeps: 120},
+		"the status lacks used": {edit: func(s *probeSpec) { s.gone[pStatus] = `{"type":"zfspool","avail":1}` }, left: all, sleeps: 120},
+		// A non-zero baseline: 1.5 MiB after the destroys is back within 1 MiB
+		// of a 1 MiB baseline (and not of an absolute zero).
+		"a non-zero baseline": {edit: func(s *probeSpec) {
+			s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20), "")
+			s.gone[pStatus] = storageStatus("zfspool", gib600-(3<<19), "")
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
+			c.edit(&s)
+			r := runProbe(t, s)
+			report := "LEFTOVER: cleanup could not remove all of them"
+			if len(c.left) == 0 {
+				report = "build: cleanup: this run's VM(s) 690 691 692 destroyed"
+			}
+			if r.code != 4 || !strings.Contains(r.stderr, report) {
+				t.Fatalf("exit %d, want 4 and %q\n%s", r.code, report, r.stderr)
+			}
+			want := c.writes
+			if want == nil {
+				want = bTornDown
+			}
+			equalCalls(t, "writes", r.writes(), want)
+			res := r.buildEvidence(t, "result.txt")
+			for _, v := range all {
+				named := strings.Contains(r.stderr, "VM "+v+" (pvh-")
+				if want := slices.Contains(c.left, v); named != want || strings.Contains(res, "DESTROYED "+v) == want {
+					t.Errorf("VM %s: named in LEFTOVER %t, DESTROYED %t; want named %t\n%s\n%s", v, named, strings.Contains(res, "DESTROYED "+v), want, r.stderr, res)
+				}
+			}
+			// 120: the TCP poll's own; then the usage poll's, 120 at most (600 s).
+			if r.sleeps != 120+c.sleeps {
+				t.Errorf("slept %d times, want %d", r.sleeps, 120+c.sleeps)
+			}
+		})
+	}
+	// A VM this run did not record, with a pool that cannot be read after
+	// the destroy: unknown, so named, never "clean".
+	s := buildWorld(t, buildHome{})
+	s.rc["vm create 691"] = map[int]int{0: 5}
+	s.goneRC = map[string]int{pPool: 1}
+	r := runProbe(t, s)
+	if r.code != 5 || !strings.Contains(r.stderr, "VM 691 (pvh-n2)") || !strings.Contains(r.stderr, "VM 692 (pvh-nfs)") {
+		t.Errorf("an unreadable pool: exit %d\n%s", r.code, r.stderr)
 	}
 }

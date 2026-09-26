@@ -15,8 +15,14 @@
 # INT, HUP) sent to the calling script before answering, or "group:<signal>"
 # to send it to the whole process group, as a terminal's Ctrl-C does.
 # block/<key>[.<n>] makes the call touch $F/blocked and then wait for a line
-# on the fifo $F/block.fifo before answering, so a test can act mid-run. With
-# none of these files present, every answer is exactly what it always was.
+# on the fifo $F/block.fifo before answering, so a test can act mid-run.
+# After a VM destroy (`api delete /nodes/<node>/qemu/<vmid>`) that exits 0,
+# the VM leaves the pool, as on PVE: every /pools answer drops it from
+# members, unless keep-in-pool/<vmid> exists. And every key answers from
+# <dir>/<key>.destroyed where one exists, unless a numbered variant for that
+# call does: how a test says what PVE shows once a VM is gone. With none of
+# these files present, and no destroy, every answer is exactly what it
+# always was.
 #
 # For nested.sh (inert unless the test made an env/ directory): each call's
 # environment is saved to env/<n>, n its line in argv.log. `roster init
@@ -41,6 +47,8 @@ key() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 pick() { # dir k n
 	if [ -f "$F/$1/$2.$3" ]; then
 		printf '%s' "$F/$1/$2.$3"
+	elif [ -f "$F/destroyed" ] && [ -f "$F/$1/$2.destroyed" ]; then
+		printf '%s' "$F/$1/$2.destroyed"
 	elif [ -f "$F/$1/$2" ]; then
 		printf '%s' "$F/$1/$2"
 	fi
@@ -69,13 +77,21 @@ answer() { # key default-stdout
 	f=$(pick err "$k" "$n")
 	[ -n "$f" ] && cat "$f" >&2
 	f=$(pick resp "$k" "$n")
-	if [ -n "$f" ]; then
+	if [ -n "$f" ] && [[ $1 == "get /pools"* ]] && [ -d "$F/destroyed.d" ]; then
+		gone_ids=$(for d in "$F"/destroyed.d/*; do v=${d##*/}; [ -e "$F/keep-in-pool/$v" ] || printf '%s,' "$v"; done)
+		jq -c --argjson d "[${gone_ids%,}]" 'if type == "array" then map(if (.members | type) == "array" then .members |= map(select((.vmid as $v | $d | index($v)) | not)) else . end) else . end' <"$f"
+	elif [ -n "$f" ]; then
 		cat "$f"
 	elif [ -n "$2" ]; then
 		printf '%s\n' "$2"
 	else
 		echo "fake pveforge: no answer for '$1'" >&2
 		exit 99
+	fi
+	if [ "$rc" = 0 ] && [[ $1 =~ ^delete\ /nodes/[^/\ ]+/qemu/([0-9]+)(\ |$) ]]; then
+		mkdir -p "$F/destroyed.d"
+		: >"$F/destroyed.d/${BASH_REMATCH[1]}"
+		: >"$F/destroyed"
 	fi
 	exit "$rc"
 }
