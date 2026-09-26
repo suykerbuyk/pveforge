@@ -16,7 +16,7 @@ var rosterKeys = map[string][]string{
 	"":              {"targets"},
 	"targets":       {"id", "host", "node", "api_port", "insecure_tls", "export", "token", "ssh", "tls"},
 	"targets.token": {"id", "secret_enc"},
-	"targets.ssh":   {"user", "public_key", "host_key_fingerprint", "private_key_enc"},
+	"targets.ssh":   {"user", "public_key", "host_key_fingerprint", "private_key_enc", "host_key_source"},
 	"targets.tls":   {"spki_sha256", "source"},
 }
 

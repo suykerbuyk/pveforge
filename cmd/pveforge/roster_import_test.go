@@ -36,7 +36,7 @@ type recordingValidator struct {
 	errs []error
 }
 
-func (r *recordingValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+func (r *recordingValidator) ServedPin(context.Context, string, int, bool) (tlspin.Pin, *x509.Certificate, error) {
 	return "", nil, errors.New("recordingValidator: ServedPin is not scripted")
 }
 

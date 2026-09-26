@@ -326,3 +326,20 @@ func TestPinTLS_EqualPinReportsTheRecordedSource(t *testing.T) {
 		t.Fatalf("keyful, equal pin: %+v, %v; want the recorded ssh-tofu", res, err)
 	}
 }
+
+// pin-tls --expect on a CA-verified target verifies the chain: an
+// untrusted chain is refused, even when it presents the expected key.
+func TestPinTLS_CAExpectVerifiesTheChain(t *testing.T) {
+	rosterPath, opts := sshTargetAt(t, false, 0)
+	before, _ := os.ReadFile(rosterPath)
+	cp := newCapturePair(t)
+	v := &fakeValidator{served: cp.pin, chainErr: errors.New("x509: certificate signed by unknown authority")}
+	o := pinOpts(rosterPath, opts)
+	o.Expect = cp.pin
+	if _, err := PinTLS(context.Background(), o, &fakeTransport{session: &fakeSession{}}, v); err == nil || !strings.Contains(err.Error(), "unknown authority") || !v.servedVerified {
+		t.Fatalf("err = %v (chain verified %v), want the untrusted chain refused", err, v.servedVerified)
+	}
+	if after, _ := os.ReadFile(rosterPath); !bytes.Equal(before, after) {
+		t.Fatal("an untrusted chain was pinned")
+	}
+}

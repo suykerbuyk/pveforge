@@ -56,21 +56,46 @@ func CheckFingerprint(s string) error {
 	return nil
 }
 
+// ConsoleHostKeyCommand is what an operator runs ON THE NODE'S CONSOLE to
+// read the host key pveforge's SSH client negotiates (ECDSA on a stock PVE
+// node): the only trustworthy source for a rebuilt node's new pin, never
+// the key a mismatching connection presented.
+const ConsoleHostKeyCommand = "ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub"
+
 // PinnedHostKeyCallback returns an ssh.HostKeyCallback that accepts a
 // connection only if the presented host key's SHA256 fingerprint matches
-// wantFingerprint exactly. A mismatch is treated as a hard failure, not a
-// warning — this is the only thing standing between the standing SSH
-// vector and a MITM'd connection.
+// wantFingerprint exactly: the pin the ROSTER holds (a stored-pin dial). A
+// mismatch is treated as a hard failure, not a warning — this is the only
+// thing standing between the standing SSH vector and a MITM'd connection.
+// Its error points a rebuilt node's operator at the console and at
+// `bootstrap --reprovisioned`, and never offers the presented key.
 func PinnedHostKeyCallback(wantFingerprint string) (ssh.HostKeyCallback, error) {
+	return hostKeyCallback(wantFingerprint, true)
+}
+
+// ExpectedHostKeyCallback is PinnedHostKeyCallback for a password dial,
+// whose expected key is the one the operator GAVE (--host-key-fingerprint)
+// or a pin the caller supplied: a mismatch there is a wrong value or
+// another host, not a rebuild the roster could reconcile, so its error
+// says to check the value against the node's console instead.
+func ExpectedHostKeyCallback(wantFingerprint string) (ssh.HostKeyCallback, error) {
+	return hostKeyCallback(wantFingerprint, false)
+}
+
+func hostKeyCallback(wantFingerprint string, stored bool) (ssh.HostKeyCallback, error) {
 	if wantFingerprint == "" {
 		return nil, fmt.Errorf("pinned host key callback: fingerprint is required")
 	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		got := ssh.FingerprintSHA256(key)
-		if got != wantFingerprint {
-			return fmt.Errorf("host key mismatch for %s: got %s %s, want %s; pveforge compares the key type it negotiates (ECDSA when the host serves one), so a pin of another type the host also serves is refused too (possible MITM, or the host was rebuilt/rekeyed, or the pin is of another key type — reconcile deliberately, do not silently re-pin)", hostname, keyTypeName(key.Type()), got, wantFingerprint)
+		if got == wantFingerprint {
+			return nil
 		}
-		return nil
+		typeNote := "pveforge compares the key type it negotiates (ECDSA when the host serves one), so a pin of another type the host also serves is refused too"
+		if stored {
+			return fmt.Errorf("host key mismatch for %s: the host presented %s %s, the roster pins %s. Do NOT pin the presented key: it is what an impostor would show. If the node was rebuilt, read its new key on the node's CONSOLE (%s) and run pveforge bootstrap <target> --reprovisioned --host-key-fingerprint <the console value>; for a disposable roster (a harness nested target), moving the roster aside and bootstrapping afresh also works (hack/harness/README.md). %s", hostname, keyTypeName(key.Type()), got, wantFingerprint, ConsoleHostKeyCommand, typeNote)
+		}
+		return fmt.Errorf("host key mismatch for %s: the host presented %s %s, expected %s (the value you gave, e.g. --host-key-fingerprint). Do NOT pin the presented key: it is what an impostor would show. Compare the expected value with the key read on the node's CONSOLE (%s): if they differ, correct the value you gave to the console value; if they match, something else answers at this address. %s", hostname, keyTypeName(key.Type()), got, wantFingerprint, ConsoleHostKeyCommand, typeNote)
 	}, nil
 }
 

@@ -88,6 +88,9 @@ func validate(r *Roster) error {
 			if !looksArmored(t.SSH.PrivateKeyEnc) {
 				return fmt.Errorf("target %q: ssh private_key_enc is not age-armored ciphertext", t.ID)
 			}
+			if err := checkHostKeySource(t.SSH.HostKeySource); err != nil {
+				return fmt.Errorf("target %q: [targets.ssh] host_key_source: %w", t.ID, err)
+			}
 		}
 		if t.TLS != nil {
 			// An empty or malformed pin is refused, never read as "no pin":

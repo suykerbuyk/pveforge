@@ -235,7 +235,31 @@ func TestHostKeyMismatchNamesTheNegotiatedType(t *testing.T) {
 	withBootstrapFakes(t, &fakeBootstrapTransport{})
 	newBootstrapTransport = bootstrap.NewSSHTransport
 	_, _, stderr := runRootArgs("bootstrap", "qa-test", "--host", "127.0.0.1", "--node", "qa-test", "--ssh-port", strconv.Itoa(fs.Port(t)), "--grant", "/:PVEVMAdmin::1", "--no-ssh-key", "--host-key-fingerprint", wrongFP)
-	if !strings.Contains(stderr, "host key mismatch for") || !strings.Contains(stderr, "got ED25519 "+fs.HostKeyFingerprint()) || !strings.Contains(stderr, "pveforge compares the key type it negotiates") {
+	if !strings.Contains(stderr, "host key mismatch for") || !strings.Contains(stderr, "the host presented ED25519 "+fs.HostKeyFingerprint()) || !strings.Contains(stderr, "pveforge compares the key type it negotiates") {
 		t.Errorf("stderr %q", stderr)
+	}
+	requireNoPastablePresentedKey(t, stderr, fs.HostKeyFingerprint())
+	// A keyless first run's pin is the operator's own: "expected", with no
+	// reprovision advice (it would hit ErrNothingToReprovision here).
+	if !strings.Contains(stderr, "expected "+wrongFP) || strings.Contains(stderr, "the roster pins") || strings.Contains(stderr, "--reprovisioned") {
+		t.Errorf("a password dial's mismatch reads as a stored pin's: %q", stderr)
+	}
+}
+
+// requireNoPastablePresentedKey is RQ-A: a mismatch that suggests
+// reprovisioning points to the node's CONSOLE and labels the presented key
+// as not to be pinned, and never puts that key after --host-key-fingerprint,
+// where one paste would pin an impostor.
+func requireNoPastablePresentedKey(t *testing.T, msg, presented string) {
+	t.Helper()
+	if !strings.Contains(msg, "CONSOLE") || !strings.Contains(msg, "Do NOT pin the presented key") {
+		t.Errorf("the mismatch text lacks the console pointer or the do-not-pin label: %q", msg)
+	}
+	for i := strings.Index(msg, "--host-key-fingerprint"); i >= 0; {
+		if strings.Contains(msg[i:], presented) {
+			t.Errorf("the presented key %s follows --host-key-fingerprint: one paste would pin it: %q", presented, msg)
+			return
+		}
+		break
 	}
 }

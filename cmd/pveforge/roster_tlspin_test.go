@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
 const testTLSPin = "sha256//AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
@@ -63,9 +65,13 @@ func TestRosterValidate_RequireTLSPins(t *testing.T) {
 	if !strings.Contains(stderr, `1 insecure_tls target(s) hold no [targets.tls] pin: "unpinned"`) {
 		t.Fatalf("stderr %q does not name exactly the unpinned insecure_tls target", stderr)
 	}
-	for _, not := range []string{`"pinned"`, "ca-verified", "pin-tls", "--repin", "--reprovisioned"} {
-		// The CA-verified target is exempt (N6); and T1a names no command
-		// it does not have (N7).
+	// Inverted from T1a (which had no pin-tls): it names the command that
+	// pins each, and nothing that would re-pin one.
+	if !strings.Contains(stderr, "pveforge roster pin-tls <target>") {
+		t.Errorf("stderr %q does not name roster pin-tls", stderr)
+	}
+	for _, not := range []string{`"pinned"`, "ca-verified", "--repin", "--reprovisioned"} {
+		// The CA-verified target is exempt (N6).
 		if strings.Contains(stderr, not) {
 			t.Errorf("stderr %q contains %q", stderr, not)
 		}
@@ -111,5 +117,18 @@ func TestRosterValidate_RefusesAMalformedPin(t *testing.T) {
 	code, _, stderr := runRootArgs("roster", "validate", rp)
 	if code == 0 || !strings.Contains(stderr, "not a TLS pin") {
 		t.Fatalf("exit %d, stderr %q; want a refusal naming the malformed pin", code, stderr)
+	}
+}
+
+// T2: validate shows how each stored SSH pin was vouched for.
+func TestRosterValidate_ShowsTheHostKeySource(t *testing.T) {
+	t.Cleanup(roster.SetScryptWorkFactorForTests(10))
+	rp := writeValidateRoster(t, "[[targets]]\nid = \"a\"\nhost = \"h\"\nnode = \"n\"\n")
+	if err := roster.WriteSSHAuth(rp, "a", roster.SSHWrite{User: "root", PublicKey: "k", HostKeyFingerprint: "SHA256:x", PrivateKeyPlaintext: []byte("k"), HostKeySource: "ssh-tofu"}, roster.NewPassphrase("p")); err != nil {
+		t.Fatal(err)
+	}
+	code, out, stderr := runRootArgs("roster", "validate", rp)
+	if code != 0 || !strings.Contains(out, "  - a (h, node=n): ssh configured, ssh host key ssh-tofu\n") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out, stderr)
 	}
 }

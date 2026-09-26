@@ -223,7 +223,7 @@ func (f *fakeBootstrapTransport) DialWithPassword(_ context.Context, _, _, _, pi
 
 type nopValidator struct{}
 
-func (nopValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+func (nopValidator) ServedPin(context.Context, string, int, bool) (tlspin.Pin, *x509.Certificate, error) {
 	return "", nil, errors.New("nopValidator: ServedPin is not scripted")
 }
 

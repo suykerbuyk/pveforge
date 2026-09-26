@@ -322,14 +322,17 @@ func TestRun_StoredPinDiffersIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrTLSPinDiffers) || !strings.Contains(err.Error(), "pveforge roster pin-tls qa-pve-01 --repin") {
 		t.Fatalf("err = %v, want ErrTLSPinDiffers naming roster pin-tls --repin", err)
 	}
-	if strings.Contains(err.Error(), "--reprovisioned") {
-		t.Errorf("the T1b message names --reprovisioned, which T1b does not have: %v", err)
+	// T2: it also names the reprovision, with the console value, never a
+	// pin (inverted from T1b, which had no --reprovisioned).
+	if !strings.Contains(err.Error(), "pveforge bootstrap qa-pve-01 --reprovisioned --host-key-fingerprint <the console value>") || !strings.Contains(err.Error(), "CONSOLE") {
+		t.Errorf("the T2 message does not name the reprovision with the console value: %v", err)
 	}
 	if after, _ := os.ReadFile(rosterPath); !bytes.Equal(before, after) || v.calls != 0 || session.ran("pveum user token add") {
 		t.Fatal("a refused run changed the roster or reached the token phase")
 	}
-	if e := differsError("k", stored.pin, fixedPin(1), false).Error(); strings.Contains(e, "--repin") || strings.Contains(e, "--reprovisioned") || !strings.Contains(e, "by hand") {
-		t.Errorf("the keyless form names a flag that cannot help it: %s", e)
+	// Keyless: --repin cannot help it; the keyless reprovision can (T2).
+	if e := differsError("k", stored.pin, fixedPin(1), false).Error(); strings.Contains(e, "--repin") || !strings.Contains(e, "pveforge bootstrap k --no-ssh-key --reprovisioned --host-key-fingerprint <the console value>") {
+		t.Errorf("the keyless form: %s", e)
 	}
 }
 
@@ -510,7 +513,7 @@ func TestRealAPIValidator_CarriesThePin(t *testing.T) {
 // pin, with no request made.
 func TestRealAPIValidator_ServedPin(t *testing.T) {
 	_, pin, hits, host, port := tlsTestServer(t)
-	got, cert, err := NewAPIValidator().ServedPin(context.Background(), host, port)
+	got, cert, err := NewAPIValidator().ServedPin(context.Background(), host, port, false)
 	if err != nil || got != pin || cert == nil {
 		t.Fatalf("ServedPin = %s, %v, %v; want %s", got, cert != nil, err, pin)
 	}

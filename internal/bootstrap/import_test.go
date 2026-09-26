@@ -24,7 +24,7 @@ type importValidator struct {
 }
 
 // ServedPin is never reached by an import (it captures no pin).
-func (v *importValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+func (v *importValidator) ServedPin(context.Context, string, int, bool) (tlspin.Pin, *x509.Certificate, error) {
 	return "", nil, errors.New("importValidator: ServedPin is not scripted")
 }
 

@@ -312,7 +312,7 @@ func TestServedPin_ReadsTheKeyAndSendsNothing(t *testing.T) {
 	srv := newPinnedServer(t, jsonOK(`{}`))
 	u, _ := url.Parse(srv.URL)
 	port, _ := strconv.Atoi(u.Port())
-	pin, cert, err := ServedPin(context.Background(), u.Hostname(), port)
+	pin, cert, err := ServedPin(context.Background(), u.Hostname(), port, false)
 	if err != nil {
 		t.Fatalf("ServedPin: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestServedPin_RefusesAProxiedAddressBeforeDialing(t *testing.T) {
 		asked = r.URL.String()
 		return url.Parse("http://proxy.example.test:3128")
 	}
-	_, _, err := servedPin(context.Background(), stubTransport(srv, proxy, &dials), "pve.example.test", 8006)
+	_, _, err := servedPin(context.Background(), stubTransport(srv, proxy, &dials), "pve.example.test", 8006, false)
 	if !errors.Is(err, ErrProxiedProbe) {
 		t.Fatalf("err = %v, want ErrProxiedProbe", err)
 	}
@@ -368,7 +368,7 @@ func TestServedPin_NoProxyDialsOnce(t *testing.T) {
 	srv := newPinnedServer(t, jsonOK(`{}`))
 	var dials atomic.Int32
 	noProxy := func(*http.Request) (*url.URL, error) { return nil, nil }
-	pin, _, err := servedPin(context.Background(), stubTransport(srv, noProxy, &dials), "pve.example.test", 8006)
+	pin, _, err := servedPin(context.Background(), stubTransport(srv, noProxy, &dials), "pve.example.test", 8006, false)
 	if err != nil || pin != srv.pin {
 		t.Fatalf("pin %s, err %v; want %s", pin, err, srv.pin)
 	}
@@ -381,13 +381,13 @@ func TestServedPin_Refusals(t *testing.T) {
 	srv := newPinnedServer(t, jsonOK(`{}`))
 	var dials atomic.Int32
 	tr := stubTransport(srv, func(*http.Request) (*url.URL, error) { return nil, errors.New("bad proxy config") }, &dials)
-	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006); err == nil || !strings.Contains(err.Error(), "resolve the proxy") {
+	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006, false); err == nil || !strings.Contains(err.Error(), "resolve the proxy") {
 		t.Errorf("a proxy function that fails: err = %v", err)
 	}
 	tr = baseTransport()
 	tr.Proxy = nil
 	tr.DialContext = nil
-	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006); err == nil || !strings.Contains(err.Error(), "no dialer") {
+	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006, false); err == nil || !strings.Contains(err.Error(), "no dialer") {
 		t.Errorf("no dialer: err = %v", err)
 	}
 	if dials.Load() != 0 {
@@ -578,7 +578,7 @@ func TestServedPin_PortZeroIsTheDefaultAPIPort(t *testing.T) {
 		dialed = addr
 		return inner(ctx, network, addr)
 	}
-	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 0); err != nil {
+	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if dialed != "pve.example.test:8006" {
@@ -593,5 +593,19 @@ func TestServedPin_PortZeroIsTheDefaultAPIPort(t *testing.T) {
 	}
 	if EffectiveAPIPort(0) != DefaultAPIPort || EffectiveAPIPort(8443) != 8443 {
 		t.Fatal("EffectiveAPIPort")
+	}
+}
+
+// verifyChain: the probe also verifies the chain, and a certificate no
+// system root vouches for is refused; without it the same server reads.
+func TestServedPin_VerifyChain(t *testing.T) {
+	srv := newPinnedServer(t, jsonOK(`{}`))
+	var dials atomic.Int32
+	tr := stubTransport(srv, func(*http.Request) (*url.URL, error) { return nil, nil }, &dials)
+	if _, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006, true); err == nil || !strings.Contains(err.Error(), "TLS handshake") {
+		t.Fatalf("verifyChain against a self-signed certificate: err = %v, want the handshake refused", err)
+	}
+	if pin, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006, false); err != nil || pin != srv.pin {
+		t.Fatalf("without verifyChain: %s, %v", pin, err)
 	}
 }

@@ -38,7 +38,7 @@ type servedValidator struct {
 	tokens int
 }
 
-func (v *servedValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+func (v *servedValidator) ServedPin(context.Context, string, int, bool) (tlspin.Pin, *x509.Certificate, error) {
 	v.served++
 	if v.pin == "" {
 		return "", nil, errors.New("servedValidator: no pin scripted")
@@ -364,5 +364,108 @@ func TestRosterPinTLS_DefaultSSHPortIsRoutedClients(t *testing.T) {
 	}
 	if want := "h.example:" + strconv.Itoa(pve.RoutedSSHPort()); len(c.tr.addrs) != 1 || c.tr.addrs[0] != want {
 		t.Fatalf("dialled %v, want %s", c.tr.addrs, want)
+	}
+}
+
+// ---- T2 ----
+
+// --reprovisioned reaches Options: without a fingerprint it is refused as
+// a reprovision (not as a plain first run), before any connection.
+func TestBootstrap_ReprovisionedIsWired(t *testing.T) {
+	c := newPinCase(t, true) // "t": keyful, holding a token
+	t.Setenv("PVEFORGE_PVE_PASSWORD", "pw")
+	base := []string{"bootstrap", "t", "--roster", c.rosterPath, "--grant", "/:PVEVMAdmin::1"}
+	code, _, stderr := runRootArgs(append(base, "--reprovisioned")...)
+	if code == 0 || !strings.Contains(stderr, bootstrap.ErrReprovisionNeedsFingerprint.Error()) || c.tr.calls != 0 {
+		t.Fatalf("exit %d, stderr %q, ssh calls %d", code, stderr, c.tr.calls)
+	}
+	code, _, stderr = runRootArgs(append(base, "--reprovisioned", "--ssh-tofu")...)
+	if code == 0 || !strings.Contains(stderr, "never trusted on first use") {
+		t.Fatalf("--ssh-tofu: exit %d, stderr %q", code, stderr)
+	}
+	// With the new key: the password session is pinned to it (a fresh
+	// install), never the stored pin.
+	p, _ := freshCert(t)
+	_, other := freshCert(t)
+	c.tr.session.pem, c.v.pin = p, other // stop at the cross-check
+	code, _, _ = runRootArgs(append(base, "--reprovisioned", "--host-key-fingerprint", "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")...)
+	if code == 0 || c.tr.calls != 2 { // InstallPubkeyViaPassword + DialWithKey
+		t.Fatalf("exit %d, ssh calls %d; want the fresh-install path (2 calls), stopped at the mismatch", code, c.tr.calls)
+	}
+}
+
+func TestBootstrapView_ReprovisionFields(t *testing.T) {
+	var out, errOut bytes.Buffer
+	format, _ := kvjson.ParseFormat("json")
+	res := &bootstrap.Result{TokenID: "a@pam!b", TokenOutcome: bootstrap.OutcomeReplaced, Validation: bootstrap.ValidationVerified,
+		Reprovisioned: true, ReprovisionAsked: true, PreviousHostKeyFingerprint: "SHA256:old", PreviousTLSPin: "sha256//AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="}
+	if err := renderBootstrapResult(&out, &errOut, format, "t", res); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["reprovisioned"] != true || m["previous_host_key_fingerprint"] != "SHA256:old" || m["previous_tls_spki_sha256"] != string(res.PreviousTLSPin) {
+		t.Fatalf("view %v", m)
+	}
+	if strings.Contains(errOut.String(), "ran as a normal bootstrap") {
+		t.Fatal("a real reprovision printed the plain-rerun note")
+	}
+	out.Reset()
+	errOut.Reset()
+	res.Reprovisioned, res.PreviousHostKeyFingerprint, res.PreviousTLSPin = false, "", ""
+	_ = renderBootstrapResult(&out, &errOut, format, "t", res)
+	// Asked but nothing replaced: reprovisioned=false, explicitly.
+	if !strings.Contains(out.String(), `"reprovisioned": false`) || !strings.Contains(errOut.String(), "the stored pins already match this node: ran as a normal bootstrap") {
+		t.Fatalf("plain rerun: stdout %q, stderr %q", out.String(), errOut.String())
+	}
+	out.Reset()
+	res.ReprovisionAsked = false
+	_ = renderBootstrapResult(&out, &errOut, format, "t", res)
+	if strings.Contains(out.String(), "reprovisioned") {
+		t.Fatalf("an ordinary run carries a reprovisioned field: %s", out.String())
+	}
+}
+
+// N7 for T2: every flag the reprovision messages name exists on bootstrap.
+func TestT2Errors_NameOnlyFlagsThatExist(t *testing.T) {
+	c, _, err := newRootCmd().Find([]string{"bootstrap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagRE := regexp.MustCompile(`--[a-z][a-z-]*`)
+	for _, msg := range []string{
+		bootstrap.ErrReprovisionNeedsFingerprint.Error(),
+		bootstrap.ErrNothingToReprovision.Error(),
+		(&tlspin.MismatchError{Want: "sha256//a", Got: "sha256//b"}).Error(),
+	} {
+		for _, f := range flagRE.FindAllString(msg, -1) {
+			if c.Flags().Lookup(strings.TrimPrefix(f, "--")) == nil {
+				t.Errorf("a T2 message names %s, which bootstrap does not have: %q", f, msg)
+			}
+		}
+	}
+	if c.Flags().Lookup("reprovisioned") == nil {
+		t.Fatal("bootstrap has no --reprovisioned")
+	}
+}
+
+// --reprovisioned's refusals come before any password prompt: with no
+// password in the environment and no terminal, the refusal is the
+// reprovision's, never a password error.
+func TestBootstrap_ReprovisionRefusedBeforeThePasswordPrompt(t *testing.T) {
+	c := newPinCase(t, true)
+	t.Setenv("PVEFORGE_PVE_PASSWORD", "")
+	os.Unsetenv("PVEFORGE_PVE_PASSWORD")
+	code, _, stderr := runRootArgs("bootstrap", "t", "--roster", c.rosterPath, "--grant", "/:PVEVMAdmin::1", "--reprovisioned")
+	// Had the password been resolved first, its own error (no environment
+	// value, no terminal) would be the one printed.
+	if code == 0 || !strings.Contains(stderr, bootstrap.ErrReprovisionNeedsFingerprint.Error()) {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	code, _, stderr = runRootArgs("bootstrap", "nope", "--roster", c.rosterPath, "--grant", "/:PVEVMAdmin::1", "--host", "h", "--node", "n", "--reprovisioned", "--host-key-fingerprint", "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	if code == 0 || !strings.Contains(stderr, bootstrap.ErrNothingToReprovision.Error()) {
+		t.Fatalf("nothing to reprovision: exit %d, stderr %q", code, stderr)
 	}
 }

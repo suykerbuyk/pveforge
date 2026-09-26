@@ -8,6 +8,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/sshexec"
 	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
@@ -32,7 +33,7 @@ var ErrHostKeyFingerprintRequired = errors.New("a TLS pin captured over a passwo
 // capturePin reads the TLS key over session and checks the network half:
 // the key the node serves on its own pveproxy port (captured over SSH)
 // must be the key host:apiPort serves (api.ServedPin). It writes nothing.
-func capturePin(ctx context.Context, session SSHSession, api APIValidator, host string, apiPort, capturePort int) (tlspin.Pin, error) {
+func capturePin(ctx context.Context, session SSHSession, api APIValidator, host string, apiPort, capturePort int, verifyChain bool) (tlspin.Pin, error) {
 	if capturePort == 0 {
 		capturePort = tlspin.DefaultCapturePort
 	}
@@ -47,15 +48,15 @@ func capturePin(ctx context.Context, session SSHSession, api APIValidator, host 
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrTLSCapture, err)
 	}
-	return checkServed(ctx, api, host, apiPort, captured)
+	return checkServed(ctx, api, host, apiPort, captured, verifyChain)
 }
 
 // checkServed requires host:apiPort to serve want's key. apiPort is read
 // as REST reads it (pve.EffectiveAPIPort: 0 is 8006), so the cross-check
 // dials exactly the address every REST request of the target will.
-func checkServed(ctx context.Context, api APIValidator, host string, apiPort int, want tlspin.Pin) (tlspin.Pin, error) {
+func checkServed(ctx context.Context, api APIValidator, host string, apiPort int, want tlspin.Pin, verifyChain bool) (tlspin.Pin, error) {
 	apiPort = pve.EffectiveAPIPort(apiPort)
-	served, _, err := api.ServedPin(ctx, host, apiPort)
+	served, _, err := api.ServedPin(ctx, host, apiPort, verifyChain)
 	if err != nil {
 		return "", fmt.Errorf("read the TLS key %s:%d serves: %w", host, apiPort, err)
 	}
@@ -70,9 +71,14 @@ func checkServed(ctx context.Context, api APIValidator, host string, apiPort int
 // target without SSH auth, the hand edit (no pveforge command replaces
 // such a pin).
 func differsError(targetID string, stored, captured tlspin.Pin, keyful bool) error {
-	fix := "remove the target's [targets.tls] block by hand once you have verified the node, then pin it again"
+	rebuilt := "if the node was rebuilt, read its SSH host key on the node's CONSOLE (" + sshexec.ConsoleHostKeyCommand + ") and run pveforge bootstrap " + targetID
+	if !keyful {
+		rebuilt += " --no-ssh-key"
+	}
+	rebuilt += " --reprovisioned --host-key-fingerprint <the console value>"
+	fix := rebuilt
 	if keyful {
-		fix = "if the node's key changed deliberately, run pveforge roster pin-tls " + targetID + " --repin, which captures the new key over the pinned SSH session"
+		fix = "if only its TLS key changed deliberately, run pveforge roster pin-tls " + targetID + " --repin, which captures the new key over the pinned SSH session; " + rebuilt
 	}
 	return fmt.Errorf("%w: %s pins %s, the node now serves %s; this run wrote no TLS pin, SSH auth or token to the roster; %s", ErrTLSPinDiffers, targetID, stored, captured, fix)
 }
@@ -161,7 +167,7 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 	case !tg.InsecureTLS && opts.Repin:
 		return nil, fmt.Errorf("pin-tls %s: --repin needs an insecure_tls target with SSH auth to vouch for the new key", opts.TargetID)
 	case !tg.InsecureTLS:
-		pin, err := checkServed(ctx, api, tg.Host, apiPort, opts.Expect)
+		pin, err := checkServed(ctx, api, tg.Host, apiPort, opts.Expect, true)
 		if err != nil {
 			return nil, fmt.Errorf("pin-tls %s: --expect: %w", opts.TargetID, err)
 		}
@@ -181,13 +187,13 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 			return nil, fmt.Errorf("pin-tls %s: connect with the pinned ssh key: %w", opts.TargetID, err)
 		}
 		defer func() { _ = session.Close() }()
-		pin, err := capturePin(ctx, session, api, tg.Host, apiPort, opts.CapturePort)
+		pin, err := capturePin(ctx, session, api, tg.Host, apiPort, opts.CapturePort, false)
 		if err != nil {
 			return nil, fmt.Errorf("pin-tls %s: %w", opts.TargetID, err)
 		}
 		res.Pin, res.Source = pin, tlspin.SourceSSHStored
 	case opts.Expect != "":
-		pin, err := checkServed(ctx, api, tg.Host, apiPort, opts.Expect)
+		pin, err := checkServed(ctx, api, tg.Host, apiPort, opts.Expect, false)
 		if err != nil {
 			return nil, fmt.Errorf("pin-tls %s: --expect: %w", opts.TargetID, err)
 		}

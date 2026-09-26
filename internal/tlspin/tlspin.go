@@ -116,7 +116,7 @@ func (e *MismatchError) Error() string {
 	if e.Got == "" {
 		return fmt.Sprintf("%s: the peer presented no certificate, want %s", ErrPinMismatch, e.Want)
 	}
-	return fmt.Sprintf("%s: the peer's public key is %s, want %s (the node was rebuilt or re-keyed, something else answers at this address, a TLS-terminating proxy fronts it, or HTTPS_PROXY names an https:// proxy, which a pinned target does not support (an http:// proxy is fine); pveforge will not re-pin silently)", ErrPinMismatch, e.Got, e.Want)
+	return fmt.Sprintf("%s: the peer's public key is %s, the roster pins %s. Do NOT pin the presented key: it is what an impostor would show. Something else answers at this address, a TLS-terminating proxy fronts it, HTTPS_PROXY names an https:// proxy (which a pinned target does not support; an http:// proxy is fine), or the node was rebuilt: then read its SSH host key on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub) and run pveforge bootstrap <target> --reprovisioned --host-key-fingerprint <the console value>, which captures the new TLS key over that verified session. pveforge will not re-pin silently", ErrPinMismatch, e.Got, e.Want)
 }
 
 func (e *MismatchError) Is(target error) bool { return target == ErrPinMismatch }

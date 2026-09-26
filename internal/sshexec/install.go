@@ -35,7 +35,7 @@ func InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authori
 	cb := CaptureHostKeyCallback(&captured)
 	if pin != "" {
 		var err error
-		if cb, err = PinnedHostKeyCallback(pin); err != nil {
+		if cb, err = ExpectedHostKeyCallback(pin); err != nil {
 			return nil, fmt.Errorf("install pubkey: %w", err)
 		}
 	}
