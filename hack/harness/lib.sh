@@ -104,7 +104,7 @@ shopt -s inherit_errexit
 IFS=$' \t\n'
 
 # The external tools lib runs, each resolved once, now, to an absolute path.
-for harness_tool in jq grep flock sha256sum stat mktemp mkdir; do
+for harness_tool in jq grep flock sha256sum stat mktemp mkdir sleep date; do
 	harness_tool_path=$(type -P "$harness_tool") || {
 		echo "harness: refusing: $harness_tool is not on PATH" >&2
 		exit 2
@@ -533,6 +533,189 @@ harness_vm_destroy() { # vmid [field=value ...]
 	_harness_screen_fields destroy "$vmid" "$@"
 	_harness_guard_existing "$vmid" destroy
 	_harness_mutate delete "$(_harness_vm_path "$vmid" "")" "$@"
+}
+
+# ---- Proof that a VMID is free, or a VM gone. ----
+# A pool-only token is refused (403) on a VMID outside the pool, and a
+# destroyed VM leaves the pool, so PVE never tells this token "does not
+# exist": no error text can say "gone". The proof is positive instead:
+# /cluster/nextid asked for a VMID answers 200 with exactly that VMID only
+# when no VM anywhere in the cluster holds it (400 for one that does). Only
+# that 200 body decides; any other answer, or a failed read, is "not proven",
+# whatever its text. Neither function exits: each returns 1 and says why in
+# HARNESS_NOT_FREE, and a read's own error goes to the caller's stderr.
+HARNESS_NOT_FREE=""
+
+# harness_vmid_free: no VM anywhere in the cluster holds vmid.
+harness_vmid_free() { # vmid
+	_harness_require_init
+	_harness_require_args harness_vmid_free 1 "$#"
+	_harness_require_declared "$1"
+	local out
+	HARNESS_NOT_FREE=""
+	if ! out=$( (harness_get /cluster/nextid "vmid=$1")); then
+		HARNESS_NOT_FREE="/cluster/nextid did not answer 200 for VMID $1: it is in use, or the read failed"
+		return 1
+	fi
+	# One JSON value, exactly the VMID (PVE's string, or a number).
+	if ! "$HARNESS_TOOL_JQ" -e -s --arg v "$1" 'length == 1 and (.[0] | (type == "string" and . == $v) or (type == "number" and tostring == $v))' <<<"$out" >/dev/null 2>&1; then
+		HARNESS_NOT_FREE="/cluster/nextid answered 200 for VMID $1, but not with $1"
+		return 1
+	fi
+}
+
+# harness_vm_gone: after a destroy, VM vmid is proven gone: its VMID is free
+# in the whole cluster, and the pool no longer lists it.
+harness_vm_gone() { # vmid
+	harness_vmid_free "$@" || return 1
+	local out
+	if ! out=$( (harness_get /pools "poolid=$HARNESS_POOL")); then
+		HARNESS_NOT_FREE="reading pool $HARNESS_POOL failed"
+		return 1
+	fi
+	# Every member's vmid a number (a string "690" must not read as another
+	# VM), and the answer this pool's.
+	if ! "$HARNESS_TOOL_JQ" -e --argjson v "$1" --arg p "$HARNESS_POOL" 'type == "array" and length == 1 and .[0].poolid == $p and (.[0].members | type == "array") and all(.[0].members[]; (.vmid | type) == "number" and .vmid != $v)' <<<"$out" >/dev/null 2>&1; then
+		HARNESS_NOT_FREE="pool $HARNESS_POOL still lists VM $1, or its answer has an unexpected shape"
+		return 1
+	fi
+}
+
+# ---- The harness storage's usage: proof that destroyed VMs' volumes are gone. ----
+# A pool token cannot see a destroyed VM's volumes. PVE lists storage content
+# only where check_volume_access passes (PVE 9.2.11,
+# API2/Storage/Content.pm:172-176: "next if $@"), and for an images volume
+# that needs VM.Config.Disk on /vms/<owner> unless the caller holds
+# Datastore.Allocate, which the pool token does not (PVE/Storage.pm:644-646).
+# Once a VM has left the pool, its leftover disks are silently left out, so
+# "nothing listed" proves nothing. What the token does see is the storage's
+# usage, `used` in its node status. That is proof only because
+# pveforge-harness is dedicated to the harness (D5 G0's P-checks, and the
+# pool empty before the build, support that): nothing else grows or shrinks
+# it. That is a LIVE ASSUMPTION, and the probe measures it each run: the disk
+# it creates must show in `used` (harness_storage_accounts). The content
+# listing stays only as a detector: a volume it lists is a leftover; a listing
+# that shows nothing, or cannot be read, proves nothing.
+#
+# HARNESS_USED_SLACK: how far above its baseline `used` may be and still count
+# as recovered. ZFS's usage moves by metadata (a few KiB to a few hundred KiB
+# on this dataset; its empty `used` read 165504 bytes at the first probe), and
+# 1 MiB is the probe's own free-space tolerance; it is 1/1024 of the smallest
+# disk the harness makes (the probe's 1 GiB), so no leftover disk hides in it.
+readonly HARNESS_USED_SLACK=1048576
+HARNESS_USED_BASE=""
+HARNESS_STORAGE_STATUS=""
+
+# _harness_used prints status-json's `used`, a whole number of bytes.
+_harness_used() { # status-json
+	local u
+	u=$("$HARNESS_TOOL_JQ" -r 'if type == "object" and (.used | type) == "number" and .used >= 0 and (.used | floor) == .used then .used else empty end' <<<"$1" 2>/dev/null) || return 1
+	[[ $u =~ ^[0-9]+$ ]] || return 1
+	printf '%s' "$u"
+}
+
+# harness_storage_baseline records the storage's `used` before this run
+# creates anything, from status-json when the caller has just read it, else
+# read now. The storage must be EMPTY: at most HARNESS_USED_SLACK, the empty
+# dataset's own metadata. A higher figure is an orphan the pool token cannot
+# list, or an earlier run's ZFS free still in progress, and a baseline that
+# absorbed it could never prove this run's volumes gone. So it returns 1,
+# naming the figure in HARNESS_NOT_FREE, and the caller refuses to start.
+# (The caller also requires the pool empty.)
+harness_storage_baseline() { # [status-json]
+	_harness_require_init
+	[ -n "${HARNESS_STORAGE:-}" ] || _harness_die 2 "harness_storage_baseline before harness_require_storage"
+	[ -z "$HARNESS_USED_BASE" ] || _harness_die 2 "harness_storage_baseline called twice"
+	local st=${1-} u
+	HARNESS_NOT_FREE=""
+	if [ "$#" = 0 ] && ! st=$( (harness_get "/nodes/$HARNESS_NODE/storage/$HARNESS_STORAGE/status")); then
+		HARNESS_NOT_FREE="storage $HARNESS_STORAGE's status could not be read"
+		return 1
+	fi
+	if ! u=$(_harness_used "$st"); then
+		HARNESS_NOT_FREE="storage $HARNESS_STORAGE's status has no usable 'used'"
+		return 1
+	fi
+	if [ "$u" -gt "$HARNESS_USED_SLACK" ]; then
+		HARNESS_NOT_FREE="storage $HARNESS_STORAGE is not empty: its used is $u bytes, above the empty dataset's 1 MiB (an orphan the pool token cannot list, or an earlier run's ZFS free still in progress): see what it holds as root, 'zfs list -r' under it"
+		return 1
+	fi
+	HARNESS_USED_BASE=$u
+	readonly HARNESS_USED_BASE
+}
+
+# harness_storage_accounts: the storage's `used` has grown by at least bytes
+# (less the slack) over the baseline: it accounts a disk this run made, so its
+# recovery can later prove that disk gone.
+harness_storage_accounts() { # bytes
+	[ -n "$HARNESS_USED_BASE" ] || _harness_die 2 "harness_storage_accounts before harness_storage_baseline"
+	local st u
+	HARNESS_NOT_FREE=""
+	if ! st=$( (harness_get "/nodes/$HARNESS_NODE/storage/$HARNESS_STORAGE/status")) || ! u=$(_harness_used "$st"); then
+		HARNESS_NOT_FREE="storage $HARNESS_STORAGE's status could not be read"
+		return 1
+	fi
+	if [ "$u" -lt $((HARNESS_USED_BASE + $1 - HARNESS_USED_SLACK)) ]; then
+		HARNESS_NOT_FREE="storage $HARNESS_STORAGE's used is $u after the create, not at least $1 bytes over its baseline $HARNESS_USED_BASE: it does not account the disk, so its usage cannot prove the disk gone later"
+		return 1
+	fi
+}
+
+# harness_storage_recovered polls, for at most seconds by lib's clock (0: one
+# read), until the storage's `used` is back within HARNESS_USED_SLACK of its
+# baseline AND its content lists no volume of any vmid given. ZFS frees a
+# destroyed VM's volumes asynchronously. Each read is a line in log. It
+# leaves the last status read in HARNESS_STORAGE_STATUS.
+harness_storage_recovered() { # seconds log vmid...
+	_harness_require_init
+	[ -n "$HARNESS_USED_BASE" ] || _harness_die 2 "harness_storage_recovered before harness_storage_baseline"
+	[[ ${1:-} =~ ^[0-9]+$ ]] || _harness_die 2 "harness_storage_recovered: seconds must be a count, got '${1:-}'"
+	local secs=$1 log=$2 start now st u v c listed n=0
+	shift 2
+	for v in "$@"; do
+		_harness_require_declared "$v"
+	done
+	HARNESS_NOT_FREE=""
+	start=$("$HARNESS_TOOL_DATE" +%s) && [[ $start =~ ^[0-9]+$ ]] || {
+		HARNESS_NOT_FREE="cannot read the clock"
+		return 1
+	}
+	while :; do
+		n=$((n + 1))
+		st=$( (harness_get "/nodes/$HARNESS_NODE/storage/$HARNESS_STORAGE/status")) || st=""
+		HARNESS_STORAGE_STATUS=$st
+		u=$(_harness_used "$st") || u=""
+		listed=""
+		for v in "$@"; do
+			c=$( (harness_get "/nodes/$HARNESS_NODE/storage/$HARNESS_STORAGE/content" "vmid=$v")) || c=""
+			if [ -n "$c" ] && "$HARNESS_TOOL_JQ" -e 'type == "array" and length > 0' <<<"$c" >/dev/null 2>&1; then
+				listed+=" $v"
+			fi
+		done
+		{ printf 'read %d: used %s baseline %s listed%s\n' "$n" "${u:-unreadable}" "$HARNESS_USED_BASE" "${listed:- none}" >>"$log"; } 2>/dev/null || :
+		if [ -n "$u" ] && [ "$u" -le $((HARNESS_USED_BASE + HARNESS_USED_SLACK)) ] && [ -z "$listed" ]; then
+			return 0
+		fi
+		if [ -n "$listed" ]; then
+			HARNESS_NOT_FREE="storage $HARNESS_STORAGE still lists volumes of VM(s)$listed"
+		elif [ -n "$u" ]; then
+			HARNESS_NOT_FREE="storage $HARNESS_STORAGE's used is $u, not back within 1 MiB of its baseline $HARNESS_USED_BASE"
+		else
+			HARNESS_NOT_FREE="storage $HARNESS_STORAGE's status could not be read"
+		fi
+		now=$("$HARNESS_TOOL_DATE" +%s) && [[ $now =~ ^[0-9]+$ ]] || {
+			HARNESS_NOT_FREE+="; then the clock could not be read"
+			return 1
+		}
+		if [ $((now - start)) -ge "$secs" ]; then
+			HARNESS_NOT_FREE+=", after ${secs}s"
+			return 1
+		fi
+		"$HARNESS_TOOL_SLEEP" 5 || {
+			HARNESS_NOT_FREE+="; then sleep failed"
+			return 1
+		}
+	done
 }
 
 # harness_vm_create creates a declared VM in the pool with `pveforge vm create`
