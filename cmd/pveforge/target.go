@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -31,7 +32,18 @@ func resolveRoutedClient(cmd *cobra.Command, targetID string) (*pve.RoutedClient
 	if t == nil {
 		return nil, fmt.Errorf("target %q not found in roster %s", targetID, rosterPath)
 	}
-	return pve.NewRoutedClient(t, passphrase)
+	return withRosterHint(pve.NewRoutedClient(t, passphrase))(rosterPath)
+}
+
+// withRosterHint adds the roster the refusal came from to ErrTLSPinRequired,
+// so the operator pins THAT roster (--roster <path>), not the default one.
+func withRosterHint[T any](v T, err error) func(rosterPath string) (T, error) {
+	return func(rosterPath string) (T, error) {
+		if errors.Is(err, pve.ErrTLSPinRequired) {
+			return v, fmt.Errorf("%w (roster %s: give roster pin-tls --roster %s)", err, rosterPath, rosterPath)
+		}
+		return v, err
+	}
 }
 
 // addRosterFlag registers the --roster flag shared by every command in

@@ -31,6 +31,7 @@ import (
 
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 	"github.com/suykerbuyk/pveforge/internal/tlspin"
@@ -1462,6 +1463,38 @@ type ImportOptions struct {
 	Replace    bool
 	RosterPath string
 	Passphrase roster.Passphrase
+	// Expect is the TLS pin the operator verified for an insecure_tls
+	// target the roster holds no pin for (--expect). The validation's
+	// pinned transport refuses any other key in the handshake, before a
+	// request byte; after a successful validation it is written, with
+	// source expect.
+	Expect tlspin.Pin
+}
+
+// CheckImportTLS is import-token's TLS rule (operator ruling 1, P3), on the
+// options and the roster alone: an insecure_tls target (the flag, or the
+// roster's own setting for a target it holds) needs a TLS pin, the
+// roster's or --expect. An --expect that differs from a stored pin is
+// refused. The CLI calls it before the secret is read from stdin; Import
+// calls it again under its lock.
+func CheckImportTLS(opts ImportOptions) error {
+	insecure := opts.InsecureTLS
+	var stored tlspin.Pin
+	if r, err := roster.Load(opts.RosterPath); err == nil {
+		if tg := r.Find(opts.TargetID); tg != nil {
+			insecure = insecure || tg.InsecureTLS
+			if tg.TLS != nil {
+				stored = tlspin.Pin(tg.TLS.SPKISHA256)
+			}
+		}
+	}
+	if opts.Expect != "" && stored != "" && opts.Expect != stored {
+		return fmt.Errorf("import token %s: %w: it pins %s, --expect says %s; nothing was validated or written. If the node was rebuilt, read its SSH host key on the node's CONSOLE (%s) and run pveforge bootstrap %s --no-ssh-key --reprovisioned --host-key-fingerprint <the console value>", opts.TargetID, ErrTLSPinDiffers, stored, opts.Expect, sshexec.ConsoleHostKeyCommand, opts.TargetID)
+	}
+	if insecure && stored == "" && opts.Expect == "" {
+		return fmt.Errorf("import token %s: %w: pass the pin you verified with --expect sha256//… (roster %s); nothing was read, validated or written", opts.TargetID, pve.ErrTLSPinRequired, opts.RosterPath)
+	}
+	return nil
 }
 
 // Import puts a token minted outside pveforge into the roster, but only
@@ -1510,6 +1543,9 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	if bopts.Host == "" || bopts.Node == "" {
 		return nil, fmt.Errorf("import token %s: --host and --node are required for a target the roster does not have yet", opts.TargetID)
 	}
+	if err := CheckImportTLS(opts); err != nil {
+		return nil, err
+	}
 	if bopts.APIPort == 0 {
 		bopts.APIPort = 8006
 	}
@@ -1525,6 +1561,21 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 		return nil, fmt.Errorf("import token %s: load roster %s (create it first with `pveforge roster init`): %w", opts.TargetID, opts.RosterPath, err)
 	}
 	exists := r.Find(opts.TargetID) != nil
+	// The TLS rule again, under the lock, against the roster as read now;
+	// the pin the validation goes through, and whether this import writes it.
+	if err := CheckImportTLS(opts); err != nil {
+		return nil, err
+	}
+	var storedPin tlspin.Pin
+	var storedSource tlspin.Source
+	if tg := r.Find(opts.TargetID); tg != nil && tg.TLS != nil {
+		storedPin, storedSource = tlspin.Pin(tg.TLS.SPKISHA256), tlspin.Source(tg.TLS.Source)
+	}
+	writePin := opts.Expect != "" && storedPin == ""
+	bopts.TLSPin = storedPin
+	if writePin {
+		bopts.TLSPin = opts.Expect
+	}
 	var held heldToken
 	if exists {
 		if held, err = loadHeldToken(bopts); err != nil {
@@ -1566,15 +1617,25 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	}
 	res.Validation = ValidationVerified
 	res.Grants = want
+	res.TLSPin, res.TLSPinSource = storedPin, storedSource
 
-	if sameToken {
-		res.TokenOutcome = OutcomeAlreadyHeld
-		return res, nil
-	}
+	// The pin (with --expect, for a target that holds none) is written only
+	// now, after the validation proved the token through it: after the
+	// target exists, and before the token.
 	if !exists {
 		if err := ensureTargetExists(bopts); err != nil {
 			return res, fmt.Errorf("import token %s: add the target to the roster: %w", opts.TargetID, err)
 		}
+	}
+	if writePin {
+		if err := roster.WriteTLSPin(opts.RosterPath, opts.TargetID, "", opts.Expect, tlspin.SourceExpect, opts.Passphrase); err != nil {
+			return res, fmt.Errorf("import token %s: write the tls pin: %w", opts.TargetID, err)
+		}
+		res.TLSPin, res.TLSPinSource = opts.Expect, tlspin.SourceExpect
+	}
+	if sameToken {
+		res.TokenOutcome = OutcomeAlreadyHeld
+		return res, nil
 	}
 	if err := writeTokenAuthFn(opts.RosterPath, opts.TargetID, roster.TokenWrite{TokenID: opts.TokenID, SecretPlaintext: []byte(opts.Secret)}, opts.Passphrase); err != nil {
 		return res, fmt.Errorf("import token %s: write the token to the roster: %w", opts.TargetID, err)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"go/ast"
 	"go/types"
 	"net"
@@ -256,7 +257,9 @@ func TestBoundErrText_B7_AnEchoedSecretStraddlingTheBoundNeverLeaks(t *testing.T
 		c := newImportCase(t)
 		newBootstrapValidator = bootstrap.NewAPIValidator // the real chain; newImportCase restores its seam
 		code, stdout, stderr := c.run(secret+"\n", "--token-id", tokenID, "--grant", "/vms/100:PVEVMUser",
-			"--host", host, "--api-port", port, "--insecure-tls", "--node", "n1")
+			"--host", host, "--api-port", port, "--insecure-tls", "--node", "n1",
+			// T3: an insecure_tls import needs the pin; the server's own.
+			"--expect", string(tlspin.FromCertificate(srv.Certificate())))
 		if strings.Contains(stdout, secret[:4]) {
 			t.Errorf("stdout carries the secret's head: %q", stdout)
 		}

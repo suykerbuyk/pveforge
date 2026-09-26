@@ -1,6 +1,7 @@
 package pve
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -32,7 +33,7 @@ func NewClientForTarget(t *roster.Target, passphrase string) (*Client, error) {
 	if t.TLS != nil {
 		pin = tlspin.Pin(t.TLS.SPKISHA256)
 	}
-	return NewClient(ClientConfig{
+	c, err := NewClient(ClientConfig{
 		Host:        t.Host,
 		APIPort:     t.APIPort,
 		InsecureTLS: t.InsecureTLS,
@@ -40,4 +41,8 @@ func NewClientForTarget(t *roster.Target, passphrase string) (*Client, error) {
 		TokenID:     t.Token.ID,
 		TokenSecret: string(tokenSecret),
 	})
+	if errors.Is(err, ErrTLSPinRequired) {
+		return nil, fmt.Errorf("target %q: %w: every REST request to it would trust whatever answers, its token included. Pin it first with pveforge roster pin-tls %s (over its stored SSH pin; --expect sha256//… for a target without SSH auth), or bootstrap it again, which captures one", t.ID, ErrTLSPinRequired, t.ID)
+	}
+	return c, err
 }

@@ -229,15 +229,11 @@ func TestNewHTTPClient_UnpinnedUnchanged(t *testing.T) {
 	if g := c.Transport.(accessWriteGuard); g.next != nil {
 		t.Fatalf("insecure_tls false, no pin: next = %T, want nil (http.DefaultTransport at request time)", g.next)
 	}
+	// T3 (inverted from T1a's "unchanged"): insecure_tls with no pin is
+	// refused, and no transport is built.
 	c, err = newHTTPClient(time.Second, true, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := c.Transport.(accessWriteGuard).next.(*http.Transport)
-	cfg := tr.TLSClientConfig
-	if !cfg.InsecureSkipVerify || cfg.VerifyConnection != nil || cfg.VerifyPeerCertificate != nil || cfg.MinVersion != 0 || tr.Proxy == nil {
-		t.Fatalf("insecure_tls true, no pin: TLS config changed: skip %v, VerifyConnection set %v, MinVersion %x, Proxy set %v",
-			cfg.InsecureSkipVerify, cfg.VerifyConnection != nil, cfg.MinVersion, tr.Proxy != nil)
+	if !errors.Is(err, ErrTLSPinRequired) || c != nil {
+		t.Fatalf("insecure_tls true, no pin: client %v, err %v; want nil, ErrTLSPinRequired", c != nil, err)
 	}
 }
 
@@ -607,5 +603,32 @@ func TestServedPin_VerifyChain(t *testing.T) {
 	}
 	if pin, _, err := servedPin(context.Background(), tr, "pve.example.test", 8006, false); err != nil || pin != srv.pin {
 		t.Fatalf("without verifyChain: %s, %v", pin, err)
+	}
+}
+
+// T3: BaseURLOverride is a production field, so it is NOT an exemption: an
+// unpinned insecure client is refused however its URL is given.
+func TestNewClient_BaseURLOverrideIsNotExempt(t *testing.T) {
+	srv := newPinnedServer(t, jsonOK(`{"data":[]}`))
+	_, err := NewClient(ClientConfig{BaseURLOverride: srv.URL + "/api2/json", InsecureTLS: true, TokenID: "root@pam!pveforge", TokenSecret: "s"})
+	if !errors.Is(err, ErrTLSPinRequired) || srv.hits.Load() != 0 {
+		t.Fatalf("err = %v, hits %d; want ErrTLSPinRequired and no request", err, srv.hits.Load())
+	}
+}
+
+// T3: NewClientForTarget names the target and the command that pins it.
+func TestNewClientForTarget_UnpinnedInsecureIsRefused(t *testing.T) {
+	armored, err := fixtureEncrypt([]byte("s"), "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := &roster.Target{ID: "qa-x", Host: "h", Node: "n", InsecureTLS: true, Token: &roster.TokenAuth{ID: "a@pam!b", SecretEnc: armored}}
+	_, err = NewClientForTarget(tg, "pw")
+	if !errors.Is(err, ErrTLSPinRequired) || !strings.Contains(err.Error(), `target "qa-x"`) || !strings.Contains(err.Error(), "pveforge roster pin-tls qa-x") {
+		t.Fatalf("err = %v", err)
+	}
+	tg.InsecureTLS = false // a CA-verified target needs no pin
+	if _, err := NewClientForTarget(tg, "pw"); err != nil {
+		t.Fatalf("a CA-verified target: %v", err)
 	}
 }

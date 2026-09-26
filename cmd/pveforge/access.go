@@ -102,7 +102,7 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 	closeREST := func() {}
 	var rest *pve.RoutedClient
 	if tokenView && t.Token != nil {
-		rc, err := pve.NewRoutedClient(t, pass)
+		rc, err := withRosterHint(pve.NewRoutedClient(t, pass))(rosterPath)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}

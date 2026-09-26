@@ -16,6 +16,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/pvefake"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // This file is this task's full-stack integration test: NetworkBridgeEnsure
@@ -105,6 +106,9 @@ func bootstrappedIntegrationTarget(t *testing.T, restSrv *httptest.Server, fs *p
 		Node:        "qa-pve-01",
 		APIPort:     apiPort,
 		InsecureTLS: true,
+		// Pinned to the REST server's own key (T3 refuses an unpinned
+		// insecure_tls target).
+		TLS: &roster.TLSPin{SPKISHA256: string(tlspin.FromCertificate(restSrv.Certificate()))},
 		Token: &roster.TokenAuth{
 			ID:        "root@pam!pveforge",
 			SecretEnc: tokenArmored,
