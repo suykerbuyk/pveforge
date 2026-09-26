@@ -215,7 +215,7 @@ for v in "${VMIDS[@]}"; do
 	fi
 	# A VMID held outside the pool, on any node, is invisible to the pool
 	# token but still refuses the create: the cluster must hold no VM $v.
-	harness_vmid_free "$v" 2>>"$EVID/nextid.stderr" || refuse "VMID $v is not free in the cluster: $HARNESS_NOT_FREE"
+	harness_vmid_free "$v" "$EVID/nextid.log" 2>>"$EVID/nextid.stderr" || refuse "VMID $v is not free in the cluster: $HARNESS_NOT_FREE"
 	content=$(harness_get "/nodes/$HARNESS_NODE/storage/$S/content" "vmid=$v")
 	evidence "content-$v-before.json" "$content"
 	jqe "$content" 'type == "array"' || _harness_die 1 "storage $S: the content answer has an unexpected shape"
@@ -267,25 +267,29 @@ cleanup() {
 		exit "$rc"
 	fi
 	say "build: failed (status $rc); destroying this run's VM(s) ${mine[*]:-none}; see $log"
+	# Each destroy's answer, its task's UPID: harness_vm_gone reads the task.
+	local -A ans=()
 	for ((i = ${#mine[@]} - 1; i >= 0; i--)); do
 		v=${mine[$i]}
 		if (harness_vm_get "$v" status/current 2>>"$log") | "$HARNESS_TOOL_JQ" -e '.status == "running"' >/dev/null 2>&1; then
 			(harness_vm_post "$v" status/stop) >>"$log" 2>&1 || echo "cleanup: stop $v failed" >>"$log"
 		fi
-		(harness_vm_destroy "$v" purge=1 destroy-unreferenced-disks=1) >>"$log" 2>&1 || echo "cleanup: destroy $v failed" >>"$log"
+		ans[$v]=$( (harness_vm_destroy "$v") 2>>"$log") || echo "cleanup: destroy $v failed" >>"$log"
+		printf 'destroy %s answered: %s\n' "$v" "${ans[$v]}" >>"$log" 2>/dev/null
 	done
-	# Destroyed means proven gone (lib): the VMID free in the cluster and the
-	# pool not listing it, then the storage's usage back at its baseline. A
-	# pool token is answered 403, never "does not exist", for a destroyed VM,
-	# and is not shown its volumes. Usage is one figure for all of them: while
-	# any is unproven, those proven gone stay named too.
+	# Destroyed means proven gone (lib): the destroy task ended exactly OK,
+	# the VMID is free in the cluster, and the pool does not list it. A pool
+	# token is answered 403, never "does not exist", for a destroyed VM, and
+	# is not shown its volumes. Then lib's wait on the storage's usage can
+	# only DETECT a leftover; usage is one figure for all of them, so one it
+	# detects names every VM proven gone too.
 	# 600 s, not the probe's 180: ZFS frees a zvol's blocks asynchronously, and
 	# here it frees up to three large ones (two 128 GiB system disks and a
 	# 200 GiB data disk) where the probe frees one 1 GiB disk.
 	local gone_vms=() secs=600
 	for ((i = ${#mine[@]} - 1; i >= 0; i--)); do
 		v=${mine[$i]}
-		if harness_vm_gone "$v" 2>>"$log"; then
+		if harness_vm_gone "$v" "${ans[$v]:-}" "$log" 2>>"$log"; then
 			gone_vms+=("$v")
 		else
 			echo "cleanup: VM $v is not proven gone: $HARNESS_NOT_FREE" >>"$log"
@@ -295,13 +299,13 @@ cleanup() {
 	if [ "${#gone_vms[@]}" -gt 0 ]; then
 		# A VM still there holds its volumes: one read, no wait.
 		[ "${#left[@]}" = 0 ] || secs=0
-		if harness_storage_recovered "$secs" "$log" "${gone_vms[@]}" 2>>"$log"; then
+		if harness_storage_leftover "$secs" "$log" "${gone_vms[@]}" 2>>"$log"; then
+			echo "cleanup: VM(s) ${gone_vms[*]} are destroyed, but the storage shows a leftover: $HARNESS_NOT_FREE" >>"$log"
+			left+=("${gone_vms[@]}")
+		else
 			for v in "${gone_vms[@]}"; do
 				note result.txt "DESTROYED $v"
 			done
-		else
-			echo "cleanup: the volumes of VM(s) ${gone_vms[*]} are not proven gone: $HARNESS_NOT_FREE" >>"$log"
-			left+=("${gone_vms[@]}")
 		fi
 	fi
 	# A VM this run did not record (its create failed after it appeared). A

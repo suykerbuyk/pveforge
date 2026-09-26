@@ -45,7 +45,14 @@ func bContent(v string) string {
 func bConf(v string) string   { return "get /nodes/qa-pve-02/qemu/" + v + "/config" }
 func bStatus(v string) string { return "get /nodes/qa-pve-02/qemu/" + v + "/status/current" }
 func bNextID(v string) string { return "get /cluster/nextid vmid=" + v }
-func bStart(v string) string  { return "post /nodes/qa-pve-02/qemu/" + v + "/status/start" }
+func bDestroyKey(v string) string {
+	return "delete /nodes/qa-pve-02/qemu/" + v + " purge=1 destroy-unreferenced-disks=1"
+}
+func bUPID(v string) string {
+	return "UPID:qa-pve-02:000107D" + v[2:] + ":0FA3B38F:6AB7381B:qmdestroy:" + v + ":pveforge-harness@pve!build:"
+}
+func bTask(v string) string  { return "get /nodes/qa-pve-02/tasks/" + bUPID(v) + "/status" }
+func bStart(v string) string { return "post /nodes/qa-pve-02/qemu/" + v + "/status/start" }
 func hostKey(v string) string {
 	return buildIPs[v] + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey" + v
 }
@@ -248,6 +255,8 @@ func buildWorld(t *testing.T, h buildHome) probeSpec {
 		s.resp[bConf(v)] = `{"name":"x","tags":"pveforge-harness"}`
 		s.resp[bStatus(v)] = `{"status":"running"}`
 		s.resp[bNextID(v)] = `"` + v + `"`
+		s.resp[bDestroyKey(v)] = `"` + bUPID(v) + `"`
+		s.resp[bTask(v)] = taskStatus(bUPID(v), "qa-pve-02", "qmdestroy", v, "stopped", "OK")
 	}
 	return s
 }
@@ -1157,8 +1166,24 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 		"a volume still listed": {edit: func(s *probeSpec) {
 			s.gone[bContent("691")] = `[{"volid":"pveforge-harness:vm-691-disk-0","vmid":691}]`
 		}, left: all, sleeps: 120},
-		"the status unreadable": {edit: func(s *probeSpec) { s.goneRC = map[string]int{pStatus: 1} }, left: all, sleeps: 120},
-		"the status lacks used": {edit: func(s *probeSpec) { s.gone[pStatus] = `{"type":"zfspool","avail":1}` }, left: all, sleeps: 120},
+		// A status the wait cannot read detects nothing: the destroy tasks'
+		// proof stands.
+		"the status unreadable": {edit: func(s *probeSpec) { s.goneRC = map[string]int{pStatus: 1} }, sleeps: 120},
+		"the status lacks used": {edit: func(s *probeSpec) { s.gone[pStatus] = `{"type":"zfspool","avail":1}` }, sleeps: 120},
+		// The destroy task of 691: WARNINGS (a disk PVE could not free), or
+		// no UPID printed.
+		"691's task WARNINGS": {edit: func(s *probeSpec) {
+			s.resp[bTask("691")] = taskStatus(bUPID("691"), "qa-pve-02", "qmdestroy", "691", "stopped", "WARNINGS: 1")
+		}, left: []string{"691"}},
+		"691's destroy printed no UPID": {edit: func(s *probeSpec) { s.resp[bDestroyKey("691")] = `null` }, left: []string{"691"}},
+		// 691's pveforge call fails with nothing on stdout (a wait that
+		// failed), though PVE's task went on: nextid and the pool both say
+		// gone, and only the task could show whether its disks were freed.
+		"691's destroy fails without an answer": {edit: func(s *probeSpec) {
+			s.rc[bDestroyKey("691")] = map[int]int{0: 1}
+			s.resp[bDestroyKey("691")] = ""
+			s.destroyLands = []string{"691"}
+		}, left: []string{"691"}},
 		// A non-zero baseline: 1.5 MiB after the destroys is back within 1 MiB
 		// of a 1 MiB baseline (and not of an absolute zero).
 		"a non-zero baseline": {edit: func(s *probeSpec) {
