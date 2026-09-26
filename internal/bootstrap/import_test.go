@@ -3,8 +3,10 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,11 @@ type importValidator struct {
 	cfgs  []APIConfig
 	wants [][]Grant
 	errs  []error
+}
+
+// ServedPin is never reached by an import (it captures no pin).
+func (v *importValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+	return "", nil, errors.New("importValidator: ServedPin is not scripted")
 }
 
 func (v *importValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, want []Grant) error {

@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"io"
 	"os"
 	"path/filepath"
@@ -31,6 +34,10 @@ type importCase struct {
 type recordingValidator struct {
 	cfgs []bootstrap.APIConfig
 	errs []error
+}
+
+func (r *recordingValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+	return "", nil, errors.New("recordingValidator: ServedPin is not scripted")
 }
 
 func (r *recordingValidator) ValidateTokenGrants(_ context.Context, cfg bootstrap.APIConfig, _ []bootstrap.Grant) error {

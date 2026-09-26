@@ -141,3 +141,62 @@ func VerifyConnection(want Pin) (func(tls.ConnectionState) error, error) {
 		return nil
 	}, nil
 }
+
+// DefaultCapturePort is pveproxy's own port on the node, where a capture
+// over SSH asks for the certificate it serves. It is the node-local port,
+// not the workstation-facing api_port, which a port forward may change.
+const DefaultCapturePort = 8006
+
+// CaptureCommand is the remote command that prints, as PEM, the leaf
+// certificate pveproxy serves on the node itself (127.0.0.1:port): what
+// the node answers with, whichever certificate file that is (custom,
+// ACME or cluster-signed). It sends no request past the handshake. Only
+// the certificate reaches the workstation; ParseCapture does the rest
+// there.
+func CaptureCommand(port int) string {
+	return fmt.Sprintf("openssl s_client -connect 127.0.0.1:%d </dev/null 2>/dev/null | openssl x509 -outform PEM", port)
+}
+
+// ErrCapture marks a capture that did not yield exactly one certificate.
+var ErrCapture = errors.New("could not read the certificate the node serves")
+
+// ParseCapture reads CaptureCommand's output: exactly one PEM certificate,
+// and its pin. Its errors are fixed text; they never quote the output.
+func ParseCapture(stdout []byte) (Pin, *x509.Certificate, error) {
+	cert, err := LeafFromPEM(stdout)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: %w", ErrCapture, err)
+	}
+	return FromCertificate(cert), cert, nil
+}
+
+// Source is how a pin was obtained, recorded beside it in the roster
+// ([targets.tls] source) and reported as tls_pin_source.
+type Source string
+
+const (
+	// SourceSSHVerified: captured over an SSH session pinned to a host key
+	// the operator gave (--host-key-fingerprint).
+	SourceSSHVerified Source = "ssh-verified"
+	// SourceSSHStored: captured over an SSH session pinned to the host key
+	// the roster already held for the target.
+	SourceSSHStored Source = "ssh-stored"
+	// SourceSSHTOFU: captured over an SSH session whose host key was
+	// trusted on first use (--ssh-tofu): the pin is only as good as that.
+	SourceSSHTOFU Source = "ssh-tofu"
+	// SourceExpect: an operator-supplied pin (pin-tls --expect), checked
+	// against what the target serves before it was written.
+	SourceExpect Source = "expect"
+)
+
+// ErrUnknownSource marks a value that is not one of the Source constants.
+var ErrUnknownSource = errors.New("not a TLS pin source")
+
+// ParseSource returns s as a Source, or ErrUnknownSource.
+func ParseSource(s string) (Source, error) {
+	switch v := Source(s); v {
+	case SourceSSHVerified, SourceSSHStored, SourceSSHTOFU, SourceExpect:
+		return v, nil
+	}
+	return "", fmt.Errorf("%w: %q is not one of %s, %s, %s, %s", ErrUnknownSource, s, SourceSSHVerified, SourceSSHStored, SourceSSHTOFU, SourceExpect)
+}

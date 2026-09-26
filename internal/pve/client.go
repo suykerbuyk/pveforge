@@ -90,10 +90,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	baseURL := cfg.BaseURLOverride
 	if baseURL == "" {
-		port := cfg.APIPort
-		if port == 0 {
-			port = DefaultAPIPort
-		}
+		port := EffectiveAPIPort(cfg.APIPort)
 		baseURL = fmt.Sprintf("https://%s:%d/api2/json", cfg.Host, port)
 	}
 
@@ -183,6 +180,17 @@ func baseTransport() *http.Transport {
 	return http.DefaultTransport.(*http.Transport).Clone()
 }
 
+// EffectiveAPIPort is the one rule for the API port a target's port field
+// means: 0 (unset) is DefaultAPIPort. NewClient and ServedPin both apply
+// it, so the REST client and the TLS cross-check can never disagree about
+// which address they dial.
+func EffectiveAPIPort(port int) int {
+	if port == 0 {
+		return DefaultAPIPort
+	}
+	return port
+}
+
 // ErrProxiedProbe: ServedPin was asked to probe a host:port that the
 // REST transport would reach through a proxy. The probe dials directly, so
 // it could not compare what REST will reach; it refuses rather than
@@ -190,7 +198,8 @@ func baseTransport() *http.Transport {
 var ErrProxiedProbe = errors.New("a proxy is configured for this address (HTTPS_PROXY/NO_PROXY); the served-pin probe dials directly, so it cannot compare what REST will reach; set NO_PROXY for this host")
 
 // ServedPin reports the pin of the certificate that answers TLS at
-// host:port, with a handshake and nothing else: no HTTP request is made,
+// host:port (port 0: DefaultAPIPort, as NewClient reads it), with a
+// handshake and nothing else: no HTTP request is made,
 // so no token or header is ever sent. It does not verify the certificate
 // (reading it is the point); a caller compares the pin it returns.
 //
@@ -207,7 +216,7 @@ func ServedPin(ctx context.Context, host string, port int) (tlspin.Pin, *x509.Ce
 // Proxy and DialContext they control, since http.ProxyFromEnvironment
 // reads the environment once per process and never proxies loopback.
 func servedPin(ctx context.Context, tr *http.Transport, host string, port int) (tlspin.Pin, *x509.Certificate, error) {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	addr := net.JoinHostPort(host, strconv.Itoa(EffectiveAPIPort(port)))
 	if tr.Proxy != nil {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/", nil)
 		if err != nil {

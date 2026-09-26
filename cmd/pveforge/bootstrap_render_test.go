@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,6 +222,10 @@ func (f *fakeBootstrapTransport) DialWithPassword(_ context.Context, _, _, _, pi
 }
 
 type nopValidator struct{}
+
+func (nopValidator) ServedPin(context.Context, string, int) (tlspin.Pin, *x509.Certificate, error) {
+	return "", nil, errors.New("nopValidator: ServedPin is not scripted")
+}
 
 func (nopValidator) ValidateTokenGrants(context.Context, bootstrap.APIConfig, []bootstrap.Grant) error {
 	return nil

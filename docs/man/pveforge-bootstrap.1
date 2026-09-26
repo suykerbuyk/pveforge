@@ -18,6 +18,10 @@ Bootstrap a target from PAM/realm username+password to a fully token-authenticat
 	PVE API port (default 8006)
 
 .PP
+\fB--capture-port\fP=0
+	pveproxy's port ON THE NODE, where an insecure_tls target's TLS key is captured over SSH (default 8006); give it when --api-port reaches the node through a forward. It is not stored: repeat it on a later run that captures again
+
+.PP
 \fB--grant\fP=[]
 	an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement
 
@@ -64,6 +68,10 @@ Bootstrap a target from PAM/realm username+password to a fully token-authenticat
 .PP
 \fB--ssh-port\fP=22
 	SSH port on the target host
+
+.PP
+\fB--ssh-tofu\fP[=false]
+	accept trust on first use of the SSH host key for a run whose password session captures an insecure_tls target's TLS pin (a first run, or --no-ssh-key); without it such a run needs --host-key-fingerprint. The pin is recorded with tls_pin_source ssh-tofu, only as good as that first connection
 
 .PP
 \fB--token-id\fP="pveforge"

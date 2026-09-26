@@ -38,6 +38,7 @@ func newRosterCmd() *cobra.Command {
 	cmd.AddCommand(newRosterInitCmd())
 	cmd.AddCommand(newRosterValidateCmd())
 	cmd.AddCommand(newRosterImportTokenCmd())
+	cmd.AddCommand(newRosterPinTLSCmd())
 	return cmd
 }
 

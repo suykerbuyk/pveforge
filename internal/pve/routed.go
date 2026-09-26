@@ -42,6 +42,11 @@ var sshPort = 22
 // boundary. Production code must never call this. Not safe for two test
 // packages to use concurrently (it mutates process-wide state with no
 // locking, matching sshPort's own existing lack of synchronization).
+// RoutedSSHPort is the SSH port a RoutedClient dials. The roster stores no
+// SSH port, so a command that dials a target's stored SSH pin on its own
+// (roster pin-tls) uses this same port unless told otherwise.
+func RoutedSSHPort() int { return sshPort }
+
 func SetSSHPortForIntegrationTests(port int) (restore func()) {
 	orig := sshPort
 	sshPort = port

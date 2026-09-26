@@ -57,6 +57,9 @@ const CommandDir = "cmd/pveforge"
 var TakerFiles = map[string]string{
 	"internal/idempotent/op.go":       "github.com/suykerbuyk/pveforge/internal/idempotent",
 	"internal/bootstrap/bootstrap.go": "github.com/suykerbuyk/pveforge/internal/bootstrap",
+	// PinTLS takes the per-target bootstrap lock, so pin-tls and a
+	// bootstrap of one target cannot interleave.
+	"internal/bootstrap/pintls.go": "github.com/suykerbuyk/pveforge/internal/bootstrap",
 }
 
 // taskWaitTarget is every call of a method named WaitForTask: the pve

@@ -10,9 +10,12 @@
 // Threat model: a CARELESS suite or environment — a roster pointed at the
 // wrong cluster, an operator's variables left set, a suite that reaches for
 // its own client — not a deliberate attacker. DNS answers changing during a
-// run, and IP-level spoofing, are out of scope: the REST client re-resolves
-// names per request and its TLS is not pinned (insecure_tls), which
-// certificate pinning, a separate product task, would close. What is in
+// run, and IP-level spoofing, are out of scope for the name checks: the
+// REST client re-resolves names per request. The TLS pin every harness
+// target must carry closes that gap: each vetted client's every request is
+// checked, in the handshake, against the key recorded for the target, so a
+// later request cannot reach another peer
+// (pveforge-rest-tls-certificate-pinning). What is in
 // scope is refused before a single request: a proxy that would carry every
 // request somewhere else, the operator's own roster, and any overlap with
 // the outer rosters.
@@ -237,10 +240,11 @@ func staticChecks(ctx context.Context, d deps) (rosterFile, map[string]string, m
 		outer = append(outer, rosterFile{p, r})
 	}
 
-	// The derived deny-list: every outer target's id, host and node, and
-	// every SSH fingerprint the outer rosters pin.
+	// The derived deny-list: every outer target's id, host and node, every
+	// SSH fingerprint the outer rosters pin, and every TLS pin.
 	names := map[string]string{}
 	prints := map[string]string{}
+	tlsPins := map[string]string{}
 	tokens := map[string]string{}
 	for _, o := range outer {
 		for _, t := range o.r.Targets {
@@ -255,8 +259,12 @@ func staticChecks(ctx context.Context, d deps) (rosterFile, map[string]string, m
 			if t.Token != nil && t.Token.ID != "" {
 				tokens[t.Token.ID] = o.path
 			}
+			if t.TLS != nil && t.TLS.SPKISHA256 != "" {
+				tlsPins[t.TLS.SPKISHA256] = o.path
+			}
 		}
 	}
+	nestedPins := map[string]string{} // TLS pin -> the nested target holding it
 	for _, t := range hr.Targets {
 		if !strings.HasPrefix(t.ID, targetPrefix) {
 			return rosterFile{}, nil, nil, refuse("harness target %q is not a %s* target", t.ID, targetPrefix)
@@ -266,6 +274,12 @@ func staticChecks(ctx context.Context, d deps) (rosterFile, map[string]string, m
 		}
 		if t.SSH == nil || t.SSH.HostKeyFingerprint == "" {
 			return rosterFile{}, nil, nil, refuse("harness target %s has no pinned SSH host key", t.ID)
+		}
+		// Every REST request of a vetted client is then checked, in the TLS
+		// handshake, against this key: the check-time proof "this is pvh"
+		// holds for every later request too.
+		if t.TLS == nil || t.TLS.SPKISHA256 == "" {
+			return rosterFile{}, nil, nil, refuse("harness target %s has no TLS pin ([targets.tls]); nested bootstrap captures one", t.ID)
 		}
 		for _, n := range []string{t.ID, t.Host, t.Node} {
 			if src, ok := names[strings.ToLower(n)]; ok && n != "" {
@@ -280,6 +294,15 @@ func staticChecks(ctx context.Context, d deps) (rosterFile, map[string]string, m
 		if src, ok := prints[t.SSH.HostKeyFingerprint]; ok {
 			return rosterFile{}, nil, nil, refuse("harness target %s pins the same SSH host key as a target in outer roster %s", t.ID, src)
 		}
+		if src, ok := tlsPins[t.TLS.SPKISHA256]; ok {
+			return rosterFile{}, nil, nil, refuse("harness target %s pins the same TLS key as a target in outer roster %s", t.ID, src)
+		}
+		// Each nested node has its own key: two targets pinning one are two
+		// names for one peer.
+		if other, ok := nestedPins[t.TLS.SPKISHA256]; ok {
+			return rosterFile{}, nil, nil, refuse("harness targets %s and %s pin the same TLS key", other, t.ID)
+		}
+		nestedPins[t.TLS.SPKISHA256] = t.ID
 	}
 	// The addresses: a harness host resolving to an outer host's address is
 	// the outer host under another name.

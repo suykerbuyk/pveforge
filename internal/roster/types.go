@@ -51,6 +51,10 @@ type Target struct {
 // no writer can replace a pin it did not first read.
 type TLSPin struct {
 	SPKISHA256 string `toml:"spki_sha256"`
+	// Source is how the pin was first obtained (tlspin.Source:
+	// ssh-verified, ssh-stored, ssh-tofu or expect). It is recorded by
+	// every pveforge writer; a hand-written pin may omit it.
+	Source string `toml:"source"`
 }
 
 // TokenAuth is the primary auth path: a Proxmox API token. ID is the token's
