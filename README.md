@@ -60,6 +60,12 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 
 ## The roster and its secrets
 
+**The procedures for every secret and key** (first bootstrap, pinning,
+reprovisioning, token rotation, age recipients, backup and recovery, and what
+each refusal means) are in
+[`docs/operations/secrets-and-keys.md`](docs/operations/secrets-and-keys.md).
+This section is the summary.
+
 The roster is a TOML file listing targets (`id`, `host`, `node`) and the
 credentials pveforge holds for them. It is found at `--roster`, else
 `PVEFORGE_ROSTER`, else `./pveforge.toml`. `pveforge roster init` writes a
@@ -93,7 +99,9 @@ targets that have none. A CA-verified target (no `insecure_tls`) needs no pin.
 `roster import-token` into an `insecure_tls` target the roster holds no pin for
 needs `--expect sha256//…`, the pin you verified; the validation's connection
 must present it, and it is written, with source `expect`, only once the token
-validated. Root commands that include a REST view (such as `access inventory`)
+validated. `--expect` is not only for `insecure_tls` targets: given for a
+CA-verified target the roster holds no pin for, it pins that target the same
+way, and the chain and the pin must then both hold. Root commands that include a REST view (such as `access inventory`)
 fail entirely on an unpinned `insecure_tls` target.
 
 The pin is captured, never trusted on first REST contact. `bootstrap` of an
@@ -151,8 +159,11 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
 - A non-root `--token-owner` must itself hold the whole role at each granted
   path, or bootstrap refuses before touching anything.
 - `--no-ssh-key` uses the PVE password for this run only. No key is installed
-  on the target or stored in the roster, and the host key is trusted on first
-  use every run. Such a target needs the flag on every later run.
+  on the target or stored in the roster, and no host key pin is stored, so
+  every such run is a fresh password connection: give it
+  `--host-key-fingerprint` (required for an `insecure_tls` target, next
+  bullet), or its host key is trusted on first use. Such a target needs the
+  flag on every later run.
 - For an `insecure_tls` target, a run whose password session captures the TLS
   pin (a first run, or `--no-ssh-key`) needs `--host-key-fingerprint`, or
   `--ssh-tofu` to accept trust on first use of the SSH host key, recorded as
@@ -495,7 +506,9 @@ The nested test harness (`hack/harness/`) keeps its two secrets — the harness
 roster passphrase (`PVEFORGE_ROSTER_PASSPHRASE`) and the nested nodes' test
 root password (`PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD`) — in
 `hack/harness/secrets.age`, age ciphertext committed to the repository, sealed
-to the public recipients in `hack/harness/recipients.txt`. Each consumer (the
+to the public recipients in `hack/harness/recipients.txt`. Recipient changes,
+backup and recovery are step by step in
+[`docs/operations/secrets-and-keys.md`](docs/operations/secrets-and-keys.md). Each consumer (the
 operator, each CI runner) has its own private age identity, which is never
 committed. No password manager is required; keep a backup of your identity
 wherever you keep such things (any offline medium, or a password manager if you

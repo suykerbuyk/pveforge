@@ -47,7 +47,7 @@ Bootstrap a target from PAM/realm username+password to a fully token-authenticat
 
 .PP
 \fB--no-ssh-key\fP[=false]
-	authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster. The host key is trusted on first use on EVERY such run, and the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair
+	authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster, so no SSH host key pin is stored either. Every such run is a fresh password connection: give --host-key-fingerprint on each one (an insecure_tls target requires it, or --ssh-tofu, since each such run captures its TLS pin), or the host key is trusted on first use; the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair
 
 .PP
 \fB--node\fP=""
