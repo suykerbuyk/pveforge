@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -129,7 +130,8 @@ func TestAccessWriteGuard_EveryStack(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":null}`))
 		}))
 		t.Cleanup(srv.Close)
-		c, err := NewClient(ClientConfig{BaseURLOverride: srv.URL + "/api2/json", InsecureTLS: true, TokenID: "root@pam!pveforge", TokenSecret: "s"})
+		// Pinned to the server's own key: T3 refuses an unpinned insecure client.
+		c, err := NewClient(ClientConfig{BaseURLOverride: srv.URL + "/api2/json", InsecureTLS: true, TLSPin: tlspin.FromCertificate(srv.Certificate()), TokenID: "root@pam!pveforge", TokenSecret: "s"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,8 +232,14 @@ func TestAccessWriteGuard_Redirect(t *testing.T) {
 // TestNewClient_InstallsAccessWriteGuard: both transports NewClient can
 // build are the guard, and go-proxmox's pc shares the very same client.
 func TestNewClient_InstallsAccessWriteGuard(t *testing.T) {
+	_, pin := pinCert(t)
 	for _, insecure := range []bool{false, true} {
-		c, err := NewClient(ClientConfig{Host: "pve.invalid", InsecureTLS: insecure, TokenID: "root@pam!pveforge", TokenSecret: "s"})
+		// The insecure client is pinned (T3 refuses one without a pin).
+		cfg := ClientConfig{Host: "pve.invalid", InsecureTLS: insecure, TokenID: "root@pam!pveforge", TokenSecret: "s"}
+		if insecure {
+			cfg.TLSPin = pin
+		}
+		c, err := NewClient(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,8 +25,10 @@ const rosterPassphrase = "test-roster-pass"
 // newTestRosterWithTLSTarget writes a roster.toml with one token-only
 // target pointed at srv (a TLS test server — RoutedClient always builds
 // an https:// base URL, so tests need a real TLS listener, not a plain
-// httptest.Server) and returns the roster's path. insecure_tls is set so
-// the client accepts the test server's self-signed cert.
+// httptest.Server) and returns the roster's path. insecure_tls is set, and the
+// target is pinned to the server's own certificate key (T3 refuses an
+// unpinned insecure_tls target), so the client accepts the test server's
+// self-signed cert through its pin.
 func newTestRosterWithTLSTarget(t *testing.T, srv *httptest.Server, targetID, node string) string {
 	t.Helper()
 	return writeTestRoster(t, srv, targetID, node, "")
@@ -61,7 +64,10 @@ insecure_tls = true
   id = "root@pam!pveforge"
   secret_enc = '''
 %s'''
-%s`, targetID, host, node, port, armored, extra)
+%s
+  [targets.tls]
+  spki_sha256 = %q
+`, targetID, host, node, port, armored, extra, string(tlspin.FromCertificate(srv.Certificate())))
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.toml")

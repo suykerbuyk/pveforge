@@ -39,7 +39,20 @@ var httpConstructorTargets = []sourceguard.Target{
 	tgtBaseTransport, tgtRoundTrip,
 	tgtTLSDial, tgtTLSDialWithDialer, tgtTLSClient, tgtTLSDialer,
 	tgtAnyTransportField,
+	tgtInsecureSkipVerify, tgtInsecureSkipVerifyField,
 }
+
+// T3 (operator ruling 1, P3): chain verification is skipped in exactly two
+// places, and only where a pin or a read-only probe stands in for it: the
+// pinned transport in newHTTPClient, which always installs
+// VerifyConnection and is built only with a pin, and servedPin's
+// handshake, which carries no request. A composite-literal key names
+// InsecureSkipVerify as a bare identifier; a field assignment
+// (cfg.InsecureSkipVerify = true) as a selector, pinned to none.
+var (
+	tgtInsecureSkipVerify      = sourceguard.Target{Name: "InsecureSkipVerify"}
+	tgtInsecureSkipVerifyField = sourceguard.Target{AnyQualifier: true, Name: "InsecureSkipVerify"}
+)
 
 // The type counts above cannot see a transport handed out by a helper: a
 // call site of baseTransport() never names *http.Transport, so a new file
@@ -114,6 +127,9 @@ var httpConstructorSites = map[string]map[string]int{
 		// any .Transport selector, three: exactly the three http.Transport
 		// type names above, so no client's transport is assigned anywhere.
 		tgtAnyTransportField.String(): 3,
+		// InsecureSkipVerify, two literal keys: newHTTPClient's pinned
+		// transport and servedPin's probe; no field assignment anywhere.
+		tgtInsecureSkipVerify.String(): 2,
 	},
 	"internal/netguard/netguard.go": {
 		tgtHTTPTransport.String():        1,

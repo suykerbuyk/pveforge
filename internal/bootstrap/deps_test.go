@@ -17,6 +17,7 @@ import (
 
 	"github.com/suykerbuyk/pveforge/internal/pvefake"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // installScriptPrefix is how sshexec's InstallPubkeyViaPassword script
@@ -255,7 +256,8 @@ func d1Server(t *testing.T, status int, tree string, paths, roles map[string]str
 	if err != nil {
 		t.Fatal(err)
 	}
-	return APIConfig{Host: host, APIPort: port, InsecureTLS: true, TokenID: "root@pam!t", TokenSecret: "s"}
+	// Pinned to the server's own key (T3 refuses an unpinned insecure client).
+	return APIConfig{Host: host, APIPort: port, InsecureTLS: true, TLSPin: tlspin.FromCertificate(srv.Certificate()), TokenID: "root@pam!t", TokenSecret: "s"}
 }
 
 // D1-ext (S4g): the REAL validator, against an httptest TLS server, yields

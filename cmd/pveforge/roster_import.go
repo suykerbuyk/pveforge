@@ -11,6 +11,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/roster"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // Seams for the import command's stdin, so tests can pipe a secret and
@@ -23,6 +24,7 @@ var (
 func newRosterImportTokenCmd() *cobra.Command {
 	var (
 		host, node, tokenID string
+		expect              string
 		grantSpecs          []string
 		apiPort             int
 		insecureTLS         bool
@@ -47,6 +49,13 @@ creates nothing there, so it never revokes anything.
 A target that already holds a DIFFERENT token is refused unless --replace is
 given; the replaced token is not revoked and stays live on PVE. Importing the
 token the target already holds is a no-op (already_held).
+
+An insecure_tls target (--insecure-tls, or the roster's own setting) needs a
+TLS pin: the roster's, or the pin you verified by other means, given with
+--expect sha256//…. The validation's connection must present that key, checked
+in the handshake before any request (the token included) is sent, and it is
+written with source expect only after the token validated. Without one, the
+import is refused before the secret is read.
 
 An imported target holds a token but no SSH key, so a later plain
 "pveforge bootstrap" of it is refused: pass --no-ssh-key to keep it keyless.`,
@@ -86,15 +95,31 @@ An imported target holds a token but no SSH key, so a later plain
 			if err != nil {
 				return err
 			}
+			iopts := bootstrap.ImportOptions{
+				TargetID: args[0], Host: host, Node: node, APIPort: apiPort, InsecureTLS: insecureTLS,
+				TokenID: tokenID, Grants: grants, Replace: replace,
+				RosterPath: rosterPath, Passphrase: passphrase,
+			}
+			if cmd.Flags().Changed("expect") {
+				// A value that was GIVEN must be one: an empty --expect is
+				// refused, never read as "no --expect".
+				p, err := tlspin.Parse(expect)
+				if err != nil {
+					return fmt.Errorf("--expect: %w", err)
+				}
+				iopts.Expect = p
+			}
+			// The TLS rule before the secret is read: an unpinned insecure
+			// target must not cost the piped secret.
+			if err := bootstrap.CheckImportTLS(iopts); err != nil {
+				return err
+			}
 			secret, err := readImportedSecret(importStdin())
 			if err != nil {
 				return err
 			}
-			res, err := bootstrap.Import(cmd.Context(), bootstrap.ImportOptions{
-				TargetID: args[0], Host: host, Node: node, APIPort: apiPort, InsecureTLS: insecureTLS,
-				TokenID: tokenID, Secret: secret, Grants: grants, Replace: replace,
-				RosterPath: rosterPath, Passphrase: passphrase,
-			}, newBootstrapValidator())
+			iopts.Secret = secret
+			res, err := bootstrap.Import(cmd.Context(), iopts, newBootstrapValidator())
 			return finishBootstrap(cmd.OutOrStdout(), cmd.ErrOrStderr(), format, args[0], res, err)
 		},
 	}
@@ -104,6 +129,7 @@ An imported target holds a token but no SSH key, so a later plain
 	cmd.Flags().StringVar(&node, "node", "", "the target's node name (defaults to the roster's, required for a new target)")
 	cmd.Flags().IntVar(&apiPort, "api-port", 0, "the target's API port (default 8006)")
 	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip TLS verification for a new target's API")
+	cmd.Flags().StringVar(&expect, "expect", "", "for an insecure_tls target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written after the token validates")
 	cmd.Flags().BoolVar(&replace, "replace", false, "replace a different token the target already holds (the old token is not revoked)")
 	resolveFormat = addOutputFlag(cmd)
 	addLockWaitFlag(cmd)

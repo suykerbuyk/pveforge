@@ -327,6 +327,6 @@ func TestRunRootSuccess_RosterInit(t *testing.T) {
 func TestRunRootSuccess_RosterValidate(t *testing.T) {
 	srv, f := newRouteFake(t, nil)
 	rp := tlsRoster(t, srv)
-	pinRunRoot(t, rp+": valid, 1 target(s)\n  - qa-pve-01 (127.0.0.1, node=qa-pve-01): token configured\n", "roster", "validate", "--roster", rp)
+	pinRunRoot(t, rp+": valid, 1 target(s)\n  - qa-pve-01 (127.0.0.1, node=qa-pve-01): token configured, tls pinned\n", "roster", "validate", "--roster", rp)
 	requireHits(t, f) // validate reads the roster only; it never calls PVE
 }

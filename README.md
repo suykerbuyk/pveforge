@@ -84,9 +84,17 @@ A malformed value is refused at load, never read as "no pin". Beside the
 pin, `source` records how it was first obtained: `ssh-verified` (over an SSH
 session pinned to the host key you gave), `ssh-stored` (pinned to the host key
 the roster held), `ssh-tofu` (an SSH host key trusted on first use, by
-`--ssh-tofu`) or `expect` (given with `pin-tls --expect`). No command requires
-a pin yet: `pveforge roster validate --require-tls-pins` lists the
-`insecure_tls` targets that have none.
+`--ssh-tofu`) or `expect` (given with `pin-tls --expect`). An `insecure_tls`
+target that holds NO pin is refused: pveforge makes no REST request to it at
+all (every request, GETs included, would carry the token to whatever
+answers), and the error names `pveforge roster pin-tls <target> --roster
+<path>`. `pveforge roster validate --require-tls-pins` lists the `insecure_tls`
+targets that have none. A CA-verified target (no `insecure_tls`) needs no pin.
+`roster import-token` into an `insecure_tls` target the roster holds no pin for
+needs `--expect sha256//…`, the pin you verified; the validation's connection
+must present it, and it is written, with source `expect`, only once the token
+validated. Root commands that include a REST view (such as `access inventory`)
+fail entirely on an unpinned `insecure_tls` target.
 
 The pin is captured, never trusted on first REST contact. `bootstrap` of an
 `insecure_tls` target reads the certificate pveproxy serves on the node itself

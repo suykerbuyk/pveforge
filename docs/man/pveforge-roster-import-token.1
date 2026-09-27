@@ -30,6 +30,14 @@ given; the replaced token is not revoked and stays live on PVE. Importing the
 token the target already holds is a no-op (already_held).
 
 .PP
+An insecure_tls target (--insecure-tls, or the roster's own setting) needs a
+TLS pin: the roster's, or the pin you verified by other means, given with
+--expect sha256//…. The validation's connection must present that key, checked
+in the handshake before any request (the token included) is sent, and it is
+written with source expect only after the token validated. Without one, the
+import is refused before the secret is read.
+
+.PP
 An imported target holds a token but no SSH key, so a later plain
 "pveforge bootstrap" of it is refused: pass --no-ssh-key to keep it keyless.
 
@@ -37,6 +45,10 @@ An imported target holds a token but no SSH key, so a later plain
 .SH OPTIONS
 \fB--api-port\fP=0
 	the target's API port (default 8006)
+
+.PP
+\fB--expect\fP=""
+	for an insecure_tls target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written after the token validates
 
 .PP
 \fB--grant\fP=[]

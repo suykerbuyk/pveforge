@@ -147,20 +147,23 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // proxy's own certificate is checked against the target's pin and every
 // request fails closed with a pin mismatch. A second TLS config for the
 // proxy leg is deliberately not built.
+//
+// An insecureTLS config with no pin is REFUSED (ErrTLSPinRequired;
+// operator ruling 1, P3): nothing would authenticate the peer, and every
+// request, GETs included, carries the token. So the chain-skipping clone
+// exists only together with VerifyConnection.
 func newHTTPClient(timeout time.Duration, insecureTLS bool, pin tlspin.Pin) (*http.Client, error) {
+	if insecureTLS && pin == "" {
+		return nil, ErrTLSPinRequired
+	}
 	var next http.RoundTripper // nil: http.DefaultTransport, at request time
-	if insecureTLS || pin != "" {
-		transport := baseTransport()
-		cfg := &tls.Config{InsecureSkipVerify: insecureTLS} //nolint:gosec // explicit opt-in via cfg.InsecureTLS, mirrors go-proxmox's own WithInsecureSkipVerify; with a pin, VerifyConnection is the identity
-		if pin != "" {
-			verify, err := tlspin.VerifyConnection(pin)
-			if err != nil {
-				return nil, err
-			}
-			cfg.VerifyConnection = verify
-			cfg.MinVersion = tls.VersionTLS12
+	if pin != "" {
+		verify, err := tlspin.VerifyConnection(pin)
+		if err != nil {
+			return nil, err
 		}
-		transport.TLSClientConfig = cfg
+		transport := baseTransport()
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecureTLS, VerifyConnection: verify, MinVersion: tls.VersionTLS12} //nolint:gosec // with insecure_tls the pin, checked by VerifyConnection on every handshake, is the identity
 		next = transport
 	}
 	return &http.Client{Timeout: timeout, Transport: accessWriteGuard{next: next}}, nil
@@ -179,6 +182,11 @@ func newHTTPClient(timeout time.Duration, insecureTLS bool, pin tlspin.Pin) (*ht
 func baseTransport() *http.Transport {
 	return http.DefaultTransport.(*http.Transport).Clone()
 }
+
+// ErrTLSPinRequired: an insecure_tls target that holds no TLS pin. Every
+// REST request to it would trust whatever answers, its token included, so
+// none is made (operator ruling 1, P3).
+var ErrTLSPinRequired = errors.New("an insecure_tls target needs a TLS pin: no REST request is made to one that holds none")
 
 // EffectiveAPIPort is the one rule for the API port a target's port field
 // means: 0 (unset) is DefaultAPIPort. NewClient and ServedPin both apply

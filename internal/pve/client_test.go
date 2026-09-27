@@ -136,6 +136,9 @@ func TestListNodes_ServerError(t *testing.T) {
 	}
 }
 
+// T3 (operator ruling 1, P3), inverted from "InsecureTLS does not error on
+// construction": without a pin it is refused, and no client is built; with
+// one it constructs.
 func TestNewClient_InsecureTLSDoesNotErrorOnConstruction(t *testing.T) {
 	c, err := NewClient(ClientConfig{
 		Host:        "qa-pve-01.example.com",
@@ -143,11 +146,13 @@ func TestNewClient_InsecureTLSDoesNotErrorOnConstruction(t *testing.T) {
 		TokenID:     "root@pam!pveforge",
 		TokenSecret: "secret",
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+	if !errors.Is(err, ErrTLSPinRequired) || c != nil {
+		t.Fatalf("insecure_tls without a pin: client %v, err %v; want nil, ErrTLSPinRequired", c != nil, err)
 	}
-	if c == nil {
-		t.Fatal("expected a non-nil client")
+	_, pin := pinCert(t)
+	c, err = NewClient(ClientConfig{Host: "qa-pve-01.example.com", InsecureTLS: true, TLSPin: pin, TokenID: "root@pam!pveforge", TokenSecret: "secret"})
+	if err != nil || c == nil {
+		t.Fatalf("insecure_tls with a pin: %v", err)
 	}
 }
 
@@ -159,9 +164,13 @@ func TestNewClient_InsecureTLSDoesNotErrorOnConstruction(t *testing.T) {
 // clones http.DefaultTransport (Proxy: http.ProxyFromEnvironment) before
 // flipping InsecureSkipVerify.
 func TestNewClient_InsecureTLS_PreservesProxyFromEnvironment(t *testing.T) {
+	// Re-stated on a PINNED insecure client (T3 refuses an unpinned one):
+	// the same transport property.
+	_, pin := pinCert(t)
 	c, err := NewClient(ClientConfig{
 		Host:        "qa-pve-01.example.com",
 		InsecureTLS: true,
+		TLSPin:      pin,
 		TokenID:     "root@pam!pveforge",
 		TokenSecret: "secret",
 	})
