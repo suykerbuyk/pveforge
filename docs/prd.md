@@ -230,6 +230,11 @@ token-authenticated" using only credentials an operator already has:
 4. From that point forward, default to token auth for everything token auth
    can do.
 
+For an `insecure_tls` target, a TLS pin is captured over the SSH session of
+step 2 and written before step 3 mints or sends any token. The trust model
+behind that order, and the rest of secret management, is §4.1. The operator
+procedures are `docs/operations/secrets-and-keys.md`.
+
 ### 3.3 Object/property model
 
 Mirrors the split verified in `go-proxmox` (§0.1, finding 2):
@@ -414,6 +419,196 @@ roster or Ansible inventory plays.
     need to decrypt the same roster without sharing one secret. Worth
     revisiting once this has more than one operator.
 
+### 4.1 Secret management: design and architecture
+
+This section states the design. The step-by-step procedures, and what each
+refusal means to an operator, are in `docs/operations/secrets-and-keys.md`;
+they are not repeated here.
+
+**Scope: what is secret and what is not.**
+- Secret: the roster passphrase, each target's API token secret, and each
+  keyful target's SSH private key.
+- Harness only: the nested test root password and each consumer's age
+  identity.
+- Never stored anywhere: the outer cluster's root password.
+- Not secret but integrity-critical: the SSH host-key pin, the TLS SPKI pin,
+  their recorded provenance, and the harness's public age recipients.
+
+The roster keeps secrets and pins side by side. Only the secrets are
+ciphertext, so the file stays reviewable.
+
+**Trust model.**
+- **The SSH host key is the anchor.** The operator vouches for it with
+  `--host-key-fingerprint`, a value read on the node's console. The client
+  checks it during key exchange, before any password is sent. Once stored in
+  `[targets.ssh]`, a pin binds every later SSH dial to the target, keyless
+  (`--no-ssh-key`) dials included. The pin is compared against the key type
+  the client negotiates: ECDSA, where the host serves it.
+- **The TLS pin is captured over the verified SSH session, never on first
+  REST contact** (operator ruling 2, 2026-09-25). Over the session, bootstrap
+  runs `openssl s_client` against `127.0.0.1:<capture port>` on the node and
+  parses the leaf certificate in Go. That covers a custom, ACME or
+  cluster-signed certificate alike, since it reads what pveproxy actually
+  serves.
+- **A network cross-check** (`pve.ServedPin`) then requires the target's REST
+  address to serve the same key. It is a TLS handshake with no HTTP request,
+  so no token or header can leave. It dials through REST's own transport
+  clone, and it refuses when that transport would use a proxy: it could not
+  then compare what REST will reach.
+- **Read-only, then write, in this order.**
+  1. The capture and the cross-check.
+  2. The TLS pin, by compare-and-set.
+  3. On a first run, the SSH auth.
+  4. Only then preflight and the token phase.
+
+  A mismatch therefore stops the run before any token is minted, validated
+  or sent, and before any pin is stored. A first run that fails in steps 1–2
+  leaves no stored SSH pin, so its retry is again a first run under the same
+  rules. One that fails later (in preflight, or in the token phase) has
+  already stored the TLS pin, and for a keyful run the SSH auth; a keyful
+  retry dials that stored pin, while a keyless one stores no SSH pin and
+  still needs the fingerprint. That is sound: both pins came from one session
+  pinned to the operator's fingerprint. Under `--ssh-tofu` that session was
+  trusted on first use, and the stored pins are only as good as that
+  connection, which their recorded `ssh-tofu` provenance says. No state exists in which a live token sits on a target
+  whose peer identity was never established.
+- **Ruling B′ (operator ruling RQ3).** A pin captured over a password session
+  (a first run, or a keyless run) needs `--host-key-fingerprint`. The one
+  exception is an explicit `--ssh-tofu`, which records the lesser provenance.
+  A run over a stored SSH pin is exempt.
+- **Provenance is recorded, not inferred.**
+  - `[targets.tls] source` records how the TLS pin was first obtained:
+    `ssh-verified`, `ssh-stored`, `ssh-tofu` or `expect`.
+  - `[targets.ssh] host_key_source` records the same for the SSH pin:
+    `ssh-verified` or `ssh-tofu`.
+  - A target reachable only without SSH is pinned from an operator-verified
+    `--expect` value. No trust-on-first-use path exists for it.
+- **A pin is never replaced silently.**
+  - Every pin write is a compare-and-set against the value the writer read.
+  - A differing pin is replaced only by an explicit act, and only where a
+    verified session vouches for the new key:
+    - `roster pin-tls --repin`, for an `insecure_tls` target with SSH auth;
+    - `bootstrap --reprovisioned --host-key-fingerprint <console value>`
+      (operator ruling 3), which replaces the SSH pin, the installed keypair
+      and the TLS pin together. It writes the TLS pin before the SSH auth.
+      Where the stored pins already match the node it degrades to a plain
+      bootstrap, so repeating the command always converges.
+  - Every mismatch message labels the presented key "Do NOT pin", points to
+    the console, and never fills a presented key into a suggested command. A
+    test holds that wording.
+
+**Encryption at rest.**
+- **Each secret value is its own armored age ciphertext.** It uses a scrypt
+  passphrase recipient at work factor logN 18 (age's default, about 0.8s per
+  derivation). `filippo.io/age` is embedded, never shelled out to.
+- **The passphrase is never a CLI argument.** It comes from
+  `PVEFORGE_ROSTER_PASSPHRASE`, else a no-echo prompt on a terminal, else the
+  command fails rather than hang.
+- **Every encrypting write proves the passphrase first.** It must open a
+  secret the roster already holds (`ErrWrongPassphrase`,
+  `ErrNoReadableSecret`), so a roster can never split into secrets sealed
+  under two passphrases.
+- **The work factor has a test-only seam** (`SetScryptWorkFactorForTests`).
+  It exists because the full factor made the suite take minutes. Five layers
+  keep it out of production:
+  1. a `testing.Testing()` gate, inert in any production binary, proved by
+     building and executing a probe main;
+  2. a static guard over `sourceguard.NonTestReferences`, refusing any
+     production reference;
+  3. `kdf_guard_test.go`, asserting logN 18 exactly, the override zero at
+     rest, and its restore after a cycle;
+  4. a blast radius confined to ciphertext a test writes into its own temp
+     directory;
+  5. `sourceguard.DirectiveEvasions`, refusing `//go:linkname`, `unsafe`,
+     assembly, cgo and `vendor/` in production code. Those are the routes the
+     AST walkers cannot see, and two of them were proven to ship a weakened
+     binary with every older guard green.
+
+  The one route left open is a dependency module linking in. The module
+  guard's pinned dependency set holds that.
+- **Roster keys are case-sensitive, and an unknown key is refused at load.**
+  Otherwise the TOML library's case-insensitive, last-wins matching could
+  replace a pin with a differently spelled one, or read a misspelled pin as
+  absent.
+
+**Transport enforcement (T3, operator ruling 1).**
+- **The one HTTP client constructor refuses an `insecure_tls` configuration
+  with no pin** (`ErrTLSPinRequired`). No transport is built and no request of
+  any method is made. The chain-skipping TLS configuration exists only
+  together with a `VerifyConnection` callback.
+- **The callback checks the leaf's SPKI hash on every handshake**, resumed
+  ones included. The connection uses TLS 1.2 at minimum. It runs before any
+  request byte, so a wrong key never receives the token.
+- **A CA-verified target** (`insecure_tls = false`) needs no pin. With one,
+  the chain AND the pin must both hold.
+- **Proxies.** An `http://` proxy works, since the pin is checked end to end
+  through its CONNECT tunnel. An `https://` proxy fails closed with a pin
+  mismatch: net/http applies the same TLS configuration to the proxy leg, and
+  no second configuration is built.
+- **A source guard holds the transport shape**
+  (`cmd/pveforge/httpconstructor_test.go`), with exact per-file counts:
+  - the transport clone site;
+  - `RoundTrip` calls;
+  - `crypto/tls` dials;
+  - `InsecureSkipVerify`: exactly two sites, the pinned transport and
+    `servedPin`, which never carries a request.
+
+  Every request also passes one transport that refuses any method but GET or
+  HEAD on `/access`.
+- **`roster import-token`** into an unpinned `insecure_tls` target needs
+  `--expect`. It is refused before the secret is read from stdin. The pin is
+  written only after the token validated through it.
+
+**The older-binary lockout rule (R-b′).** Pins added three roster keys: `tls`
+(T1a), `source` (T1b) and `host_key_source` (T2). Since `7d99123` a roster
+refuses unknown keys, so any command that writes one makes the whole roster
+unreadable to every binary from `7d99123` up to that key's commit: those fail
+closed. **Binaries built before `7d99123` are the dangerous case.** They decode
+with plain `toml.Unmarshal`, which ignores unknown keys, so they read a pinned
+roster without error, ignore the pin, skip verification for an `insecure_tls`
+target and send its token unchecked. No design inside the roster can stop an
+old binary that never looks. The only defence is operational: no such build
+may remain where it could be run against a roster. The commands that write
+the keys are `bootstrap`, `roster pin-tls` and `roster import-token --expect`.
+The rule: use a pinning binary against a roster only once every reader of that roster
+is at least that new. The readers are the operator's binary, the harness's
+`PVEFORGE_BIN`, and the checkout's go-built harness helpers. Rollouts
+therefore upgrade readers first, then pin, then merge enforcement.
+
+**Harness secrets.**
+- **The harness keeps its two secrets in one age blob,
+  `hack/harness/secrets.age`.** It is committed, and sealed to per-consumer
+  public recipients (`recipients.txt`), not to a shared passphrase. This is
+  the multi-consumer model §4's future option describes, applied to the
+  harness only.
+- **Age does not authenticate the sealer**, so the blob may carry only an
+  allow-listed pair of names. Adding a name is a code change.
+- **`unlock.sh run` puts the values into one exec'd command's environment
+  only.** It never writes them to disk or argv, strips the identity
+  variables, refuses to override a set name, and refuses the variables that
+  run code in a bash child.
+- **A recipient's removal is not revocation**, because git history keeps
+  every blob it could open. Revocation is removal plus rotation of the
+  values.
+- **The outer root password is in no blob and never reaches an agent.** The
+  harness guard refuses to run while `PVEFORGE_PVE_PASSWORD`, a set
+  `PVEFORGE_ROSTER` or any proxy variable is present. It also requires a TLS
+  pin on every nested target, distinct from every outer target's.
+
+**Deliberately out of scope.**
+- **ACME.** It is not in use, and Let's Encrypt cannot validate hosts that
+  are not publicly reachable (operator ruling 5).
+- **An internal CA.** If one is ever offered, the CA-verified mode
+  (`insecure_tls = false`) is the path, and pins become optional there. No CA
+  is built or managed by pveforge.
+- **Multi-operator access to one roster.** Rosters keep a single passphrase
+  (see §6 item 5).
+- **These are known gaps, recorded rather than built:**
+  - a command to change a roster's passphrase;
+  - a command to rotate the SSH keypair of a node that was not rebuilt;
+  - removal of stray `authorized_keys` lines left by failed first runs;
+  - a byte cap on the capture's output, which is bounded in time only.
+
 ## 5. Licensing and repository structure
 
 - Dual MIT / Apache-2.0, matching the author's other software products.
@@ -444,7 +639,10 @@ roster or Ansible inventory plays.
    rather than sized as a standalone task — those tasks already own this
    layer of the architecture.
 5. Multi-operator secret access (`age` recipients vs. a single passphrase) —
-   deferred past v1.
+   deferred past v1. **Partly answered (2026-09-26, §4.1):** the nested test
+   harness's secrets use per-consumer age recipients (`hack/harness/secrets.age`),
+   so the operator and each CI runner hold their own identity. Rosters still
+   use a single scrypt passphrase; that part stays open.
 6. ~~Whether `pveforge api post/put` (planned, `pveforge-raw-api-escape-hatch`,
    §3.1) gets §3.4's idempotent-mutation-engine locking for object types the
    engine already models, or an explicit unsafe/no-locking posture for paths

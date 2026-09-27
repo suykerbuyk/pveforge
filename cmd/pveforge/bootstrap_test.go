@@ -205,12 +205,15 @@ func TestResolveRosterPathFromFlagOrEnv_Precedence(t *testing.T) {
 }
 
 // C-T8: --no-ssh-key's help states what the flag actually does, including
-// the two refusals a target can meet later.
+// the two refusals a target can meet later, and that each such run needs
+// --host-key-fingerprint (B′) rather than trusting on first use.
 func TestNewBootstrapCmd_NoSSHKeyFlagIsExplained(t *testing.T) {
 	u := newBootstrapCmd().Flags().Lookup("no-ssh-key").Usage
 	for _, want := range []string{
 		"no key is installed on the target and none is stored in the roster",
-		"trusted on first use on EVERY such run",
+		"no SSH host key pin is stored",
+		"give --host-key-fingerprint on each one",
+		"an insecure_tls target requires it, or --ssh-tofu",
 		"reported as host_key_fingerprint",
 		"needs this flag on every later run",
 		"refused against a target whose roster entry holds an SSH keypair",
