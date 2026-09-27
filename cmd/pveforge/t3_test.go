@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -20,6 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -212,6 +215,35 @@ func TestT3Errors_NameOnlyFlagsThatExist(t *testing.T) {
 	}
 	if !strings.Contains(targetMsg, pve.ErrTLSPinRequired.Error()) {
 		t.Fatalf("the target refusal: %q", targetMsg)
+	}
+
+	// The conflict refusal names import-token's --expect, then a bootstrap
+	// command line: each flag is checked against the command it is given to.
+	boot, _, err := root.Find([]string{"bootstrap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictErr := bootstrap.CheckImportTLS(bootstrap.ImportOptions{TargetID: "pinned", RosterPath: writeValidateRoster(t, mixedPinRoster), Expect: tlspin.Pin("sha256//" + strings.Repeat("B", 43) + "=")})
+	if !errors.Is(conflictErr, bootstrap.ErrTLSPinDiffers) {
+		t.Fatalf("the conflict refusal: %v", conflictErr)
+	}
+	impPart, bootPart, ok := strings.Cut(conflictErr.Error(), "pveforge bootstrap ")
+	if !ok {
+		t.Fatalf("the conflict refusal names no bootstrap command: %q", conflictErr)
+	}
+	for _, part := range []struct {
+		name, text string
+		cmd        *cobra.Command
+	}{{"import-token", impPart, imp}, {"bootstrap", bootPart, boot}} {
+		flags := flagRE.FindAllString(part.text, -1)
+		if len(flags) == 0 {
+			t.Errorf("the conflict refusal names no %s flag: %q", part.name, conflictErr)
+		}
+		for _, f := range flags {
+			if part.cmd.Flags().Lookup(f[2:]) == nil && part.cmd.InheritedFlags().Lookup(f[2:]) == nil {
+				t.Errorf("the conflict refusal names %s for %s, which lacks it: %q", f, part.name, conflictErr)
+			}
+		}
 	}
 }
 

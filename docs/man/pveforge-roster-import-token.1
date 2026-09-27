@@ -48,7 +48,7 @@ An imported target holds a token but no SSH key, so a later plain
 
 .PP
 \fB--expect\fP=""
-	for an insecure_tls target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written after the token validates
+	for a target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written (source expect) after the token validates. Required for an insecure_tls target; for a CA-verified one it is optional and pins it as well
 
 .PP
 \fB--grant\fP=[]
