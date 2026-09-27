@@ -251,6 +251,7 @@ type d5Case struct {
 	noP0, p0Exists      bool
 	evidenceExists      bool
 	noEvidenceVar       bool
+	umask               string // when set, the umask the script inherits
 
 	wantCode int
 	wantPass int      // exact PASS count; -1 = not checked
@@ -375,7 +376,12 @@ func runD5(t *testing.T, c d5Case) d5Result {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", abs(filepath.Join(d5Dir, c.script)), c.phase)
+	argv := []string{abs(filepath.Join(d5Dir, c.script)), c.phase}
+	if c.umask != "" {
+		// Only when asked: the wrapper is a bash too (see runProbe).
+		argv = append([]string{"-c", `umask "$0" && exec bash "$@"`, c.umask}, argv...)
+	}
+	cmd := exec.CommandContext(ctx, "bash", argv...)
 	cmd.Dir = tmp
 	cmd.Env = env
 	var errOut bytes.Buffer

@@ -1230,3 +1230,138 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 		t.Errorf("an unreadable pool: exit %d\n%s", r.code, r.stderr)
 	}
 }
+
+// Evidence is the owner's alone whatever umask the operator's shell has
+// (pveforge-harness-evidence-file-mode): under an inherited umask 002, every
+// file under ~/.config/pveforge/harness-evidence is 0600 and every directory
+// 0700, for each script that writes evidence: lib's (probe, build),
+// prepare-iso's own, and evidence.sh's (nested, cluster; D5 shares it).
+func TestHarness_EvidenceIsPrivate(t *testing.T) {
+	for name, spec := range map[string]func() probeSpec{
+		"probe":       func() probeSpec { return zfsWorld() },
+		"build":       func() probeSpec { return buildWorld(t, buildHome{}) },
+		"prepare-iso": func() probeSpec { return isoWorld(t, nestedPw, nil) },
+		"nested":      func() probeSpec { return nestedWorld(t, "bootstrap") },
+		"cluster":     func() probeSpec { return clusterWorld().spec(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := spec()
+			s.umask = "002"
+			r := runProbe(t, s)
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
+			privateTree(t, filepath.Join(r.home, ".config/pveforge/harness-evidence"))
+			// podman alone runs under 022, so its own image storage is made
+			// as it always is; its log is still private (checked above).
+			if name == "prepare-iso" {
+				if got := fakeLog(r, "podman.umask"); got != "0022\n" {
+					t.Errorf("podman ran under umask %q, want 0022", got)
+				}
+			}
+		})
+	}
+}
+
+// privateTree requires every file under root 0600 and every directory 0700,
+// and at least one file, or the check proved nothing.
+func privateTree(t *testing.T, root string) {
+	t.Helper()
+	files := 0
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		want := os.FileMode(0o600)
+		if d.IsDir() {
+			want = 0o700
+		} else {
+			files++
+		}
+		if fi.Mode().Perm() != want {
+			t.Errorf("%s: mode %v, want %v", p, fi.Mode().Perm(), want)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files == 0 {
+		t.Fatalf("%s: no evidence file was written: this check proved nothing", root)
+	}
+}
+
+// The scripts whose umask comes from lib.sh alone, each with its own
+// runner: golden and reset (runGR), and D5's root and token verifies (runD5).
+func TestHarness_LibEvidenceIsPrivate(t *testing.T) {
+	for name, run := range map[string]func(t *testing.T) string{
+		"golden": func(t *testing.T) string {
+			s := goldenWorld()
+			s.umask = "002"
+			r := runGR(t, "golden.sh", s)
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
+			return r.evidenceRoot
+		},
+		"reset": func(t *testing.T) string {
+			s := grWorld()
+			s.umask = "002"
+			r := runGR(t, "reset.sh", s)
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
+			return r.evidenceRoot
+		},
+		"d5 verify-root p0": func(t *testing.T) string {
+			r := runD5(t, d5Case{script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), umask: "002"})
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
+			// The P0 baseline too (it lives outside the evidence).
+			privateTree(t, r.p0Dir)
+			return filepath.Dir(r.evidence)
+		},
+		"d5 verify-token pre": func(t *testing.T) string {
+			r := runD5(t, d5Case{script: "verify-token.sh", phase: "pre", token: d5TokenWorld(t, "pre"), umask: "002"})
+			if r.code != 0 {
+				t.Fatalf("exit %d\n%s", r.code, r.stderr)
+			}
+			return filepath.Dir(r.evidence)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			privateTree(t, run(t))
+		})
+	}
+}
+
+// evidence.sh's own guarantee, for a caller that sources it alone (today's
+// callers also have lib's or env.sh's umask): under umask 002, a run's
+// directory, result.txt, checks.out and MANIFEST.sha256 are all private.
+func TestEvidenceSh_OpenIsPrivate(t *testing.T) {
+	ev, err := filepath.Abs(filepath.Join(harnessDir, "evidence.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "evidence", "run")
+	cmd := exec.Command("bash", "-c", `umask 002; source "$1"; harness_evidence_open "$2" test; harness_evidence_check a-check true >/dev/null; harness_evidence_finish >/dev/null`, "bash", ev, dir)
+	cmd.Env = []string{"PATH=" + harnessPATH(t)}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	// ".." is the parent open's mkdir -p makes: -m 700 covers only dir.
+	for name, want := range map[string]os.FileMode{"..": 0o700, "": 0o700, "result.txt": 0o600, "checks.out": 0o600, "MANIFEST.sha256": 0o600} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Errorf("%q: mode %v, want %v", name, fi.Mode().Perm(), want)
+		}
+	}
+}

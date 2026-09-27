@@ -4,11 +4,13 @@
 # argv goes to $FAKE_PVEFORGE_DIR/podman.log (one argument per line, then a
 # "--" line) and its environment to podman.env. It "prepares" each node's ISO
 # by writing /work/<node>-auto.iso (the -v mount of /work) from the node's
-# answer file, then exits with the status in podman.rc (default 0).
+# answer file, then exits with the status in podman.rc (default 0). The umask
+# it ran under goes to podman.umask.
 set -u
 F=${FAKE_PVEFORGE_DIR:?}
 printf '%s\n' "$@" -- >>"$F/podman.log"
 env >>"$F/podman.env"
+umask >"$F/podman.umask"
 rc=0
 [ -f "$F/podman.rc" ] && rc=$(cat "$F/podman.rc")
 [ "$rc" = 0 ] || exit "$rc"

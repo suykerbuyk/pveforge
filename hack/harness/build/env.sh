@@ -15,6 +15,12 @@
 
 readonly HB_ENV_FILE=$HOME/.config/pveforge/harness-build.env
 
+# Every file a script sourcing this creates is the owner's alone (0600,
+# directories 0700, the parents mkdir -p makes included), whatever umask the
+# operator's shell has: evidence holds raw PVE answers. Files made on purpose
+# keep their explicit modes.
+umask 077
+
 # Nothing below is taken from the environment: HB, HB_PINS and every
 # HB_TOOL_* are set by this file's functions or not at all, so an inherited
 # value (a stub path, say) is dropped here, and "already set" below always

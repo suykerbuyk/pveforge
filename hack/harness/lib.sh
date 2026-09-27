@@ -99,6 +99,10 @@ if [ "${BASH_SOURCE[1]:-}" != "$0" ]; then
 fi
 unalias -a
 set -euo pipefail
+# Every file a harness script creates is the owner's alone (0600, directories
+# 0700), whatever umask the operator's shell has: evidence holds raw PVE
+# answers. Files lib or a script makes on purpose keep their explicit modes.
+umask 077
 # Fails, and so exits under set -e, on a bash older than 4.4.
 shopt -s inherit_errexit
 IFS=$' \t\n'

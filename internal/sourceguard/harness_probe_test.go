@@ -82,6 +82,9 @@ type probeSpec struct {
 	onBlock func(t *testing.T, b blocked)
 	// stdin, when set, is the script's standard input.
 	stdin string
+	// umask, when set, is the umask the script inherits (002 is the
+	// operator's shell's, measured live at D5 G0).
+	umask string
 	// gone and goneRC answer a key once a VM destroy has succeeded (the
 	// fake's .destroyed variants), unless a numbered one answers that call:
 	// what PVE shows once a VM is gone.
@@ -317,7 +320,15 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", append(append(append([]string{}, s.bashArgs...), probe), s.args...)...)
+	argv := append([]string{}, s.bashArgs...)
+	if s.umask != "" {
+		// The script inherits s.umask, set by a wrapper that execs it. Only
+		// for a spec that asks: the wrapper is a bash too, and would itself
+		// run whatever BASH_ENV or exported function a test plants for the
+		// script (TestPasswordScripts_RefuseInheritedCode).
+		argv = append([]string{"-c", `umask "$0" && exec bash "$@"`, s.umask}, argv...)
+	}
+	cmd := exec.CommandContext(ctx, "bash", append(append(argv, probe), s.args...)...)
 	cmd.Dir = work
 	cmd.WaitDelay = 5 * time.Second
 	// Its own process group: a signal the fake sends to its group never

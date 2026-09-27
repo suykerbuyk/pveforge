@@ -52,8 +52,9 @@ type grSpec struct {
 	acceptRC  map[int]int               // acceptance call number -> status
 	args      []string
 	env       map[string]string
-	noAccept  bool // HARNESS_ACCEPT_BIN unset
-	noRosters bool // the nested and outer harness rosters unset
+	noAccept  bool   // HARNESS_ACCEPT_BIN unset
+	noRosters bool   // the nested and outer harness rosters unset
+	umask     string // when set, the umask the script inherits
 }
 
 type grResult struct {
@@ -200,7 +201,12 @@ exec `+realDate+` "$@"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", append([]string{path}, s.args...)...)
+	argv := append([]string{path}, s.args...)
+	if s.umask != "" {
+		// Only when asked: the wrapper is a bash too (see runProbe).
+		argv = append([]string{"-c", `umask "$0" && exec bash "$@"`, s.umask}, argv...)
+	}
+	cmd := exec.CommandContext(ctx, "bash", argv...)
 	cmd.Dir = work
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	for k, v := range env {

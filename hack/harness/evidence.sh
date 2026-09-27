@@ -20,6 +20,10 @@ harness_evidence_die() { # status message
 
 # harness_evidence_open creates dir, which must not exist yet.
 harness_evidence_open() { # dir phase
+	# Every file from here on is the owner's alone (0600, directories 0700),
+	# whatever umask the caller inherited: some hold raw PVE answers. Set in
+	# the caller's shell, not a subshell, so it lasts the whole run.
+	umask 077
 	local dir=$1
 	[ -n "$dir" ] || harness_evidence_die 2 "HARNESS_EVIDENCE must name a new directory for this run's evidence"
 	[ ! -e "$dir" ] && [ ! -L "$dir" ] || harness_evidence_die 2 "evidence directory $dir already exists; evidence is never overwritten"
