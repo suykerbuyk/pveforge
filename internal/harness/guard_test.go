@@ -16,6 +16,7 @@ import (
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
 
+	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -383,8 +384,19 @@ func TestOpen_LiveRefusals(t *testing.T) {
 	}
 	w := newWorld(t)
 	w.dialErr = errors.New("decrypt")
-	if _, err := w.open(); !errors.Is(err, ErrGuard) || !strings.Contains(err.Error(), "build its client") {
+	if _, err := w.open(); !errors.Is(err, ErrGuard) || !errors.Is(err, w.dialErr) || !strings.Contains(err.Error(), "build its client") {
 		t.Errorf("a client that cannot be built: %v", err)
+	}
+	// An unpinned insecure_tls target: the refusal stays ErrTLSPinRequired
+	// and names the HARNESS roster to pin, not the operator's default.
+	w = newWorld(t)
+	w.dialErr = fmt.Errorf("target %q: %w", "pvh-n1", pve.ErrTLSPinRequired)
+	_, err := w.open()
+	if !errors.Is(err, ErrGuard) || !errors.Is(err, pve.ErrTLSPinRequired) || !strings.Contains(err.Error(), "pin-tls --roster "+w.harness) {
+		t.Errorf("an unpinned target: %v", err)
+	}
+	if strings.Contains(err.Error(), w.outer) {
+		t.Errorf("the refusal names an outer roster: %v", err)
 	}
 }
 

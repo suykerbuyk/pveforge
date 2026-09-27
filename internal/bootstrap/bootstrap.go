@@ -1480,6 +1480,10 @@ type ImportOptions struct {
 func CheckImportTLS(opts ImportOptions) error {
 	insecure := opts.InsecureTLS
 	var stored tlspin.Pin
+	// A load error is deliberately not returned here: this is a pre-check,
+	// and a roster that does not load (missing, unreadable, invalid) is
+	// refused by Import's own load under the lock, before anything is
+	// validated or written. The rule then runs on the options alone.
 	if r, err := roster.Load(opts.RosterPath); err == nil {
 		if tg := r.Find(opts.TargetID); tg != nil {
 			insecure = insecure || tg.InsecureTLS

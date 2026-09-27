@@ -170,7 +170,12 @@ func open(ctx context.Context, d deps) (*Harness, error) {
 		c, err := d.dial(t, pass)
 		if err != nil {
 			h.Close()
-			return nil, refuse("%s: build its client: %v", t.ID, err)
+			// As the CLI's withRosterHint: an unpinned target is pinned in
+			// THIS roster, not the operator's default one.
+			if errors.Is(err, pve.ErrTLSPinRequired) {
+				return nil, refuse("%s: build its client: %w (roster %s: give roster pin-tls --roster %s)", t.ID, err, harnessRoster.path, harnessRoster.path)
+			}
+			return nil, refuse("%s: build its client: %w", t.ID, err)
 		}
 		h.clients[t.ID] = c
 		if err := checkLive(ctx, t, c, hrAddrs, outerAddrs); err != nil {

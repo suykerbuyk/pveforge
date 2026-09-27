@@ -129,7 +129,7 @@ An imported target holds a token but no SSH key, so a later plain
 	cmd.Flags().StringVar(&node, "node", "", "the target's node name (defaults to the roster's, required for a new target)")
 	cmd.Flags().IntVar(&apiPort, "api-port", 0, "the target's API port (default 8006)")
 	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip TLS verification for a new target's API")
-	cmd.Flags().StringVar(&expect, "expect", "", "for an insecure_tls target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written after the token validates")
+	cmd.Flags().StringVar(&expect, "expect", "", "for a target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written (source expect) after the token validates. Required for an insecure_tls target; for a CA-verified one it is optional and pins it as well")
 	cmd.Flags().BoolVar(&replace, "replace", false, "replace a different token the target already holds (the old token is not revoked)")
 	resolveFormat = addOutputFlag(cmd)
 	addLockWaitFlag(cmd)
