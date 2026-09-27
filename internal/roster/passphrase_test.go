@@ -386,10 +386,12 @@ func TestPassphrase_ZeroIsRefused(t *testing.T) {
 // nowhere else, in two layers:
 //
 //   - module-wide (sourceguard): no non-test file outside internal/roster's
-//     secrets.go (its declaration) and writeback.go (the writers) names it,
-//     bare or qualified;
+//     secrets.go (its declaration), writeback.go (the writers) and rekey.go
+//     (roster rekey) names it, bare or qualified;
 //   - inside this package, by function: every use is within the body of
-//     WriteTokenAuth or WriteSSHAuth. A file-scoped rule alone would let a
+//     WriteTokenAuth or WriteSSHAuth, or rekeySecrets, which seals only
+//     after every secret of the roster opened with the old passphrase (a
+//     proof stronger than prove's one secret). A file-scoped rule alone would let a
 //     new function in writeback.go seal a secret and splice it with
 //     applySubtableSplice, skipping the proof. Every declaration is walked
 //     — package-level vars and their function literals included — so no
@@ -397,12 +399,12 @@ func TestPassphrase_ZeroIsRefused(t *testing.T) {
 //
 // Anti-vacuity: exactly one use in each writer, and the declaration seen.
 func TestEncryptString_OnlyTheProvingWritersCallIt(t *testing.T) {
-	const decl, writers = "internal/roster/secrets.go", "internal/roster/writeback.go"
+	const decl, writers, rekey = "internal/roster/secrets.go", "internal/roster/writeback.go", "internal/roster/rekey.go"
 	bare := sourceguard.Target{Name: "EncryptString"}
 	qualified := sourceguard.Target{ImportPath: "github.com/suykerbuyk/pveforge/internal/roster", Name: "EncryptString"}
 	res, err := sourceguard.NonTestReferences(sourceguard.Scope{
 		Root:       moduleRoot,
-		AllowFiles: []string{decl, writers},
+		AllowFiles: []string{decl, writers, rekey},
 	}, []sourceguard.Target{bare, qualified})
 	if err != nil {
 		t.Fatalf("NonTestReferences: %v", err)
@@ -410,7 +412,7 @@ func TestEncryptString_OnlyTheProvingWritersCallIt(t *testing.T) {
 	for _, ref := range res.Violations() {
 		t.Errorf("EncryptString named outside the proving writers: %s", ref)
 	}
-	if len(res.Allowed(decl, bare)) == 0 || len(res.Allowed(writers, bare)) == 0 {
+	if len(res.Allowed(decl, bare)) == 0 || len(res.Allowed(writers, bare)) == 0 || len(res.Allowed(rekey, bare)) == 0 {
 		t.Error("the guard no longer sees EncryptString's declaration and its writers")
 	}
 	if !res.Reached("cmd/pveforge/main.go") {
@@ -454,14 +456,14 @@ func TestEncryptString_OnlyTheProvingWritersCallIt(t *testing.T) {
 				// writeSSHAuth is the one body of WriteSSHAuth and ReplaceSSHAuth
 				// (T2's compare-and-set); both reach it only through
 				// spliceSubtableIf, which proves the passphrase.
-				if where != "WriteTokenAuth" && where != "writeSSHAuth" {
+				if where != "WriteTokenAuth" && where != "writeSSHAuth" && where != "rekeySecrets" {
 					t.Errorf("%s: EncryptString used in %s, outside the proving writers", fset.Position(id.Pos()), where)
 				}
 				return true
 			})
 		}
 	}
-	if !declSeen || uses["WriteTokenAuth"] != 1 || uses["writeSSHAuth"] != 1 {
+	if !declSeen || uses["WriteTokenAuth"] != 1 || uses["writeSSHAuth"] != 1 || uses["rekeySecrets"] != 1 {
 		t.Errorf("declaration seen %v, uses %v: want the declaration and exactly one use in each writer — the walk is no longer looking at the real code", declSeen, uses)
 	}
 }

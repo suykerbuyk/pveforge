@@ -673,7 +673,7 @@ func TestREADME_DocCommandLinesMatchTheCommandTree(t *testing.T) {
 	for _, want := range []string{
 		"bootstrap ", "--host-key-fingerprint", "--reprovisioned", "--no-ssh-key",
 		"roster pin-tls ", "--print", "--expect", "roster import-token ",
-		"roster validate ", "--require-tls-pins",
+		"roster validate ", "--require-tls-pins", "roster rekey ",
 	} {
 		found := false
 		for line := range seen {

@@ -33,9 +33,9 @@ import (
 // noParallel lists the packages whose tests mutate process-global state,
 // each with what makes parallelism unsafe there.
 var noParallel = []struct{ pkg, why string }{
-	{"cmd/pveforge", "netguard's recorder, installed by TestMain, scopes ExpectViolation by wall-clock nesting; roster's scrypt work-factor override; the command seams (newBootstrapTransport, newBootstrapValidator, importStdin, importStdinIsTerminal, notifySignals, stopSignals, execHarden, execDecrypt, execve); pve.SetSSHPortForIntegrationTests; os.Stdin"},
+	{"cmd/pveforge", "netguard's recorder, installed by TestMain, scopes ExpectViolation by wall-clock nesting; roster's scrypt work-factor override; the command seams (newBootstrapTransport, newBootstrapValidator, importStdin, importStdinIsTerminal, notifySignals, stopSignals, execHarden, execDecrypt, execve, rekeyOldPassphrase, rekeyNewPassphrase, bootstrapPassphrase); pve.SetSSHPortForIntegrationTests; os.Stdin"},
 	{"internal/bootstrap", "roster's scrypt work-factor override (a test at a lowered factor must not overlap one asserting production's 18); postMintRetryDelay, cleanupTimeout and the writeTokenAuthFn / dryRunTokenWrite / persistTargetMetaFn seams; netguard"},
-	{"internal/roster", "the scrypt work-factor override itself (SetScryptWorkFactorForTests); the terminal seams readPassword, getTermState and restoreTermFn; dryRunCompose; subtableSpliceFn"},
+	{"internal/roster", "the scrypt work-factor override itself (SetScryptWorkFactorForTests); the terminal seams readPassword, getTermState, restoreTermFn and stdinIsTerminal; dryRunCompose; subtableSpliceFn; rekeyWriteFn, rekeyComposed, rekeyLockTimeout and rekeyApplyEdits"},
 	{"internal/pve", "netguard's recorder; SetTaskTimingsForTests and the task and agent-exec poll defaults; SetSSHPortForIntegrationTests"},
 	{"internal/idempotent", "netguard's recorder; pve.SetTaskTimingsForTests"},
 	{"internal/sshexec", "netguard's recorder; SetDialGuardForTests; os.Stdin"},

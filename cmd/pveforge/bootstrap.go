@@ -85,7 +85,9 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rawPassphrase, err := roster.ResolvePassphraseContext(cmd.Context())
+			// A roster with no secret yet takes its passphrase from this run:
+			// asked for twice when it is prompted for.
+			rawPassphrase, err := bootstrapPassphrase(cmd.Context(), rosterPath)
 			if err != nil {
 				return err
 			}
@@ -178,6 +180,11 @@ func proveRosterPassphrase(path, targetID, pass string) (roster.Passphrase, erro
 	}
 	return p, nil
 }
+
+// bootstrapPassphrase resolves the roster passphrase for bootstrap, which
+// may seal the roster's first secret and so set its passphrase: the
+// confirming prompt. A seam only so a test can pin which resolver it is.
+var bootstrapPassphrase = roster.ResolvePassphraseForWriteContext
 
 // resolvePVEPassword reads the PAM/realm login password used once, for
 // the pubkey-install step: environment variable first, else an

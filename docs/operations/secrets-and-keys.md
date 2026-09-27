@@ -97,10 +97,13 @@ that step has been run and has passed.
 
    It asks for the roster passphrase and the PVE password. The host key is
    checked during the key exchange, before the password is sent.
-   - **The passphrase of a new roster is whatever you type at this first
-     prompt.** It is asked for ONCE, with no confirmation, and no command
-     changes it later. A typo here becomes the roster's passphrase for good.
-     Step 4's decrypt check catches that while it is still cheap to undo.
+   - **The passphrase of a new roster is set by this first run.** When the
+     roster holds no secret yet, the prompt says so and asks twice, and two
+     entries that differ are refused before anything happens. A passphrase
+     from `PVEFORGE_ROSTER_PASSPHRASE` is taken as given, with no second
+     entry to compare, so a typo in it becomes the roster's passphrase. Step
+     4's decrypt check catches either while it is cheap to undo, and
+     procedure 10 changes a passphrase later.
    - For an `insecure_tls` target, a run that captures the TLS pin over a
      password session needs `--host-key-fingerprint`, or else `--ssh-tofu`.
      That covers every first run and every `--no-ssh-key` run. This rule is
@@ -383,13 +386,14 @@ definite verdict about it, and never on a read failure.
   older copies of `secrets.age` in git history. Revocation is therefore:
   1. Remove the line.
   2. **Rotate both values:**
-     - A new harness roster passphrase. No command changes a roster's
-       passphrase, so this means new harness rosters and a re-run of their
-       bootstraps, which meet the old tokens as in procedure 8 (lost roster
-       passphrase), step 3.
+     - A new harness roster passphrase: procedure 10's harness pair (rekey
+       both harness rosters, then seal). If the revoked consumer could also
+       have copied a harness roster, its tokens open with the old
+       passphrase in that copy: rotate them too (procedure 5).
      - A new nested root password. This means reprovisioning the nested nodes
        with it.
-  3. `unlock.sh seal` the new values, in your own terminal.
+  3. `unlock.sh seal` the new values, in your own terminal (procedure 10's
+     pair ends with this same seal: one seal can carry both new values).
   4. Commit.
 - **`seal` replaces the whole blob.** At the prompt, a name left empty is left
   out. Give both names, or the other secret is gone from the blob.
@@ -403,7 +407,8 @@ passphrase and dangerous only with it. Keep backups offline or in a password
 manager.
 
 - **Lost roster passphrase.** Nothing in that roster can be decrypted, and no
-  command recovers or changes it. Recovery:
+  command recovers it. `roster rekey` needs the current passphrase, so it
+  cannot help here. Recovery:
   1. Create a new roster with `pveforge roster init <path>`.
   2. First-bootstrap each target (procedure 1).
   3. On PVE, the old token of the same name still exists. Bootstrap refuses it
@@ -446,6 +451,73 @@ whose roster records `host_key_source` (an older roster may not), and `tls
 pinned` for a pinned one. The TLS pin's own `source` is in the roster file's
 `[targets.tls]` block.
 
+### 10. Changing a roster's passphrase
+
+Change it after a typo, a leak, or when handing the roster on. In your own
+terminal:
+
+```
+pveforge roster rekey --roster ./pveforge.toml
+```
+
+- It asks for the current passphrase (or reads `PVEFORGE_ROSTER_PASSPHRASE`).
+  Before asking for the new one, it checks that the current one opens the
+  roster: a wrong passphrase, or a roster with no secret, is refused there.
+  That early check stops at the first secret that opens. The rule that the
+  current passphrase must open EVERY secret is enforced later, under the
+  roster lock, after the new passphrase has been asked for: a partly
+  readable roster is refused then, with nothing written. Then it asks for
+  the new passphrase twice. The new one
+  is read from a terminal only, never from an environment variable or a
+  pipe, so this command cannot run from an agent's session or a script.
+- It contacts nothing. No node, and no token on PVE, is touched. Only the
+  roster file changes: each secret is re-encrypted under the new passphrase,
+  every other byte is kept, and the file is replaced atomically once the
+  result checks out. Any failure leaves the file as it was.
+- **Old copies still open with the old passphrase.** Rekey keeps no copy of
+  its own, but a backup, a copy on another machine, or a committed roster in
+  git history still opens with the old passphrase. After a LEAK, rekeying is
+  not enough: rotate the tokens those copies hold (procedure 5), and replace
+  your backups with copies of the rekeyed file.
+- A pveforge command already running against the roster with the old
+  passphrase fails its next roster write (`wrong roster passphrase`) and
+  writes nothing. It never splits the roster between two passphrases. Rerun
+  it with the new passphrase.
+- **Verify:** it prints `<roster>: rekeyed N secret(s) of M target(s)`. Then,
+  in a fresh command with the NEW passphrase, `pveforge node get <target>
+  --roster <roster>` must work, as in procedure 1's decrypt check.
+
+**The harness rosters are one ordered pair of steps.** Their passphrase is
+also sealed in `hack/harness/secrets.age`, where the harness steps that run
+pveforge take it from. The steps built on `hack/harness/lib.sh` (probe, build, golden, reset)
+open `harness-outer.toml`; `nested.sh` opens `harness-nested.toml`, and
+golden and reset read it too, through acceptance. Rekeying without resealing
+breaks every step that opens a rekeyed roster,
+so do both, in this order, in your own terminal, with no harness step running
+in between:
+
+1. Rekey both harness rosters to the same new passphrase:
+
+   ```
+   pveforge roster rekey --roster ~/.config/pveforge/harness-outer.toml
+   pveforge roster rekey --roster ~/.config/pveforge/harness-nested.toml
+   ```
+
+   Each prints a reminder to seal (the harness roster names are recognised).
+2. Seal the new passphrase, giving the nested root password again as well:
+   `seal` replaces the whole blob (procedure 7).
+
+   ```
+   hack/harness/unlock.sh seal
+   ```
+
+   Then commit `secrets.age`.
+- **Verify:** `hack/harness/unlock.sh status` still lists both names. The
+  passphrase itself is proved by the next harness step run under `unlock.sh
+  run`: a passphrase that does not open the rosters fails there at once, on
+  the decrypt, before any request is sent. (`roster validate` decrypts
+  nothing, so it proves nothing here.)
+
 ## Reading the refusals
 
 Every refusal below writes nothing unless it says otherwise. The central rule:
@@ -467,6 +539,9 @@ Every refusal below writes nothing unless it says otherwise. The central rule:
 | `a proxy is configured for this address (HTTPS_PROXY/NO_PROXY); the served-pin probe dials directly …` | The network cross-check cannot see what REST will reach through a proxy. | Set `NO_PROXY` for the host. | |
 | `the roster's TLS pin is not the one this write expected (another pveforge wrote it since it was read)` (and its SSH twin) | A compare-and-set lost a race. Nothing was written. | Rerun. | |
 | `--reprovisioned needs --host-key-fingerprint …`, `--reprovisioned: the roster holds no SSH or TLS pin …`, `--ssh-tofu does not apply with --reprovisioned …` | The reprovision rules. Refused before the PVE password prompt. | Give the console value. For a target never pinned, drop `--reprovisioned`. | |
+| `the roster's secrets do not all open with this passphrase: …` (rekey) | Some secrets open with the passphrase given and some do not: the roster is already split, or damaged. Nothing was written. | Find which passphrase opens the named secrets. Re-bootstrap or re-import the targets named, then rekey. | Rekey only part of the roster by hand-editing. |
+| `the two passphrase entries differ; nothing was changed` | The two entries of a passphrase being set (a new roster's first, or rekey's new one) differ. | Run the command again. | |
+| `the new roster passphrase is read from a terminal only …` | `roster rekey` was run without a terminal: in a script, a pipe, an agent's session or Claude Code's `!` prefix. | Run it in your own terminal. | |
 | `roster line N: key "tls" is not a roster key in [targets]` (or `source`, `host_key_source`) | The binary is older than the roster it reads (next section). A binary older still, before `7d99123`, gives NO error and ignores the pin. | Use a current binary. | Delete the key to make an old binary happy. |
 
 ## Older binaries: the lockout rule
