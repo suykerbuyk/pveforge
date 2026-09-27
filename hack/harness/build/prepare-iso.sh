@@ -74,6 +74,8 @@ pw=${PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD-}
 unset PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD
 
 source "${BASH_SOURCE[0]%/*}/env.sh"
+# env.sh set umask 077; podman alone runs under 022 (below), so its own image
+# storage is made as it always is.
 [ -n "$pw" ] || hb_die 2 "PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD is not set: run this through 'hack/harness/unlock.sh run --'"
 [[ $pw != *[[:cntrl:]]* ]] || hb_die 2 "the nested root password holds a control character"
 # The installer's own minimum; it also keeps the plaintext check below from
@@ -190,10 +192,15 @@ iso_name=${HB[SOURCE_ISO]##*/}
 [ -f "${HB[SOURCE_ISO]}" ] || fail "the installer ISO ${HB[SOURCE_ISO]} does not exist"
 evidence container-script "$container_script"
 rc=0
-"$HB_TOOL_PODMAN" run --rm --security-opt label=disable \
-	-v "$OUT:/work" -v "$iso_dir:/src:ro" \
-	-e "PVE_KEYRING_SHA512=${HB[PVE_KEYRING_SHA512]}" -e "SOURCE_ISO_NAME=$iso_name" \
-	"${HB[CONTAINER_IMAGE]}" bash -c "$container_script" >"$EVID/container.log" 2>&1 || rc=$?
+# The redirect below is opened by this shell, under 077, before the subshell
+# runs: container.log is private, and the 022 is podman's alone.
+(
+	umask 022
+	exec "$HB_TOOL_PODMAN" run --rm --security-opt label=disable \
+		-v "$OUT:/work" -v "$iso_dir:/src:ro" \
+		-e "PVE_KEYRING_SHA512=${HB[PVE_KEYRING_SHA512]}" -e "SOURCE_ISO_NAME=$iso_name" \
+		"${HB[CONTAINER_IMAGE]}" bash -c "$container_script"
+) >>"$EVID/container.log" 2>&1 || rc=$?
 if [ "$rc" != 0 ]; then
 	printf 'container exited %s: see container.log\n' "$rc" >"$EVID/FAILED" 2>/dev/null || :
 	hb_die "$rc" "the container exited $rc: see $EVID/container.log"
