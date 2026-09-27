@@ -40,6 +40,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | Command | What it does |
 |---|---|
 | `roster init [path]` / `validate [path]` | Create an empty roster file; parse and validate one |
+| `roster rekey` | Change the roster's passphrase: re-encrypt every secret under a new one, contacting nothing |
 | `roster import-token` | Put an API token minted outside pveforge into the roster, once PVE proves its grants |
 | `bootstrap` | Turn a PAM login into a scoped API token held in the roster |
 | `exec <target> -- <command>` | Run a command with the target's API token in its environment |
@@ -124,7 +125,12 @@ keys regardless of case and let the last spelling win.
 Secrets are encrypted at rest with age (scrypt passphrase). The passphrase is
 taken from `PVEFORGE_ROSTER_PASSPHRASE`, else from a no-echo prompt when stdin
 is a terminal, else the command fails. There is deliberately no flag for any
-secret. For scripts: sourcing the variable from a 0600 file keeps it out of
+secret. A roster that holds no secret yet takes its passphrase from the first
+`bootstrap` or `roster import-token` that writes one; `bootstrap` then asks for
+it twice when it prompts (`import-token` never prompts).
+`pveforge roster rekey` changes the passphrase later: every secret is
+re-encrypted under a new one, read from a terminal only and asked for twice,
+and nothing but the roster file is touched. For scripts: sourcing the variable from a 0600 file keeps it out of
 shell history. Typing `export PVEFORGE_ROSTER_PASSPHRASE=…` at a prompt does
 not.
 
@@ -557,10 +563,9 @@ manual trigger, never for pull requests from forks.
 access to older copies of `secrets.age` in git history: whoever holds it can
 still decrypt every blob it was ever sealed to. Revocation is therefore:
 remove the recipient, **rotate the values**, then `reseal` and commit. Rotating
-the harness roster passphrase means a new harness roster and a re-run of
-`pveforge bootstrap` for the harness token, because pveforge has no command to
-change a roster's passphrase today; rotating the nested password means
-re-provisioning the nested nodes with a new one.
+the harness roster passphrase means `pveforge roster rekey` on both harness
+rosters and then `unlock.sh seal`, in that order (see the guide); rotating the
+nested password means re-provisioning the nested nodes with a new one.
 
 ## Development
 

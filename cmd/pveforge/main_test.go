@@ -227,6 +227,7 @@ func TestStderrErrorPrintsOnlyThroughRunRoot_MS1(t *testing.T) {
 // writer read back from a struct field, map or func value (storing one there
 // is itself a site, so the binding is caught, not every later use).
 var stderrSites = map[string]int{
+	"roster_rekey.go: newRosterRekeyCmd: fmt.Fprintln(cmd.ErrOrStderr(), \"note: this looks like a nested-harness roster: once every harness roster is rekeyed, seal the new passphrase with hack/harness/unlock.sh seal; until then every harness step fails its passphrase check\")":             1,
 	"access.go: newUserEnsureCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"warning: %s: user %s joined group %s, which holds %s on %s conferring %s: the user can widen its own or anyone's access\\n\", targetID, userID, j.Group, j.Entry.Role, j.Entry.Path, strings.Join(j.Privs, \",\"))":             1,
 	"access.go: newUserEnsureCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"notice: %s: user %s has no password: it cannot log in until one is set with pveum passwd\\n\", targetID, userID)":                                                                                                               1,
 	"access.go: newUserEnsureCmd: fmt.Fprintf(cmd.ErrOrStderr(), \"notice: %s: user %s is disabled: it cannot log in, and its API tokens stop working\\n\", targetID, userID)":                                                                                                                     1,

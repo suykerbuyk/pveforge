@@ -1,0 +1,49 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-roster-rekey - Change the roster's passphrase: re-encrypt every secret in it under a new one
+
+
+.SH SYNOPSIS
+\fBpveforge roster rekey [flags]\fP
+
+
+.SH DESCRIPTION
+Change the roster's passphrase: every secret in the roster (each API token
+secret and each SSH private key) is decrypted with the current passphrase and
+encrypted again under a new one. Nothing is contacted: no node, no token on
+PVE. Only the roster file changes.
+
+.PP
+The current passphrase comes from PVEFORGE_ROSTER_PASSPHRASE or a prompt, and
+must open EVERY secret in the roster, or nothing is written. The new one is
+read from a terminal only (never an environment variable or a pipe), twice,
+and must differ from the current one.
+
+.PP
+The file is rewritten under the roster lock, and replaced atomically only
+after the result decodes with every other field unchanged and every new
+secret opens with the new passphrase to its old plaintext. A failure leaves
+the file as it was. No copy under the old passphrase is kept, but any copy
+made before (a backup, git history) still opens with the old one.
+
+.PP
+A pveforge command already running against this roster with the old
+passphrase fails its next roster write (wrong roster passphrase) rather than
+split the roster. For the nested harness's rosters, rekey every one of them,
+then seal the new passphrase into hack/harness/secrets.age.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for rekey
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-roster(1)\fP

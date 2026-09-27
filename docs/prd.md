@@ -526,6 +526,28 @@ ciphertext, so the file stays reviewable.
 
   The one route left open is a dependency module linking in. The module
   guard's pinned dependency set holds that.
+- **The passphrase is confirmed when set, and can be changed.** When a roster
+  holds no secret yet, the run that will seal its first one (bootstrap)
+  prompts twice and refuses a mismatch; an environment-supplied passphrase is
+  taken as given. `roster rekey` changes it: under the roster lock, every
+  secret must open with the current passphrase (one that opens only some is
+  refused, since rekeying part would split the roster), each is sealed afresh
+  under the new one at the production work factor and spliced over its old
+  ciphertext, and the result is decoded and checked (every other field
+  unchanged; every new ciphertext is the one composed for it, differs from
+  the old one, and opens with the new passphrase to its old plaintext; it is
+  not separately tried against the old passphrase) and compare-and-set
+  against the bytes read before an atomic replace. The early check a
+  command makes before asking for the new passphrase (`CheckRekey`) stops at
+  the first secret that opens; the every-secret rule is enforced under the
+  lock. The new
+  passphrase is terminal-only and asked twice, never from the environment.
+  Rekey contacts nothing and touches no token. It cannot reach copies made
+  before it (backups, git history), so after a leak the tokens are rotated
+  too. A writer still holding the old passphrase fails `prove` and writes
+  nothing. `rekeySecrets` is the third function allowed to call
+  `EncryptString`, beside the two proving writers; its proof is every secret
+  opening.
 - **Roster keys are case-sensitive, and an unknown key is refused at load.**
   Otherwise the TOML library's case-insensitive, last-wins matching could
   replace a pin with a differently spelled one, or read a misspelled pin as
@@ -604,7 +626,6 @@ therefore upgrade readers first, then pin, then merge enforcement.
 - **Multi-operator access to one roster.** Rosters keep a single passphrase
   (see §6 item 5).
 - **These are known gaps, recorded rather than built:**
-  - a command to change a roster's passphrase;
   - a command to rotate the SSH keypair of a node that was not rebuilt;
   - removal of stray `authorized_keys` lines left by failed first runs;
   - a byte cap on the capture's output, which is bounded in time only.

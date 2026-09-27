@@ -293,7 +293,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 		"help",
 		"network", "network/bridge", "network/bridge/create", "network/bridge/destroy", "network/get", "network/set",
 		"node", "node/get",
-		"roster", "roster/import-token", "roster/init", "roster/pin-tls", "roster/validate",
+		"roster", "roster/import-token", "roster/init", "roster/pin-tls", "roster/rekey", "roster/validate",
 		"schema",
 		"storage", "storage/get", "storage/orphans",
 		"user", "user/ensure",

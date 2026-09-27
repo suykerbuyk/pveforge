@@ -223,11 +223,91 @@ func ResolvePassphraseContext(ctx context.Context) (string, error) {
 		return v, nil
 	}
 	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) {
+	if !stdinIsTerminal(fd) {
 		return "", fmt.Errorf("no roster passphrase available: set %s or run interactively", PassphraseEnvVar)
 	}
-	fmt.Fprint(os.Stderr, "Roster passphrase: ")
-	b, err := ReadSecret(ctx, fd, "roster passphrase")
+	return promptPassphrase(ctx, fd, "Roster passphrase: ", "roster passphrase")
+}
+
+// ResolvePassphraseForWriteContext is ResolvePassphraseContext for a
+// command that may seal the roster's FIRST secret, and so set its
+// passphrase for good: when the passphrase comes from the prompt and the
+// roster at path holds no secret yet (or cannot be read to show it does),
+// it is asked for twice, and two entries that differ are refused
+// (ErrPassphraseMismatch) before anything happens. A passphrase from
+// PVEFORGE_ROSTER_PASSPHRASE is taken as given: a script has no second
+// entry to compare.
+func ResolvePassphraseForWriteContext(ctx context.Context, path string) (string, error) {
+	if v, ok := os.LookupEnv(PassphraseEnvVar); ok && v != "" {
+		return v, nil
+	}
+	fd := int(os.Stdin.Fd())
+	if !stdinIsTerminal(fd) {
+		return "", fmt.Errorf("no roster passphrase available: set %s or run interactively", PassphraseEnvVar)
+	}
+	if holdsSecret(path) {
+		return promptPassphrase(ctx, fd, "Roster passphrase: ", "roster passphrase")
+	}
+	fmt.Fprintln(os.Stderr, "This roster holds no secret yet: the passphrase you enter now becomes its passphrase.")
+	return promptTwice(ctx, fd, "Roster passphrase: ", "Roster passphrase again: ", "roster passphrase")
+}
+
+// ReadNewPassphraseContext reads a roster's NEW passphrase (roster rekey):
+// from the terminal only, never the environment, twice, refusing an empty
+// entry and two entries that differ.
+func ReadNewPassphraseContext(ctx context.Context) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if !stdinIsTerminal(fd) {
+		return "", ErrNewPassphraseNeedsTerminal
+	}
+	return promptTwice(ctx, fd, "New roster passphrase: ", "New roster passphrase again: ", "new roster passphrase")
+}
+
+// ErrNewPassphraseNeedsTerminal: a new passphrase is read from a terminal
+// only, so it is typed twice by a person and never passes through an
+// environment, a file or an agent's session.
+var ErrNewPassphraseNeedsTerminal = errors.New("the new roster passphrase is read from a terminal only (no environment variable, no pipe): run this in your own terminal")
+
+// ErrPassphraseMismatch: the two entries of a passphrase being set differ.
+var ErrPassphraseMismatch = errors.New("the two passphrase entries differ; nothing was changed")
+
+// stdinIsTerminal is a seam over term.IsTerminal, so this package's tests
+// can drive the prompts without a terminal.
+var stdinIsTerminal = term.IsTerminal
+
+// holdsSecret reports whether the roster at path holds any secret. A roster
+// that cannot be read reports false, so the caller confirms: a second
+// prompt costs little, a mistyped first passphrase costs the roster.
+func holdsSecret(path string) bool {
+	r, err := Load(path)
+	if err != nil {
+		return false
+	}
+	return len(secretsInProofOrder(r, "")) > 0
+}
+
+// promptTwice reads a secret twice with no echo and requires the two to be
+// equal and non-empty.
+func promptTwice(ctx context.Context, fd int, first, again, what string) (string, error) {
+	a, err := promptPassphrase(ctx, fd, first, what)
+	if err != nil {
+		return "", err
+	}
+	b, err := promptPassphrase(ctx, fd, again, what)
+	if err != nil {
+		return "", err
+	}
+	if a != b {
+		return "", ErrPassphraseMismatch
+	}
+	return a, nil
+}
+
+// promptPassphrase prints label on stderr and reads one non-empty secret
+// from fd with no echo.
+func promptPassphrase(ctx context.Context, fd int, label, what string) (string, error) {
+	fmt.Fprint(os.Stderr, label)
+	b, err := ReadSecret(ctx, fd, what)
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		if errors.Is(err, ErrPromptInterrupted) {
