@@ -1,7 +1,6 @@
 # PRD — `pveforge`
 
-**Status:** Living spec, reconciled against main on 2026-10-02 (01b72ae plus
-the prd-fixes unit).
+**Status:** Living spec, reconciled against main on 2026-10-02.
 The v1 foundational CLI ships: §3 states the design intent and the decisions
 behind it, §4.2 the command surface, §7 the implementation as built, and §8
 what is in flight. First drafted 2026-09-13, before any code existed.
@@ -684,12 +683,12 @@ ciphertext, so the file stays reviewable.
   cluster-signed certificate alike, since it reads what pveproxy actually
   serves. The capture port (`--capture-port`, default 8006) is not stored.
   The capture is bounded in time, like every SSH command, and in size: its
-  answer may not exceed 64 KiB (`tlspin.MaxCaptureOutput`, one certificate
-  being a few KiB). A node that prints more is stopped and the capture
-  refused, so a hostile or broken node cannot stream an unbounded answer into
-  memory. The limit is a per-call option of the SSH runner
-  (`sshexec.WithMaxOutput`), set by the capture alone; every other command
-  keeps unlimited output.
+  answer may not exceed 64 KiB on each of stdout and stderr
+  (`tlspin.MaxCaptureOutput`, one certificate being a few KiB). A node that
+  prints more is stopped and the capture refused, so a hostile or broken
+  node cannot stream an unbounded answer into memory. The limit is a
+  per-call option of the SSH runner (`sshexec.WithMaxOutput`), set by the
+  capture alone; every other command keeps unlimited output.
 - **A network cross-check** (`pve.ServedPin`) then requires the target's REST
   address to serve the same key. It is a TLS handshake with no HTTP request,
   so no token or header can leave. It dials through REST's own transport
