@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,6 +119,76 @@ func CommandTimeoutFor(ctx context.Context) time.Duration {
 	}
 	return CommandTimeout
 }
+
+type maxOutputKey struct{}
+
+// WithMaxOutput returns ctx carrying n as the most bytes Run accepts from
+// a command run under it, on stdout and on stderr each. Past it Run stops
+// reading, ends the command as it ends a timed-out one (SIGKILL, then
+// close), and returns an *OutputTooLargeError, with no Result. It is for a
+// caller that knows how big a sane answer is (the TLS capture: one
+// certificate), so a hostile or broken host cannot stream an unbounded
+// answer into memory within the command's time bound. Without it (n <= 0),
+// output is unlimited, as it always was.
+func WithMaxOutput(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, maxOutputKey{}, n)
+}
+
+// MaxOutputFor is the output limit Run applies under ctx, 0 for none.
+func MaxOutputFor(ctx context.Context) int {
+	if n, ok := ctx.Value(maxOutputKey{}).(int); ok && n > 0 {
+		return n
+	}
+	return 0
+}
+
+// ErrOutputTooLarge matches every *OutputTooLargeError.
+var ErrOutputTooLarge = errors.New("the command's output exceeded its limit")
+
+// OutputTooLargeError: a command wrote more than its WithMaxOutput limit.
+// It was sent, and was stopped; its output is discarded.
+type OutputTooLargeError struct {
+	Cmd   string
+	Limit int
+}
+
+func (e *OutputTooLargeError) Error() string {
+	return fmt.Sprintf("%s: %s wrote more than %d bytes; the command was stopped and its output discarded", ErrOutputTooLarge, e.Cmd, e.Limit)
+}
+
+func (e *OutputTooLargeError) Is(target error) bool { return target == ErrOutputTooLarge }
+
+// cappedBuffer keeps at most limit bytes (limit 0: all of them) and, on the
+// first write past it, closes over once. It never returns an error to the
+// session's copy loop, so the session itself is ended by Run, not by a
+// failed write.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+	over  chan struct{}
+	once  *sync.Once
+	full  bool // this buffer refused a write
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		return b.buf.Write(p)
+	}
+	if room := b.limit - b.buf.Len(); len(p) > room {
+		if room > 0 {
+			b.buf.Write(p[:room])
+		}
+		b.full = true
+		b.once.Do(func() { close(b.over) })
+		return len(p), nil
+	}
+	return b.buf.Write(p)
+}
+
+// overflowed reports whether a write went past the limit. Read it only
+// once the session's copy of this stream has finished (after Run's session
+// returned), which orders it after every Write.
+func (b *cappedBuffer) overflowed() bool { return b.full }
 
 // abandon ends a session whose command ran past its deadline: SIGKILL, then
 // close (closing first would drop the channel the signal travels on). Both
@@ -370,9 +441,13 @@ func (c *Client) Run(parent context.Context, cmd string) (*Result, error) {
 		session = o.session
 	}
 
-	var stdout, stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
+	limit := MaxOutputFor(parent)
+	over := make(chan struct{})
+	once := &sync.Once{}
+	stdout := &cappedBuffer{limit: limit, over: over, once: once}
+	stderr := &cappedBuffer{limit: limit, over: over, once: once}
+	session.Stdout = stdout
+	session.Stderr = stderr
 
 	done := make(chan error, 1)
 	go func() { done <- session.Run(cmd) }()
@@ -381,17 +456,31 @@ func (c *Client) Run(parent context.Context, cmd string) (*Result, error) {
 	case <-ctx.Done():
 		c.abandon(session)
 		return nil, ended()
+	case <-over:
+		c.abandon(session)
+		return nil, &OutputTooLargeError{Cmd: commandName(cmd), Limit: limit}
 	case runErr := <-done:
 		_ = session.Close()
-		res := &Result{Stdout: stdout.String(), Stderr: stderr.String()}
-		if runErr == nil {
-			return res, nil
-		}
-		var exitErr *ssh.ExitError
-		if errors.As(runErr, &exitErr) {
-			res.ExitCode = exitErr.ExitStatus()
-			return res, nil
-		}
-		return nil, fmt.Errorf("run %q: %w", cmd, runErr)
+		return finishRun(cmd, runErr, stdout, stderr)
 	}
+}
+
+// finishRun turns a command that ended into Run's result. A command that
+// overflowed its limit and then exited at once can end before Run sees the
+// overflow, so the limit is checked here as well: output past it is never
+// returned, truncated or otherwise.
+func finishRun(cmd string, runErr error, stdout, stderr *cappedBuffer) (*Result, error) {
+	if stdout.overflowed() || stderr.overflowed() {
+		return nil, &OutputTooLargeError{Cmd: commandName(cmd), Limit: stdout.limit}
+	}
+	res := &Result{Stdout: stdout.buf.String(), Stderr: stderr.buf.String()}
+	if runErr == nil {
+		return res, nil
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(runErr, &exitErr) {
+		res.ExitCode = exitErr.ExitStatus()
+		return res, nil
+	}
+	return nil, fmt.Errorf("run %q: %w", cmd, runErr)
 }

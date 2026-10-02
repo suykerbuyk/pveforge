@@ -626,3 +626,54 @@ func TestRun_MatchingStoredPinReportsTheRecordedSource(t *testing.T) {
 		t.Fatalf("the roster's source became %q", got.Source)
 	}
 }
+
+// The capture, and only the capture, runs under the output limit: a node
+// answers it with one certificate, while every other command of the run
+// keeps the unlimited default. An oversized answer is refused as a capture
+// failure, before any probe or token command, with nothing written.
+func TestRun_CaptureIsSizeBoundedAndNothingElseIs(t *testing.T) {
+	_, opts := bareTarget(t)
+	opts.HostKeyFingerprint = testHostKey
+	session := &fakeSession{}
+	v := &fakeValidator{}
+	cp := newCapturePair(t)
+	scriptCapture(session, v, cp)
+	limits := map[string]int{}
+	session.onRun = func(ctx context.Context, cmd string) {
+		limits[cmd] = sshexec.MaxOutputFor(ctx)
+	}
+	if _, err := Run(context.Background(), opts, &fakeTransport{session: session}, v); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	captured, others := 0, 0
+	for cmd, n := range limits {
+		if strings.HasPrefix(cmd, captureCmdPrefix) {
+			captured++
+			if n != tlspin.MaxCaptureOutput {
+				t.Errorf("the capture ran with limit %d, want %d", n, tlspin.MaxCaptureOutput)
+			}
+			continue
+		}
+		others++
+		if n != 0 {
+			t.Errorf("%q ran with limit %d, want none", cmd, n)
+		}
+	}
+	if captured != 1 || others < 2 {
+		t.Fatalf("saw %d capture(s) and %d other command(s): the run did not reach both", captured, others)
+	}
+
+	// The refusal.
+	_, opts2 := bareTarget(t)
+	opts2.HostKeyFingerprint = testHostKey
+	tooLarge := &sshexec.OutputTooLargeError{Cmd: "openssl s_client", Limit: tlspin.MaxCaptureOutput}
+	session2 := &fakeSession{byCmd: map[string]fakeRunResult{captureCmdPrefix: {err: tooLarge}}}
+	v2 := &fakeValidator{served: cp.pin}
+	_, err := Run(context.Background(), opts2, &fakeTransport{session: session2}, v2)
+	if !errors.Is(err, ErrTLSCapture) || !errors.Is(err, sshexec.ErrOutputTooLarge) || !strings.Contains(err.Error(), "far more than one certificate") {
+		t.Fatalf("err = %v, want ErrTLSCapture wrapping ErrOutputTooLarge", err)
+	}
+	if v2.servedCalls != 0 || v2.calls != 0 || session2.ran("pveum user token add") || rosterTLS(t, opts2.RosterPath, opts2.TargetID) != nil {
+		t.Errorf("after an oversized capture: probes %d, validations %d, token add %v; want none, and no pin written", v2.servedCalls, v2.calls, session2.ran("pveum user token add"))
+	}
+}

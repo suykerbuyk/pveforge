@@ -147,6 +147,11 @@ func VerifyConnection(want Pin) (func(tls.ConnectionState) error, error) {
 // not the workstation-facing api_port, which a port forward may change.
 const DefaultCapturePort = 8006
 
+// MaxCaptureOutput bounds, in bytes, what a capture may print: one PEM
+// certificate is a few KiB, so anything past this is a broken or hostile
+// node, and its answer is refused rather than read into memory.
+const MaxCaptureOutput = 64 << 10
+
 // CaptureCommand is the remote command that prints, as PEM, the leaf
 // certificate pveproxy serves on the node itself (127.0.0.1:port): what
 // the node answers with, whichever certificate file that is (custom,

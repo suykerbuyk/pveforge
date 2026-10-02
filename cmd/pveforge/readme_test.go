@@ -1453,6 +1453,7 @@ func prdNumbers(t *testing.T) []prdNumber {
 		{"idempotent maxConflictRetries", "up to ([0-9]+) attempts in all", int64(unexportedIntConst(t, "../../internal/idempotent/op.go", "maxConflictRetries")), 1, 1},
 		{"maxErrTextBytes", "elided past ([0-9]+) KiB", maxErrTextBytes, 1024, 1},
 		{"tlspin.DefaultCapturePort", "`--capture-port`, default ([0-9]+)", tlspin.DefaultCapturePort, 1, 1},
+		{"tlspin.MaxCaptureOutput", "may not exceed ([0-9]+) KiB", tlspin.MaxCaptureOutput, 1024, 1},
 	}
 }
 

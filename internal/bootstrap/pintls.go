@@ -37,7 +37,11 @@ func capturePin(ctx context.Context, session SSHSession, api APIValidator, host 
 	if capturePort == 0 {
 		capturePort = tlspin.DefaultCapturePort
 	}
-	res, err := session.Run(ctx, tlspin.CaptureCommand(capturePort))
+	// Bounded in size as well as time: a node answers with one certificate.
+	res, err := session.Run(sshexec.WithMaxOutput(ctx, tlspin.MaxCaptureOutput), tlspin.CaptureCommand(capturePort))
+	if errors.Is(err, sshexec.ErrOutputTooLarge) {
+		return "", fmt.Errorf("%w: the node's answer exceeded %d bytes, far more than one certificate; nothing was written: %w", ErrTLSCapture, tlspin.MaxCaptureOutput, err)
+	}
 	if err != nil {
 		return "", fmt.Errorf("%w: run the capture: %w", ErrTLSCapture, err)
 	}
