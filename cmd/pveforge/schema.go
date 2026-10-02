@@ -62,9 +62,9 @@ type flagSchema struct {
 // an absent Mutation on a Runnable command as unknown, never assume safe
 // by default.
 //
-// GlobalFlags is only ever populated on the root node — see
-// collectGlobalFlags's own doc comment for why a flag ends up there
-// instead of in the owning command's own Flags.
+// GlobalFlags is only ever populated on the root node, and holds exactly
+// the root command's persistent flags — see globalFlags for why that, and
+// nothing inferred, is the rule.
 type commandSchema struct {
 	Name        string          `json:"name"`
 	Use         string          `json:"use"`
@@ -84,29 +84,44 @@ type commandSchema struct {
 // a calling agent, not information.
 const helpFlagName = "help"
 
-// globalFlagOccurrenceThreshold is how many distinct commands a flag —
-// identified by flagIdentity (name+usage), not name alone — must appear
-// on before collectGlobalFlags treats it as global and hoists it to the
-// schema's root GlobalFlags instead of repeating it on every owning node.
-//
-// pveforge has no PersistentFlags declared on the root command itself
-// (see main.go): --roster and -o/--output are instead registered
-// independently on nearly every leaf command via addRosterFlag/
-// addOutputFlag (target.go). So "global" here is inferred from actual
-// recurrence across the tree, not read off cobra's own PersistentFlags
-// mechanism, which this project doesn't use for these two flags.
-const globalFlagOccurrenceThreshold = 2
-
-// buildCommandTreeSchema is `pveforge schema`'s entry point: it computes
-// which flags recur often enough across root's tree to be "global"
-// (collectGlobalFlags), then walks the tree once more building each
-// node's own schema with those flags omitted from its local Flags and
-// attached once, at the root, as GlobalFlags.
+// buildCommandTreeSchema is `pveforge schema`'s entry point: it takes the
+// root's persistent flags as the global set (globalFlags), then walks the
+// tree building each node's own schema with those flags omitted from its
+// local Flags and attached once, at the root, as GlobalFlags.
 func buildCommandTreeSchema(root *cobra.Command) commandSchema {
-	global := collectGlobalFlags(root)
+	global := globalFlags(root)
 	schema := buildNodeSchema(root, global)
 	schema.GlobalFlags = sortedFlagValues(global)
 	return schema
+}
+
+// globalFlags returns the flags every command in root's tree accepts: the
+// root's own persistent flags, which cobra itself makes every descendant
+// inherit. That is the whole rule, and it is correct by construction —
+// a flag is listed as global only if the parser really takes it everywhere.
+//
+// pveforge declares no root persistent flags today (newRootCmd, main.go), so this is
+// empty and the schema omits GlobalFlags: --roster and -o/--output are
+// registered per command by addRosterFlag/addOutputFlag (target.go), and so
+// they appear in each such command's own Flags. That repetition is the
+// price of accuracy. An earlier rule hoisted any flag found on two or more
+// commands, which listed --management-bridge, --data and --unsafe-no-lock as
+// global though only a few commands take them, and listed --lock-wait twice
+// because two of its registrations differ in usage text. A caller reading
+// GlobalFlags must be able to pass every flag in it to every command.
+//
+// A flag a GROUP command declares persistent (the roster group's --roster)
+// appears in that group node's Flags and applies to every command under it;
+// localFlagsExcluding's doc covers why it is not repeated on each child.
+func globalFlags(root *cobra.Command) map[string]flagSchema {
+	global := map[string]flagSchema{}
+	root.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		if f.Name == helpFlagName {
+			return
+		}
+		global[flagIdentity(f)] = toFlagSchema(f)
+	})
+	return global
 }
 
 // buildNodeSchema recursively builds cmd's own commandSchema and every
@@ -142,7 +157,7 @@ func buildNodeSchema(cmd *cobra.Command, global map[string]flagSchema) commandSc
 // localFlagsExcluding returns cmd's own LocalFlags (never flags it only
 // inherited from a parent's PersistentFlags — those show up on the
 // ancestor that actually declared them instead), skipping the auto-added
-// --help flag and anything collectGlobalFlags already promoted to the
+// --help flag and the root persistent flags globalFlags already lists at the
 // schema's root.
 func localFlagsExcluding(cmd *cobra.Command, global map[string]flagSchema) []flagSchema {
 	var flags []flagSchema
@@ -159,55 +174,11 @@ func localFlagsExcluding(cmd *cobra.Command, global map[string]flagSchema) []fla
 	return flags
 }
 
-// collectGlobalFlags walks root's entire command tree once, tallying
-// each flag identity's (flagIdentity) occurrence across distinct
-// commands, and returns the ones that meet globalFlagOccurrenceThreshold
-// — e.g. --roster (registered separately by addRosterFlag on nearly
-// every vm/node/storage/network/discover/bootstrap command, and again as
-// a PersistentFlag on the `roster` group command itself) and -o/--output
-// (registered by addOutputFlag on every read/discover command). Keyed by
-// flagIdentity so buildNodeSchema/localFlagsExcluding can test membership
-// cheaply; the returned map's values are only ever read via
-// sortedFlagValues for the final, deterministic GlobalFlags list.
-func collectGlobalFlags(root *cobra.Command) map[string]flagSchema {
-	counts := map[string]int{}
-	seen := map[string]flagSchema{}
-	walkCommands(root, func(cmd *cobra.Command) {
-		cmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
-			if f.Name == helpFlagName {
-				return
-			}
-			key := flagIdentity(f)
-			counts[key]++
-			seen[key] = toFlagSchema(f)
-		})
-	})
-
-	global := map[string]flagSchema{}
-	for key, n := range counts {
-		if n >= globalFlagOccurrenceThreshold {
-			global[key] = seen[key]
-		}
-	}
-	return global
-}
-
-// walkCommands visits cmd and every descendant, depth-first.
-func walkCommands(cmd *cobra.Command, visit func(*cobra.Command)) {
-	visit(cmd)
-	for _, c := range cmd.Commands() {
-		walkCommands(c, visit)
-	}
-}
-
-// flagIdentity is how collectGlobalFlags recognizes "the same flag
-// repeated across commands" rather than merely a same-named coincidence:
-// name alone isn't enough — roster.go's `roster init --force` and any
-// hypothetical future unrelated --force flag elsewhere would collide on
-// name alone despite meaning different things, so identity also requires
-// identical usage text. In practice, the shared flags in this codebase
-// (addRosterFlag/addOutputFlag) already register identical usage text at
-// every call site by construction, so this never under-matches them.
+// flagIdentity keys a flag by name and usage text together. The global set
+// is the root's persistent flags, and cobra lets a command declare its own
+// flag under one of their names, which then shadows the root's for that
+// command. Keying by usage as well keeps such a command's own flag in its
+// Flags rather than dropping it as the global one.
 func flagIdentity(f *pflag.Flag) string {
 	return f.Name + "\x00" + f.Usage
 }
@@ -230,9 +201,10 @@ func sortedFlagValues(m map[string]flagSchema) []flagSchema {
 	for _, f := range m {
 		flags = append(flags, f)
 	}
-	// Name, then usage: two global flags may share a name with different
-	// usage (flagIdentity keeps them apart, e.g. --lock-wait on the api
-	// verbs), and a name-only sort would leave their order to map iteration.
+	// Name, then usage. The map holds one FlagSet's flags (the root's
+	// persistent ones), whose names are unique, so the usage tie-break never
+	// decides anything today; it keeps the order total, so it can never fall
+	// to map iteration.
 	sort.Slice(flags, func(i, j int) bool {
 		if flags[i].Name != flags[j].Name {
 			return flags[i].Name < flags[j].Name

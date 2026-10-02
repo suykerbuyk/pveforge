@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -274,21 +275,80 @@ func TestNewDiscoverDeviceCmd_JSONOutput(t *testing.T) {
 	}
 }
 
+// TestNewDiscoverDeviceCmd_UnknownType: the refusal names every type the
+// command does accept, so a caller that guessed wrong learns the right name
+// from the error alone.
 func TestNewDiscoverDeviceCmd_UnknownType(t *testing.T) {
 	cmd := newDiscoverDeviceCmd()
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 	cmd.SetArgs([]string{"BogusDevice"})
-	if err := cmd.Execute(); err == nil {
+	err := cmd.Execute()
+	if err == nil {
 		t.Fatal("expected an error for an unknown device type")
+	}
+	if want := `unknown device type "BogusDevice" (known: NVMeDrive)`; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
 	}
 }
 
-func TestNewDiscoverDeviceCmd_RequiresOneArg(t *testing.T) {
+// TestNewDiscoverDeviceCmd_NoArgListsTypes: with no type, discover device
+// lists the types it can describe, so layer 2 is walkable from the top
+// (PRD §3.5) without reading internal/discover. Each listed name must then
+// be accepted.
+func TestNewDiscoverDeviceCmd_NoArgListsTypes(t *testing.T) {
+	for _, format := range []string{"kv", "json"} {
+		cmd := newDiscoverDeviceCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"-o", format})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("-o %s: Execute: %v", format, err)
+		}
+		var got struct {
+			Types []string `json:"types"`
+		}
+		body := out.String()
+		if format == "kv" {
+			const prefix = "types="
+			if !strings.HasPrefix(body, prefix) {
+				t.Fatalf("-o kv: output %q, want one types=[...] line", body)
+			}
+			body = `{"types":` + strings.TrimSpace(strings.TrimPrefix(body, prefix)) + `}`
+		}
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("-o %s: output %q does not decode: %v", format, out.String(), err)
+		}
+		if strings.Join(got.Types, ",") != "NVMeDrive" {
+			t.Errorf("-o %s: types = %v, want [NVMeDrive]", format, got.Types)
+		}
+		for _, name := range got.Types {
+			c := newDiscoverDeviceCmd()
+			c.SetOut(&bytes.Buffer{})
+			c.SetArgs([]string{name})
+			if err := c.Execute(); err != nil {
+				t.Errorf("listed type %q is not accepted: %v", name, err)
+			}
+		}
+	}
+}
+
+// TestNewDiscoverDeviceCmd_HelpNamesTypes: --help names the types too, from
+// the same list, so the help text cannot drift from what the command accepts.
+func TestNewDiscoverDeviceCmd_HelpNamesTypes(t *testing.T) {
 	cmd := newDiscoverDeviceCmd()
-	cmd.SetArgs([]string{})
+	if !strings.Contains(cmd.Long, "are: NVMeDrive.") {
+		t.Errorf("discover device --help does not name its types:\n%s", cmd.Long)
+	}
+}
+
+func TestNewDiscoverDeviceCmd_RejectsTwoArgs(t *testing.T) {
+	cmd := newDiscoverDeviceCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"NVMeDrive", "NVMeDrive"})
 	if err := cmd.Execute(); err == nil {
-		t.Fatal("expected an error for a missing type argument")
+		t.Fatal("expected an error for two type arguments")
 	}
 }
 

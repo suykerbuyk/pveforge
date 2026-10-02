@@ -104,23 +104,25 @@ type NoopChecker interface {
 // ErrConflict, when an Op's Apply returns an error wrapping this (via
 // %w), tells Run the failure was a detected concurrent-modification
 // conflict rather than a terminal one — Run responds by re-running the
-// full Read/Satisfied/Apply cycle (up to maxConflictRetries times) instead
-// of propagating the error, so a real conflict resolves itself the same
-// way a human re-running the command would. An Op with no compare-and-
+// full Read/Satisfied/Apply cycle (up to maxConflictRetries attempts in
+// all, the first included) instead of propagating the error, so a real
+// conflict resolves itself the same way a human re-running the command
+// would. An Op with no compare-and-
 // swap mechanism available (e.g. a root-only field written over SSH,
 // where internal/pve's digest-CAS doesn't apply at all) simply never
 // returns this and is never retried by Run.
 var ErrConflict = errors.New("idempotent: concurrent modification detected")
 
-// maxConflictRetries bounds how many times Run re-runs the cycle after a
-// conflict before giving up — a small, fixed bound rather than an
-// unbounded retry loop, since internal/lock's own per-object
-// serialization already prevents the vast majority of conflicts from ever
-// happening in the first place (this path exists for races outside that
-// lock's reach — see internal/pve's digest-CAS doc comments); a conflict
-// that recurs past this many retries is more likely a genuine, persistent
-// disagreement than transient contention, and should surface rather than
-// retry forever.
+// maxConflictRetries bounds the TOTAL number of Apply attempts Run makes,
+// the first one included: 3 means one try and at most 2 re-runs after a
+// conflict (op_test.go pins exactly this many Apply calls). A small, fixed
+// bound rather than an unbounded retry loop, since internal/lock's own
+// per-object serialization already prevents the vast majority of conflicts
+// from ever happening in the first place (this path exists for races
+// outside that lock's reach — see internal/pve's digest-CAS doc comments);
+// a conflict that recurs across this many attempts is more likely a
+// genuine, persistent disagreement than transient contention, and should
+// surface rather than retry forever.
 const maxConflictRetries = 3
 
 // Result reports what Run did.
@@ -164,8 +166,9 @@ type Result struct {
 // same rules.
 //
 // If Apply fails with an error wrapping ErrConflict, Run re-runs the
-// entire cycle from Read, up to maxConflictRetries times, before giving
-// up and returning the last conflict error — the lock is held across
+// entire cycle from Read, for at most maxConflictRetries Apply attempts in
+// all (the first included), before giving up and returning the last
+// conflict error — the lock is held across
 // every retry, so no other pveforge-managed mutation can interleave with
 // this one, whatever caused the conflict lives outside internal/lock's
 // own reach.

@@ -18,9 +18,9 @@ import (
 // (rng, affinity, hugepages) are deliberately NOT included: they have not
 // been independently verified against a live host the way args was, and
 // this project's standing discipline is to verify each field directly
-// before trusting a secondhand report — see IsRootOnlyWriteError for the
-// runtime safety net that flags a candidate instead of silently
-// misreporting a generic write failure. Adding a field here requires the
+// before trusting a secondhand report. An unlisted field PVE refuses as
+// root-only is not lost meanwhile: see IsRootOnlyWriteError for the SSH
+// retry that lands it. Adding a field here requires the
 // same empirical test args received (attempt a token-authenticated write
 // with a fully-privileged token against a scoped throwaway object, and
 // confirm the exact HTTP status/error).
@@ -34,10 +34,13 @@ const rootOnlyErrorSubstring = "only root can set"
 
 // IsRootOnlyWriteError reports whether err's message contains the PVE
 // error text confirmed for root-only config fields (`"only root can set
-// '<field>' config"`). A REST write path should use this to flag an
-// unregistered field as a root-only candidate for manual verification,
-// rather than surfacing it as a generic write failure — turning a runtime
-// failure into a feedback loop for growing RootOnlyFields safely.
+// '<field>' config"`). The REST write paths use it as a safety net for a
+// field missing from RootOnlyFields: pve.RoutedClient.SetVMConfigField and
+// DeleteVMConfigField, and the VMFieldsEnsure and BridgeIsolationEnsure Ops
+// (internal/idempotent), retry such a write once over SSH. A retry that
+// succeeds is silent: nothing reports the field or records it as a
+// candidate, so RootOnlyFields grows only by the manual live test described
+// on it. A retry that fails returns an error.
 func IsRootOnlyWriteError(err error) bool {
 	if err == nil {
 		return false

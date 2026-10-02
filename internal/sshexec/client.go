@@ -205,8 +205,8 @@ func DialWithPassword(ctx context.Context, addr, user, password string, hostKeyC
 // hook covering both. See that package's doc comment.
 //
 // NOT SAFE for two test packages to use concurrently: it mutates
-// process-wide state with no locking, matching SetSSHPortForIntegrationTests
-// (internal/pve/routed.go:29-49) and roster.SetScryptWorkFactorForTests,
+// process-wide state with no locking, matching
+// pve.SetSSHPortForIntegrationTests and roster.SetScryptWorkFactorForTests,
 // whose caveat and shape this deliberately copies. Each package's tests run
 // in their own process, so the hazard is only ever intra-package.
 var dialGuard func(addr string) error

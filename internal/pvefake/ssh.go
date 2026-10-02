@@ -13,13 +13,16 @@
 // same reason internal/sourceguard and internal/netguard are build-visible.
 //
 // Production code must never import this package. That is not left to
-// convention: TestPVEFake_NoProductionReferences forbids every reference to
-// it from any non-test file in the module, and a package nothing non-test
-// imports is never linked into the binary.
+// convention: internal/sourceguard's TestTestSupportPackagesNeverReachProduction
+// lists it as test support, refuses any non-test import of it from outside
+// that list, and asks the toolchain (`go list -deps`) that no main package,
+// cmd/pveforge above all, links it, so a blank or transitive import is
+// caught too.
 //
 // It imports only the standard library and golang.org/x/crypto/ssh — never
 // internal/pve or internal/sshexec — so any package's in-package tests,
-// including those two, can import it without an import cycle.
+// including those two, can import it without an import cycle;
+// TestPVEFake_ImportsNoPveforgePackage holds that.
 package pvefake
 
 import (

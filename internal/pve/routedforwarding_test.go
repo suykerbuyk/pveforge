@@ -195,7 +195,7 @@ type fwdSSH struct {
 }
 
 // newFwdSSH starts a fake SSH server that answers every command with exit
-// status 0, points this process's sshPort at it, and returns a target
+// status 0, points this process's routedSSHDialPort at it, and returns a target
 // bootstrapped against it with its node set to fwdTargetNode.
 func newFwdSSH(t *testing.T) (*fwdSSH, *roster.Target) {
 	t.Helper()

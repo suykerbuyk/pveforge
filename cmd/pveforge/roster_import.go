@@ -128,12 +128,17 @@ An imported target holds a token but no SSH key, so a later plain
 	cmd.Flags().StringVar(&host, "host", "", "the target's API host (defaults to the roster's, required for a new target)")
 	cmd.Flags().StringVar(&node, "node", "", "the target's node name (defaults to the roster's, required for a new target)")
 	cmd.Flags().IntVar(&apiPort, "api-port", 0, "the target's API port (default 8006)")
-	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip TLS verification for a new target's API")
+	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip a new target's API certificate chain check and pin its key instead: the target then needs a TLS pin, the roster's or --expect's, or the import is refused before the secret is read")
 	cmd.Flags().StringVar(&expect, "expect", "", "for a target the roster holds no TLS pin for: the pin you verified, sha256//<base64>; the validation's connection must present exactly that key, and it is written (source expect) after the token validates. Required for an insecure_tls target; for a CA-verified one it is optional and pins it as well")
 	cmd.Flags().BoolVar(&replace, "replace", false, "replace a different token the target already holds (the old token is not revoked)")
 	resolveFormat = addOutputFlag(cmd)
 	addLockWaitFlag(cmd)
 	_ = cmd.MarkFlagRequired("token-id")
+	// Destructive, by the worst case that sets every command's tier: with
+	// --replace it overwrites the roster's only copy of the token secret the
+	// target held, which neither PVE nor pveforge can give back (PVE shows a
+	// token's secret once, at creation). Without --replace it only adds.
+	markDestructive(cmd)
 	return cmd
 }
 
