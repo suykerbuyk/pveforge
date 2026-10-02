@@ -64,7 +64,7 @@ An imported target holds a token but no SSH key, so a later plain
 
 .PP
 \fB--insecure-tls\fP[=false]
-	skip TLS verification for a new target's API
+	skip a new target's API certificate chain check and pin its key instead: the target then needs a TLS pin, the roster's or --expect's, or the import is refused before the secret is read
 
 .PP
 \fB--lock-wait\fP=0s

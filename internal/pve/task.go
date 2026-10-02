@@ -46,7 +46,7 @@ var defaultTaskWaitTimeout = TaskWaitCeiling
 // It PANICS unless called from a binary built by `go test`, so the seam is
 // inert in a shipped pveforge no matter who calls it. That is the
 // sshexec.SetDialGuardForTests / roster.SetScryptWorkFactorForTests shape,
-// deliberately, rather than the older ungated SetSSHPortForIntegrationTests:
+// deliberately (SetSSHPortForIntegrationTests, once ungated, now has it too):
 // internal/pve/testdata/weakprobe is a non-test `package main` that calls
 // this, and TestTaskTimingsSeam_WeakProbeIsRejectedOutsideATestBinary runs
 // it with `go run` and requires it to die. That probe is also the ONLY

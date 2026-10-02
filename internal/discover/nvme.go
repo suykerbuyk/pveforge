@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/suykerbuyk/pveforge/internal/device"
@@ -65,6 +66,18 @@ var NVMeDriveSchema = Schema{
 // longer holds, rather than let a new resolver silently go undescribed.
 var DeviceSchemas = map[string]Schema{
 	"NVMeDrive": NVMeDriveSchema,
+}
+
+// DeviceTypes returns DeviceSchemas' keys, sorted: the names
+// `pveforge discover device` accepts, and lists when given none, so a caller
+// discovers them without reading this file.
+func DeviceTypes() []string {
+	types := make([]string, 0, len(DeviceSchemas))
+	for name := range DeviceSchemas {
+		types = append(types, name)
+	}
+	sort.Strings(types)
+	return types
 }
 
 // allowedExtraToPattern turns an isSafeToken-style "extra allowed

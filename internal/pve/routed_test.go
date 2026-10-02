@@ -83,9 +83,9 @@ func bootstrappedTarget(t *testing.T, fs *pvefake.SSHServer, passphrase string) 
 
 func withFakeSSHPort(t *testing.T, fs *pvefake.SSHServer) {
 	t.Helper()
-	orig := sshPort
-	sshPort = fs.Port(t)
-	t.Cleanup(func() { sshPort = orig })
+	orig := routedSSHDialPort
+	routedSSHDialPort = fs.Port(t)
+	t.Cleanup(func() { routedSSHDialPort = orig })
 }
 
 func TestRoutedClient_RootOnlyField_RoutesToSSH_NeverTouchesREST(t *testing.T) {

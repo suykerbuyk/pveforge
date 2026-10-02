@@ -113,9 +113,10 @@ func (f files) readSecrets(environ []string) ([]Pair, error) {
 
 // run decrypts the secrets and replaces this process with argv, its
 // environment the current one minus both identity variables and the
-// variables that run code in a bash child (ChildEnv), plus the secrets. A secret whose name is already set is refused rather than
-// overridden: PVEFORGE_PVE_PASSWORD-style name reuse must never silently
-// mix two credentials.
+// variables that run code in a bash child (ChildEnv), plus the secrets. A
+// secret whose name is already set is refused rather than overridden:
+// PVEFORGE_PVE_PASSWORD-style name reuse must never silently mix two
+// credentials.
 func run(f files, environ, argv []string) error {
 	pairs, err := f.readSecrets(environ)
 	if err != nil {

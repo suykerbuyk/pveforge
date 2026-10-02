@@ -109,8 +109,8 @@ var scryptWorkFactorOverride = 0
 // one.
 //
 // Not safe for two test packages to use concurrently — it mutates
-// process-wide state with no locking, matching pve.SetSSHPortForIntegrationTests
-// (routed.go:29-49), whose caveat and shape this deliberately copies. Each
+// process-wide state with no locking, matching pve.SetSSHPortForIntegrationTests,
+// whose caveat and shape this deliberately copies. Each
 // package's tests run in their own process, so the hazard is only ever
 // intra-package: the module's no-parallel pin
 // (internal/sourceguard/noparallel_guard_test.go) holds that no package using

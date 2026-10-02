@@ -39,7 +39,7 @@ Bootstrap a target from PAM/realm username+password to a fully token-authenticat
 
 .PP
 \fB--insecure-tls\fP[=false]
-	skip TLS certificate verification for the API
+	skip the API's certificate chain check and pin its key instead: every run captures the key over the SSH session and stores it as the target's TLS pin (a password session needs --host-key-fingerprint or --ssh-tofu), and REST to an insecure_tls target without a pin is refused
 
 .PP
 \fB--lock-wait\fP=0s

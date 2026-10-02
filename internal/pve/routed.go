@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"testing"
 	"time"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
@@ -14,43 +15,77 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
 
-// sshPort is the SSH port RoutedClient dials for the standing root-only
-// field vector. roster.Target has no per-target SSH port field today (the
-// bootstrap flow's own --ssh-port is a CLI-only input, never persisted) —
-// hardcoded to the standard port rather than adding roster schema for a
-// case nobody has hit yet; a real future need should add SSHPort to
-// roster.Target instead of working around it here.
+// routedSSHDialPort is the SSH port RoutedClient dials for the standing
+// root-only field vector. roster.Target has no per-target SSH port field
+// today (the bootstrap flow's own --ssh-port is a CLI-only input, never
+// persisted) — hardcoded to the standard port rather than adding roster
+// schema for a case nobody has hit yet; a real future need should add
+// SSHPort to roster.Target instead of working around it here.
 //
-// A var, not a const, purely so this package's own tests can point it at
-// an in-process fake SSH server's ephemeral port; production code never
-// changes it.
-var sshPort = 22
+// A var, not a const, purely so tests can point it at an in-process fake
+// SSH server's ephemeral port; production code never changes it. Named so
+// that no other identifier in the module shares it: the static guard in
+// sshport_seam_test.go matches it as a bare identifier anywhere, and
+// cmd/pveforge's own --ssh-port locals are called sshPort.
+var routedSSHDialPort = 22
 
-// SetSSHPortForIntegrationTests overrides the SSH port every RoutedClient
-// in this process dials, restoring the previous value via the returned
-// func (call it, typically via t.Cleanup, once the test is done). This
-// exists ONLY so a genuine full-stack integration test in ANOTHER package
-// (internal/idempotent's own NetworkBridgeEnsure integration test is the
-// one legitimate caller as of this writing — see that test for why it
-// can't live in this package: internal/idempotent's production code
-// already imports internal/pve for other reasons, so a pve-package test
-// file cannot import internal/idempotent back without an import cycle)
-// can point a real, unfaked *RoutedClient's SSH dial at an in-process fake
-// SSH server instead of the real port 22 — the same thing this package's
-// own tests already do internally via the unexported sshPort var and
-// routed_test.go's withFakeSSHPort, just exposed across the package
-// boundary. Production code must never call this. Not safe for two test
-// packages to use concurrently (it mutates process-wide state with no
-// locking, matching sshPort's own existing lack of synchronization).
 // RoutedSSHPort is the SSH port a RoutedClient dials. The roster stores no
 // SSH port, so a command that dials a target's stored SSH pin on its own
 // (roster pin-tls) uses this same port unless told otherwise.
-func RoutedSSHPort() int { return sshPort }
+func RoutedSSHPort() int { return routedSSHDialPort }
 
+// SetSSHPortForIntegrationTests overrides the SSH port every RoutedClient
+// in this process dials, restoring the previous value via the returned
+// func (call it, typically via t.Cleanup, once the test is done). It exists
+// so a full-stack test in ANOTHER package (internal/idempotent's network
+// integration tests, cmd/pveforge's SSH harness) can point a real, unfaked
+// *RoutedClient's SSH dial at an in-process fake SSH server instead of port
+// 22 — the same thing this package's own tests do through
+// routed_test.go's withFakeSSHPort, exposed across the package boundary.
+// Those callers cannot live in this package: internal/idempotent's
+// production code imports internal/pve, so a pve test file cannot import it
+// back without an import cycle.
+//
+// It PANICS unless called from a binary built by `go test`, so the seam is
+// inert in a shipped pveforge no matter who calls it. That is the
+// roster.SetScryptWorkFactorForTests / SetTaskTimingsForTests shape:
+// internal/pve/testdata/sshportprobe is a non-test `package main` that calls
+// this, and TestSSHPortSeam_ProbeIsRejectedOutsideATestBinary runs it with
+// `go run` and requires it to die. That probe is also the ONLY observer of
+// the argument this wrapper passes below.
+//
+// Production code must never call this. That is not left to convention:
+// TestSSHPortSeam_NoProductionReferences forbids this name,
+// setSSHPortForTests and routedSSHDialPort in every non-test file in the
+// module except this one. Like every AST-based guard in this repo, it does
+// not see a //go:linkname onto the var itself; sourceguard.DirectiveEvasions
+// refuses that directive module-wide.
+//
+// Not safe for two test packages to use concurrently: it mutates
+// process-wide state with no locking. Each package's tests run in their own
+// process, so the hazard is only ever intra-package, and the module's
+// no-parallel pin (internal/sourceguard/noparallel_guard_test.go) holds that
+// no package using it calls t.Parallel.
 func SetSSHPortForIntegrationTests(port int) (restore func()) {
-	orig := sshPort
-	sshPort = port
-	return func() { sshPort = orig }
+	return setSSHPortForTests(port, testing.Testing())
+}
+
+// setSSHPortForTests holds the whole decision, with the "am I in a test
+// binary" answer PASSED IN rather than read, for the same reason
+// roster.setScryptWorkFactor does: the refusal branch is then reachable from
+// an ordinary in-process test, so the suite's own coverage profile covers it.
+func setSSHPortForTests(port int, inTestBinary bool) (restore func()) {
+	if !inTestBinary {
+		panic("pve: SetSSHPortForIntegrationTests called outside a test binary")
+	}
+	// A port outside 1..65535 can never reach a fake server; refusing it
+	// here names the seam rather than leaving a dial error to explain it.
+	if port < 1 || port > 65535 {
+		panic(fmt.Sprintf("pve: SetSSHPortForIntegrationTests: port %d out of range [1,65535]", port))
+	}
+	orig := routedSSHDialPort
+	routedSSHDialPort = port
+	return func() { routedSSHDialPort = orig }
 }
 
 // RoutedClient is pveforge's single entry point for mutating one target's
@@ -610,7 +645,7 @@ func (c *RoutedClient) dialSSH(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	addr := fmt.Sprintf("%s:%d", c.target.Host, sshPort)
+	addr := fmt.Sprintf("%s:%d", c.target.Host, routedSSHDialPort)
 	sshClient, err := sshexec.Dial(ctx, addr, c.target.SSH.User, privateKeyPEM, cb)
 	if err != nil {
 		return fmt.Errorf("connect to %q via ssh: %w", c.target.ID, err)

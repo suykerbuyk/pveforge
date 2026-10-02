@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -178,10 +179,18 @@ func newDiscoverNetworkCmd() *cobra.Command {
 }
 
 func newDiscoverDeviceCmd() *cobra.Command {
+	types := strings.Join(discover.DeviceTypes(), ", ")
 	cmd := &cobra.Command{
-		Use:   "device <type>",
+		Use:   "device [type]",
 		Short: "Describe a pveforge device-semantic resolver's schema (layer 2, purely local — no target/roster needed)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Describe a pveforge device-semantic resolver's schema: the fields it takes
+and what each accepts. This is layer 2 of discover, pveforge's own device
+model, which PVE's schema cannot describe. It is purely local: no target,
+roster or connection is needed.
+
+With no type, it lists the types it can describe, under the key types. The
+types are: ` + types + `. A type is matched exactly, case included.`,
+		Args: cobra.MaximumNArgs(1),
 	}
 	resolveFormat := addOutputFlag(cmd)
 
@@ -190,9 +199,14 @@ func newDiscoverDeviceCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if len(args) == 0 {
+			return kvjson.Render(cmd.OutOrStdout(), format, struct {
+				Types []string `json:"types"`
+			}{discover.DeviceTypes()})
+		}
 		schema, ok := discover.DeviceSchemas[args[0]]
 		if !ok {
-			return fmt.Errorf("unknown device type %q", args[0])
+			return fmt.Errorf("unknown device type %q (known: %s)", args[0], types)
 		}
 		return kvjson.Render(cmd.OutOrStdout(), format, schema)
 	}

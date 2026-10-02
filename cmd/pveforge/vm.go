@@ -534,8 +534,8 @@ rather than that a change was applied.`,
 	}
 	addRosterFlag(cmd)
 	addLockWaitFlag(cmd)
-	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of field=value pairs (values must be JSON strings)")
-	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of field=value pairs (values must be JSON strings)")
+	cmd.Flags().StringVar(&jsonBody, "json", "", "JSON object of field=value pairs (values must be JSON strings, or null to delete the key as --delete does)")
+	cmd.Flags().StringVar(&jsonFile, "json-file", "", "path to a JSON file of field=value pairs (values must be JSON strings, or null to delete the key as --delete does)")
 	cmd.Flags().StringArrayVar(&deleteFlags, "delete", nil, "remove this config key entirely (PVE's delete parameter), rather than writing it empty; repeatable")
 	markMutating(cmd)
 	return cmd

@@ -141,7 +141,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&host, "host", "", "target host/IP (required unless the target already exists in the roster)")
 	cmd.Flags().StringVar(&node, "node", "", "PVE node name (required unless the target already exists in the roster)")
 	cmd.Flags().IntVar(&apiPort, "api-port", 0, "PVE API port (default 8006)")
-	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip TLS certificate verification for the API")
+	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip the API's certificate chain check and pin its key instead: every run captures the key over the SSH session and stores it as the target's TLS pin (a password session needs --host-key-fingerprint or --ssh-tofu), and REST to an insecure_tls target without a pin is refused")
 	cmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port on the target host")
 	cmd.Flags().StringVar(&pveUser, "pve-user", "root@pam", "PAM/realm username to bootstrap with: the SSH LOGIN (must be an @pam user); the token's owner is --token-owner. In keyless mode this login's password is used on every run")
 	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, "authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster, so no SSH host key pin is stored either. Every such run is a fresh password connection: give --host-key-fingerprint on each one (an insecure_tls target requires it, or --ssh-tofu, since each such run captures its TLS pin), or the host key is trusted on first use; the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair")

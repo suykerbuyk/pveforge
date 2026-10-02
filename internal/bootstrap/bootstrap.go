@@ -441,10 +441,12 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	case opts.NoSSHKey:
 		// Keyless: one password session for this run only. No keypair is
 		// generated, no key is installed on the target, and nothing is
-		// written to the roster's [targets.ssh]. The host key is trusted
-		// on first use (pin ""), and the fingerprint it returns is both
-		// reported (r.res below) and pinned for any redial this run makes
-		// (freshSession).
+		// written to the roster's [targets.ssh]. The host key must match
+		// --host-key-fingerprint when one is given; without one it is
+		// trusted on first use, which checkCaptureTrust has already refused for
+		// an insecure_tls target unless --ssh-tofu was given (ruling B′).
+		// The fingerprint the dial returns is both reported (r.res below)
+		// and pinned for any redial this run makes (freshSession).
 		session, fp, err := transport.DialWithPassword(ctx, addr, sshUser, opts.PVEPassword, opts.HostKeyFingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap %s: connect with password (no ssh key): %w", opts.TargetID, err)

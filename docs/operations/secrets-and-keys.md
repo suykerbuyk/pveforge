@@ -587,8 +587,10 @@ step:
 - `hack/harness/unlock.sh run [--] <cmd> [args…]` decrypts the secrets in
   memory and replaces itself with `<cmd>`. The values go into that command's
   environment only: never on disk, never in argv. The identity variables are
-  removed from that environment. A secret whose name is already set refuses to
-  run rather than override it.
+  removed from that environment, and so, silently, is every variable that runs
+  code in a bash child before its first line (`BASH_FUNC_*`, `SHELLOPTS`,
+  `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`). A secret whose name is already set
+  refuses to run rather than override it.
 - `unlock.sh seal` encrypts a new env file to every recipient. On a terminal
   it prompts twice per name, without echo. Prefer that: it can also read the
   file from stdin, but a file of secrets on disk is exactly what the blob

@@ -6,11 +6,18 @@ pveforge-discover-device - Describe a pveforge device-semantic resolver's schema
 
 
 .SH SYNOPSIS
-\fBpveforge discover device <type> [flags]\fP
+\fBpveforge discover device [type] [flags]\fP
 
 
 .SH DESCRIPTION
-Describe a pveforge device-semantic resolver's schema (layer 2, purely local — no target/roster needed)
+Describe a pveforge device-semantic resolver's schema: the fields it takes
+and what each accepts. This is layer 2 of discover, pveforge's own device
+model, which PVE's schema cannot describe. It is purely local: no target,
+roster or connection is needed.
+
+.PP
+With no type, it lists the types it can describe, under the key types. The
+types are: NVMeDrive. A type is matched exactly, case included.
 
 
 .SH OPTIONS
