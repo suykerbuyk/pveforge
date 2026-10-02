@@ -66,6 +66,7 @@ type SSHServer struct {
 	recordStdin bool
 	stall       chan struct{}
 	asyncExec   bool
+	hangAfter   bool
 
 	mu    sync.Mutex
 	cmds  []string
@@ -157,6 +158,16 @@ func (s *SSHServer) Stall() {
 func (s *SSHServer) AsyncExec() {
 	s.mustNotBeStarted("AsyncExec")
 	s.asyncExec = true
+}
+
+// HangAfterOutput, in AsyncExec mode, writes each command's output and
+// then sends no exit status until the client closes the session: a command
+// that keeps its session open after printing (still streaming, or hung), so
+// a test can tell "the client stopped on its own" from "the command ended".
+// Panics after Start.
+func (s *SSHServer) HangAfterOutput() {
+	s.mustNotBeStarted("HangAfterOutput")
+	s.hangAfter = true
 }
 
 // StdinRecords returns one entry per session the server has finished
@@ -321,6 +332,8 @@ func (s *SSHServer) handleConn(conn net.Conn) {
 
 func (s *SSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer func() { _ = ch.Close() }()
+	sessionDone := make(chan struct{})
+	defer close(sessionDone)
 
 	// RecordStdin: read this session's stdin to EOF in its own goroutine,
 	// so that what the client forwarded is observed rather than assumed.
@@ -365,6 +378,10 @@ func (s *SSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 					stdout, stderr, code := s.handleExec(cmd)
 					_, _ = ch.Write([]byte(stdout))
 					_, _ = ch.Stderr().Write([]byte(stderr))
+					if s.hangAfter {
+						<-sessionDone
+						return
+					}
 					_, _ = ch.SendRequest("exit-status", false, exitStatus(code))
 					_ = ch.Close()
 				}()

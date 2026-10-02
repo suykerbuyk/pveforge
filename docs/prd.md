@@ -683,6 +683,13 @@ ciphertext, so the file stays reviewable.
   parses the leaf certificate in Go. That covers a custom, ACME or
   cluster-signed certificate alike, since it reads what pveproxy actually
   serves. The capture port (`--capture-port`, default 8006) is not stored.
+  The capture is bounded in time, like every SSH command, and in size: its
+  answer may not exceed 64 KiB (`tlspin.MaxCaptureOutput`, one certificate
+  being a few KiB). A node that prints more is stopped and the capture
+  refused, so a hostile or broken node cannot stream an unbounded answer into
+  memory. The limit is a per-call option of the SSH runner
+  (`sshexec.WithMaxOutput`), set by the capture alone; every other command
+  keeps unlimited output.
 - **A network cross-check** (`pve.ServedPin`) then requires the target's REST
   address to serve the same key. It is a TLS handshake with no HTTP request,
   so no token or header can leave. It dials through REST's own transport
@@ -873,10 +880,9 @@ rollout order (upgrade every reader of a roster before pinning it).
 - **Multi-operator access to one roster.** Rosters keep a single passphrase
   (see §6 item 5).
 - **These are known gaps, recorded rather than built** (§8 names the work in
-  flight on the second and third; none is in flight on the first):
+  flight on the second; none is in flight on the first):
   - a command to rotate the SSH keypair of a node that was not rebuilt;
-  - removal of stray `authorized_keys` lines left by failed first runs;
-  - a byte cap on the capture's output, which is bounded in time only.
+  - removal of stray `authorized_keys` lines left by failed first runs.
 
 ### 4.2 Command surface
 
@@ -1064,8 +1070,8 @@ both ways, plane included.
 | `internal/pve` | production | The PVE client: go-proxmox plus `pve.Client.RawRequest`; TLS policy and the `/access` write guard; `pve.RoutedClient`, the REST/SSH routing point; digest compare-and-set writes; task waits |
 | `internal/roster` | production | §4: load, strict keys, per-value age encryption, surgical write-back, rekey |
 | `internal/lock` | production | §3.4.2's per-object lock |
-| `internal/sshexec` | production | The SSH transport: pinned host keys, deadlines, `qm set`, file writes, bridge and link state, key install |
-| `internal/tlspin` | production | The SPKI pin form, the per-handshake check, the capture command |
+| `internal/sshexec` | production | The SSH transport: pinned host keys, deadlines, a per-call output limit, `qm set`, file writes, bridge and link state, key install |
+| `internal/tlspin` | production | The SPKI pin form, the per-handshake check, the capture command and its output cap |
 | `internal/kvjson` | production | §3.6's kv and JSON contract |
 | `internal/nodump` | production | Makes the process non-dumpable before it holds a decrypted secret (`exec`) |
 | `internal/harnesssecrets` | harness library | The age-sealed harness environment (§4.1) |
@@ -1198,10 +1204,9 @@ worktree with no commits yet: its branch still points at an older `main`.
   to T3 are merged. T2k (staged in the `t2k` worktree; sent back in review)
   removes pveforge's own `authorized_keys` line after a failed first run and
   adds a read-only access-keys report of stray lines; removing strays left by
-  earlier runs stays manual (operator ruling). A byte cap on the TLS
-  capture's output is staged in the `capture-cap` worktree, pending review.
-  Between them they address §4.1's second and third known gaps; nothing is
-  in flight on SSH keypair rotation.
+  earlier runs stays manual (operator ruling). It addresses §4.1's second
+  known gap; nothing is in flight on SSH keypair rotation. (The byte cap on
+  the TLS capture's output, once a third gap, has landed: §4.1.)
 - **Keyless targets cannot store a host-key pin**
   (`pveforge-keyless-target-host-key-pin`): every `--no-ssh-key` run needs
   the fingerprint again, or trusts the host key on first use (only with
