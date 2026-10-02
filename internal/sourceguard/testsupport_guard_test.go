@@ -79,13 +79,92 @@ type goPackage struct {
 // goList runs `go list` from the module root with args and returns stdout.
 func goList(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("go", append([]string{"list"}, args...)...)
-	cmd.Dir = "../.."
-	out, err := cmd.Output()
+	out, err := goListErr(args...)
 	if err != nil {
 		t.Fatalf("go list %s: %v", strings.Join(args, " "), err)
 	}
-	return string(out)
+	return out
+}
+
+// goListErr is goList returning its error instead of failing the test.
+func goListErr(args ...string) (string, error) {
+	cmd := exec.Command("go", append([]string{"list"}, args...)...)
+	cmd.Dir = "../.."
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// buildTagSets are the build configurations the module's packages exist
+// under: the default one, and -tags harness, under which the nested-harness
+// files build. A package whose every file carries the harness tag is still
+// part of the module, and `go list ./...` alone never reports it: every
+// guard that asks "which packages are there" asks under both.
+var buildTagSets = [][]string{nil, {"-tags", "harness"}}
+
+// modulePackages is `go list -json ./...` under every buildTagSets entry,
+// merged by import path: a package seen under either is listed once, with
+// the union of its files and imports.
+func modulePackages(t *testing.T) []goPackage {
+	t.Helper()
+	var pkgs []goPackage
+	index := map[string]int{}
+	union := func(a, b []string) []string {
+		for _, x := range b {
+			if !slices.Contains(a, x) {
+				a = append(a, x)
+			}
+		}
+		return a
+	}
+	for _, tags := range buildTagSets {
+		dec := json.NewDecoder(strings.NewReader(goList(t, append(slices.Clone(tags), "-json", "./...")...)))
+		for {
+			var p goPackage
+			if err := dec.Decode(&p); err == io.EOF {
+				break
+			} else if err != nil {
+				t.Fatalf("decode go list output: %v", err)
+			}
+			i, seen := index[p.ImportPath]
+			if !seen {
+				index[p.ImportPath] = len(pkgs)
+				pkgs = append(pkgs, p)
+				continue
+			}
+			q := &pkgs[i]
+			q.GoFiles = union(q.GoFiles, p.GoFiles)
+			q.TestGoFiles = union(q.TestGoFiles, p.TestGoFiles)
+			q.Imports = union(q.Imports, p.Imports)
+			q.TestImports = union(q.TestImports, p.TestImports)
+			q.XTestImports = union(q.XTestImports, p.XTestImports)
+		}
+	}
+	return pkgs
+}
+
+// moduleDeps is `go list -deps pkg` under every buildTagSets entry it
+// builds under, merged: a link that exists only in a harness-tagged build is
+// still a link.
+func moduleDeps(t *testing.T, pkg string) []string {
+	t.Helper()
+	var deps []string
+	built := false
+	for _, tags := range buildTagSets {
+		out, err := goListErr(append(slices.Clone(tags), "-deps", pkg)...)
+		if err != nil {
+			continue // e.g. a main whose every file carries the other tag set
+		}
+		built = true
+		for _, d := range strings.Fields(out) {
+			if !slices.Contains(deps, d) {
+				deps = append(deps, d)
+			}
+		}
+	}
+	if !built {
+		t.Fatalf("go list -deps %s failed under every build tag set", pkg)
+	}
+	return deps
 }
 
 // TestTestSupportPackagesNeverReachProduction holds, for each package in
@@ -109,19 +188,11 @@ func goList(t *testing.T, args ...string) string {
 // internal/netguard/testdata/weakprobe — a main that imports netguard on
 // purpose — is not in the set. That is asserted below, not assumed.
 func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
-	var pkgs []goPackage
-	dec := json.NewDecoder(strings.NewReader(goList(t, "-json", "./...")))
-	for {
-		var p goPackage
-		if err := dec.Decode(&p); err == io.EOF {
-			break
-		} else if err != nil {
-			t.Fatalf("decode go list output: %v", err)
-		}
+	pkgs := modulePackages(t)
+	for _, p := range pkgs {
 		if strings.Contains(p.ImportPath, "/testdata/") {
 			t.Fatalf("go list ./... listed %s: testdata is supposed to be excluded by the go tool", p.ImportPath)
 		}
-		pkgs = append(pkgs, p)
 	}
 	if len(pkgs) < 12 {
 		t.Fatalf("go list saw %d packages: the walk is not seeing the module", len(pkgs))
@@ -164,7 +235,7 @@ func TestTestSupportPackagesNeverReachProduction(t *testing.T) {
 	}
 	deps := map[string][]string{}
 	for _, m := range mains {
-		deps[m] = strings.Fields(goList(t, "-deps", m))
+		deps[m] = moduleDeps(t, m)
 		if !slices.Contains(deps[m], modulePath+"internal/lock") && m == modulePath+"cmd/pveforge" {
 			t.Fatalf("go list -deps %s did not list internal/lock: the closure is not the binary's", m)
 		}
@@ -232,7 +303,12 @@ var testOnlyDeps = []string{
 // test dependencies do hold each one, so the check is looking at a real
 // importer rather than at packages nothing uses.
 func TestManPageGeneratorNeverReachesProduction(t *testing.T) {
-	mains := strings.Fields(goList(t, "-f", `{{if eq .Name "main"}}{{.ImportPath}}{{end}}`, "./..."))
+	var mains []string
+	for _, p := range modulePackages(t) {
+		if p.Name == "main" {
+			mains = append(mains, p.ImportPath)
+		}
+	}
 	if !slices.Contains(mains, modulePath+"cmd/pveforge") {
 		t.Fatalf("mains = %v: cmd/pveforge is not among them", mains)
 	}
@@ -246,7 +322,7 @@ func TestManPageGeneratorNeverReachesProduction(t *testing.T) {
 		return hit
 	}
 	for _, m := range mains {
-		deps := strings.Fields(goList(t, "-deps", m))
+		deps := moduleDeps(t, m)
 		for _, d := range testOnlyDeps {
 			if hit := matches(deps, d); len(hit) > 0 {
 				t.Errorf("%s links %v: the man-page generator's dependencies must stay test-only", m, hit)
@@ -280,6 +356,7 @@ func TestHarnessSuitesAreTestOnly(t *testing.T) {
 		}
 		pkgs = append(pkgs, p)
 	}
+	all := modulePackages(t) // the importers, under -tags harness too
 	for _, rel := range harnessSuites {
 		path := modulePath + rel
 		t.Run(rel, func(t *testing.T) {
@@ -295,7 +372,7 @@ func TestHarnessSuitesAreTestOnly(t *testing.T) {
 			if len(found.GoFiles) != 0 {
 				t.Errorf("%s has non-test Go files %q: a harness suite package holds tests only", rel, found.GoFiles)
 			}
-			for _, p := range pkgs {
+			for _, p := range all {
 				if p.ImportPath != path && (slices.Contains(p.Imports, path) || slices.Contains(p.TestImports, path) || slices.Contains(p.XTestImports, path)) {
 					t.Errorf("%s is imported by %s: nothing may import a harness suite", rel, p.ImportPath)
 				}
