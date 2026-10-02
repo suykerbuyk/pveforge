@@ -449,6 +449,92 @@ outside pveforge.`,
 func newAccessCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "access", Short: "Read PVE's users, groups and ACLs (as root over SSH)"}
 	cmd.AddCommand(newAccessInventoryCmd())
+	cmd.AddCommand(newAccessKeysCmd())
+	return cmd
+}
+
+// accessKeysResult is access keys' output.
+type accessKeysResult struct {
+	Target string `json:"target"`
+	// RostersChecked are the rosters whose keys count as held: a key held
+	// only by a roster not listed here reads as a stray.
+	RostersChecked []string            `json:"rosters_checked"`
+	Strays         int                 `json:"strays"`
+	Keys           []bootstrap.KeyLine `json:"keys"`
+}
+
+func newAccessKeysCmd() *cobra.Command {
+	var noSSHKey bool
+	var also []string
+	cmd := &cobra.Command{
+		Use:   "keys <target-id>",
+		Short: "List pveforge's SSH keys in root's authorized_keys, and which roster holds each (read-only)",
+		Long: `List every key in root's authorized_keys on a target whose comment begins
+pveforge@, read as root over SSH, and say which roster target holds each: a
+target whose [targets.ssh] public_key is exactly that line. Nothing is
+written, and nothing is removed.
+
+On PVE, root's authorized_keys is /etc/pve/priv/authorized_keys, shared by
+every node of the cluster: the list is the cluster's, whichever node is read.
+
+A key no roster checked holds is a "stray", listed with remove_command: the
+exact command that removes that one line when run as root on the node,
+rewriting the file in place (never sed -i or mv, which would replace the
+cluster's shared file with a local one). A stray is typically left by a
+first bootstrap that failed after installing its key, on a pveforge older
+than the one that removes its own key again. pveforge never removes a
+stray itself.
+
+The rosters checked are --roster (the one the target is read from) and each
+--also-roster. A key that another roster uses, one not checked (a
+colleague's, one on another machine, a test roster), ALSO reads as a stray:
+check every roster that can reach this cluster before removing anything.
+Lines without a pveforge@ comment are never listed.`,
+		Args: cobra.ExactArgs(1),
+	}
+	resolveFormat := addOutputFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		format, err := resolveFormat()
+		if err != nil {
+			return err
+		}
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+		var checked []bootstrap.RosterKeys
+		for _, p := range append([]string{rosterPath}, also...) {
+			r, err := roster.Load(p)
+			if err != nil {
+				return fmt.Errorf("load roster %s: %w", p, err)
+			}
+			checked = append(checked, bootstrap.RosterKeysOf(p, r))
+		}
+		access, _, closeAll, err := openRootAccess(cmd, args[0], noSSHKey, false)
+		if err != nil {
+			return err
+		}
+		defer closeAll()
+		lines, err := access.AuthorizedKeys(cmd.Context())
+		if err != nil {
+			return err
+		}
+		res := accessKeysResult{Target: args[0], Keys: bootstrap.KeyReport(lines, checked)}
+		for _, rk := range checked {
+			res.RostersChecked = append(res.RostersChecked, rk.Path)
+		}
+		for _, k := range res.Keys {
+			if k.Stray {
+				res.Strays++
+			}
+		}
+		return kvjson.Render(cmd.OutOrStdout(), format, res)
+	}
+	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", hostKeyFingerprintAccessUsage)
+	cmd.Flags().StringArrayVar(&also, "also-roster", nil, "another roster whose SSH keys count as held (repeatable): every roster that can reach this cluster, so a key one of them uses is not reported as a stray")
+	addRosterFlag(cmd)
+	markSafe(cmd)
 	return cmd
 }
 

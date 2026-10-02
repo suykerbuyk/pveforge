@@ -59,6 +59,7 @@ var rootWriterSites = []struct {
 	{"internal/bootstrap/access.go", tgtPveum, 6},      // five reads (guests, users, groups, ACLs, roles) and pveumWrite
 	{"internal/bootstrap/access.go", tgtRootRun, 1},    // pveum's own call
 	{"internal/bootstrap/inventory.go", tgtRootRun, 1}, // getent, which reads its own exit 2
+	{"internal/bootstrap/keys.go", tgtRootRun, 1},      // access keys' one read of authorized_keys (cat; it writes nothing)
 	{"internal/bootstrap/access.go", tgtPveumWrite, 5}, // the five writers
 	{"cmd/pveforge/vm.go", tgtClusterGst, 2},           // the check and the visibility wait
 	{"internal/bootstrap/access.go", tgtACLModify, 1},

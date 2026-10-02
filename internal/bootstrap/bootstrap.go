@@ -489,7 +489,8 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 		session, err := transport.DialWithKey(ctx, addr, sshUser, keypair.PrivateKeyPEM, hostKeyFP)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap %s: connect with fresh key: %w", opts.TargetID, err)
+			// No session with the new key, so it cannot be removed from here.
+			return nil, keyLeftBehind(fmt.Errorf("bootstrap %s: connect with fresh key: %w", opts.TargetID, err), opts.Host, keypair.AuthorizedKeyLine, "no connection with the new key to remove it over")
 		}
 		r.session = session
 		defer func() { _ = r.session.Close() }()
@@ -501,7 +502,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		// operator, and can never pass the pin off as ssh-stored.
 		if captureTLS {
 			if err := tls.capture(r.session); err != nil {
-				return nil, err
+				return nil, r.dropInstalledKey(err, keypair.AuthorizedKeyLine)
 			}
 		}
 
@@ -522,11 +523,13 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 				if tls.replaced {
 					done = fmt.Sprintf("; the TLS pin was already replaced (previous %s), the SSH host key pin was not (still %s): re-run the same command to finish", tls.previous, existing.HostKeyFingerprint)
 				}
-				return nil, fmt.Errorf("bootstrap %s: replace ssh auth: %w%s", opts.TargetID, err, done)
+				return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: replace ssh auth: %w%s", opts.TargetID, err, done), keypair.AuthorizedKeyLine)
 			}
-		} else if err := roster.WriteSSHAuth(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
-			return nil, fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err)
+		} else if err := writeSSHAuthFn(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
+			return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err), keypair.AuthorizedKeyLine)
 		}
+		// From here the roster holds the key: it is the target's live key,
+		// and nothing in this run may remove it.
 	}
 	r.res = &Result{HostKeyFingerprint: r.ident.hostKeyFP, TokenID: fullTokenID}
 
@@ -1805,4 +1808,39 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 		res.OrphanedToken = held.ID
 	}
 	return res, nil
+}
+
+// dropInstalledKey is operator ruling T2k (2026-09-26): a first run (or a
+// reprovision) that installed line, a key it generated itself, and then
+// failed before the roster held it removes exactly that line again, over
+// the session it opened with that key. Nothing else is ever removed: the
+// match is the whole line (sshexec.RemoveAuthorizedKeyScript), and a key
+// the roster holds is out of reach, since this runs only before the roster
+// write succeeds. The result is cause, with what happened to the key added.
+func (r *runner) dropInstalledKey(cause error, line string) error {
+	ctx, cancel := r.cleanupCtx()
+	defer cancel()
+	res, err := r.session.Run(ctx, sshexec.RemoveAuthorizedKeyScript(line))
+	switch {
+	case err != nil:
+		return keyLeftBehind(cause, r.opts.Host, line, fmt.Sprintf("removing it failed: %v", err))
+	case res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "removed":
+		return keyLeftBehind(cause, r.opts.Host, line, fmt.Sprintf("removing it was refused (exit %d, %s)", res.ExitCode, strings.TrimSpace(res.Stdout)))
+	}
+	return fmt.Errorf("%w; the SSH key this run had installed on the node (%s) was removed from root's authorized_keys again", cause, keyComment(line))
+}
+
+// keyLeftBehind is cause, saying that this run's key may still be in
+// root's authorized_keys on host, and how to remove exactly it by hand. The
+// line is a public key: printing it discloses nothing.
+func keyLeftBehind(cause error, host, line, why string) error {
+	return fmt.Errorf("%w; the SSH key this run installed may still be in root's authorized_keys on %s (%s): remove exactly it as root on the node with: %s", cause, host, why, sshexec.ManualKeyRemovalCommand(line))
+}
+
+// keyComment is an authorized_keys line's comment (pveforge@<target>).
+func keyComment(line string) string {
+	if f := strings.Fields(line); len(f) >= 3 {
+		return strings.Join(f[2:], " ")
+	}
+	return "its key"
 }

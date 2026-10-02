@@ -201,6 +201,7 @@ func matchesAny(err error, set []error) bool {
 var (
 	dryRunTokenWrite    = roster.DryRunTokenWrite
 	writeTokenAuthFn    = roster.WriteTokenAuth // Import's write; a test can make it store something else
+	writeSSHAuthFn      = roster.WriteSSHAuth   // a first run's SSH auth write; a test can make it fail
 	cleanupTimeout      = 30 * time.Second
 	postMintRetryDelay  = 1 * time.Second
 	persistTargetMetaFn = persistTargetMeta
