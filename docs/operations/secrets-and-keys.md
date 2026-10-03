@@ -364,7 +364,9 @@ nothing is persisted.
   the roster. If it fails in between, it removes exactly that line again,
   matched by the whole key, and says so in its error: `the SSH key this run
   had installed on the node (pveforge@<target>) was removed from root's
-  authorized_keys again`. It removes it over the connection it opened with
+  authorized_keys again`. The key goes into the SSH login's own
+  `~/.ssh/authorized_keys`: root's, unless `--pve-user` names another `@pam`
+  user, and then the messages name that user's file instead of root's. It removes it over the connection it opened with
   that key or, if that connection itself failed, over a password connection
   pinned to the host key the install was checked against. It removes nothing
   else, and nothing once the roster holds the key.
@@ -375,7 +377,9 @@ nothing is persisted.
   - If the removal cannot be made (no connection, the line not found exactly
     once, the file changed meanwhile, or an install whose outcome is unknown,
     such as a timeout), the error says the key `may still be` there and gives
-    the exact command to remove that one line by hand, as root on the node.
+    the exact command to remove that one line by hand. Run it as the user the
+    error names (root, or the `--pve-user` login): it edits that user's own
+    `~/.ssh/authorized_keys`, so run as anyone else it finds nothing.
   - A line written by another process between the removal's last check and
     its rename is lost, for example a node key from `pvecm updatecerts`. The
     window is two commands wide, and PVE's own writer takes the same risk; if
@@ -393,6 +397,13 @@ nothing is persisted.
   options the line carries) or `stray`, and for each stray a
   `remove_command`. It changes nothing. A file it cannot read is an error,
   never an empty list: on PVE a dangling symlink means pmxcfs is down.
+  - It reads root's `authorized_keys` only. A key a run installed for
+    another `@pam` login (`--pve-user`) is in that user's own file, which
+    `access keys` does not report.
+  - A roster target whose `public_key` does not parse is listed under
+    `unverifiable`. While any is, no stray gets a `remove_command`
+    (`remove_command_withheld` says why): that target's live key could
+    otherwise read as a stray. Fix its `public_key`, then report again.
   - **A key used by a roster you did not name also shows as a stray.** Name
     every roster that can reach the cluster with `--also-roster`, including
     other people's, before removing anything. Removing a key a roster still

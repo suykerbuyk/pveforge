@@ -458,9 +458,13 @@ type accessKeysResult struct {
 	Target string `json:"target"`
 	// RostersChecked are the rosters whose keys count as held: a key held
 	// only by a roster not listed here reads as a stray.
-	RostersChecked []string            `json:"rosters_checked"`
-	Strays         int                 `json:"strays"`
-	Keys           []bootstrap.KeyLine `json:"keys"`
+	RostersChecked []string `json:"rosters_checked"`
+	// Unverifiable names each "<roster>:<target>" whose public_key does not
+	// parse: while any is listed, no stray gets a remove_command, since a
+	// line may be that target's live key.
+	Unverifiable []string            `json:"unverifiable"`
+	Strays       int                 `json:"strays"`
+	Keys         []bootstrap.KeyLine `json:"keys"`
 }
 
 func newAccessKeysCmd() *cobra.Command {
@@ -490,7 +494,10 @@ on a pveforge older than the one that removes its own key again. pveforge
 never removes a stray itself.
 
 A key is held when a target's public_key is the same key, whatever options
-(from="...", no-pty) or comment the line in the file carries.
+(from="...", no-pty) or comment the line in the file carries. A target whose
+public_key does not parse is listed in unverifiable, and while any is, no
+stray gets a remove_command (remove_command_withheld says why): its live key
+could otherwise read as a stray. Only root's authorized_keys is read.
 
 The rosters checked are --roster (the one the target is read from) and each
 --also-roster. A key that another roster uses, one not checked (a
@@ -526,7 +533,7 @@ Lines without a pveforge@ comment are never listed.`,
 		if err != nil {
 			return err
 		}
-		res := accessKeysResult{Target: args[0], Keys: bootstrap.KeyReport(lines, checked)}
+		res := accessKeysResult{Target: args[0], Keys: bootstrap.KeyReport(lines, checked), Unverifiable: bootstrap.Unverifiable(checked)}
 		for _, rk := range checked {
 			res.RostersChecked = append(res.RostersChecked, rk.Path)
 		}

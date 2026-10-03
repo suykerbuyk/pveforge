@@ -34,7 +34,10 @@ never removes a stray itself.
 
 .PP
 A key is held when a target's public_key is the same key, whatever options
-(from="...", no-pty) or comment the line in the file carries.
+(from="...", no-pty) or comment the line in the file carries. A target whose
+public_key does not parse is listed in unverifiable, and while any is, no
+stray gets a remove_command (remove_command_withheld says why): its live key
+could otherwise read as a stray. Only root's authorized_keys is read.
 
 .PP
 The rosters checked are --roster (the one the target is read from) and each

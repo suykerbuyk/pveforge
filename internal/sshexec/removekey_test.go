@@ -138,6 +138,23 @@ func shimDir(t *testing.T, shims map[string]string) string {
 	return d
 }
 
+// requireShIsDash skips a row labelled dash when this host's sh is not
+// dash (PVE's /bin/sh is), rather than run another shell under that label.
+func requireShIsDash(t *testing.T) {
+	t.Helper()
+	p, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no sh on this host: %v", err)
+	}
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Skipf("cannot resolve %s: %v", p, err)
+	}
+	if filepath.Base(real) != "dash" {
+		t.Skipf("sh is %s, not dash: this row stands for PVE's /bin/sh (dash)", real)
+	}
+}
+
 func realTool(t *testing.T, name string) string {
 	t.Helper()
 	p, err := exec.LookPath(name)
@@ -169,7 +186,10 @@ func mustManual(t *testing.T, line string) string {
 // hands a command to sshd, which runs it with root's login shell: /bin/bash
 // on PVE), and on the manual command, pasted into bash as an operator would.
 func both(t *testing.T, line string, check func(t *testing.T, shell, script string)) {
-	t.Run("automatic/sh", func(t *testing.T) { check(t, "sh", mustScript(t, line)) })
+	t.Run("automatic/sh", func(t *testing.T) {
+		requireShIsDash(t)
+		check(t, "sh", mustScript(t, line))
+	})
 	t.Run("automatic/bash", func(t *testing.T) { check(t, "bash", mustScript(t, line)) })
 	t.Run("manual", func(t *testing.T) { check(t, "bash", mustManual(t, line)) })
 }

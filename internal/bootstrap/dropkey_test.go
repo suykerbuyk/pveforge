@@ -277,3 +277,41 @@ func TestRun_InstallWithAnUnknownOutcomeReportsTheKey(t *testing.T) {
 		})
 	}
 }
+
+// R1 (T2k code review): the key goes into the SSH login's own
+// ~/.ssh/authorized_keys. With --pve-user ops@pam that is ops's file, not
+// root's: the messages name ops's file and say to run the manual command
+// as ops, since run as root it would read /root's file and find nothing.
+func TestRun_KeyMessagesNameTheLoginsOwnFile(t *testing.T) {
+	ops := func(t *testing.T) Options {
+		_, opts := bareTarget(t)
+		opts.HostKeyFingerprint = testHostKey
+		opts.PVEUsername = "ops@pam"
+		return opts
+	}
+	t.Run("removed", func(t *testing.T) {
+		session := &fakeSession{byCmd: map[string]fakeRunResult{captureCmdPrefix: {res: RunResult{ExitCode: 1}}}}
+		answerRemoval(session, removedOK)
+		_, err := Run(context.Background(), ops(t), &fakeTransport{session: session}, &fakeValidator{})
+		if err == nil || !strings.Contains(err.Error(), "was removed from ops's authorized_keys again") || strings.Contains(err.Error(), "root's") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("not removed", func(t *testing.T) {
+		session := &fakeSession{byCmd: map[string]fakeRunResult{captureCmdPrefix: {res: RunResult{ExitCode: 1}}}}
+		answerRemoval(session, fakeRunResult{res: RunResult{ExitCode: sshexec.RemoveKeyExitNotExactlyOne, Stdout: "found 0\n"}})
+		tr := &fakeTransport{session: session}
+		_, err := Run(context.Background(), ops(t), tr, &fakeValidator{})
+		if err == nil || !strings.Contains(err.Error(), "may still be in ops's authorized_keys on ") ||
+			!strings.Contains(err.Error(), "remove exactly it as ops on the node with: "+manualFor(t, tr.installedKeyLines[0])) || strings.Contains(err.Error(), "root") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("an install with an unknown outcome", func(t *testing.T) {
+		tr := &fakeTransport{session: &fakeSession{}, installErr: errors.New("install pubkey: run remote script: context deadline exceeded")}
+		_, err := Run(context.Background(), ops(t), tr, &fakeValidator{})
+		if err == nil || !strings.Contains(err.Error(), "may still be in ops's authorized_keys") || !strings.Contains(err.Error(), "as ops on the node") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}

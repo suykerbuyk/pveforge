@@ -120,3 +120,33 @@ func TestAuthorizedKeysReadCmd(t *testing.T) {
 		}
 	})
 }
+
+// R2 (T2k code review): a roster target whose public_key does not parse is
+// never skipped silently. Its live key on the node would otherwise read as
+// a stray WITH a removal command. It is reported (Unverifiable), and while
+// it is, no stray gets a remove_command: each says why instead.
+func TestKeyReport_UnparsableRosterKeyWithholdsEveryRemoveCommand(t *testing.T) {
+	held, stray := genLine(t, "pveforge@a"), genLine(t, "pveforge@bad")
+	r := &roster.Roster{Targets: []roster.Target{
+		{ID: "a", SSH: &roster.SSHAuth{PublicKey: held}},
+		{ID: "bad", SSH: &roster.SSHAuth{PublicKey: "ssh-ed25519 not-base64!! pveforge@bad"}},
+	}}
+	rks := []RosterKeys{RosterKeysOf("r.toml", r)}
+	if got := Unverifiable(rks); len(got) != 1 || got[0] != "r.toml:bad" {
+		t.Fatalf("Unverifiable = %q, want [r.toml:bad]", got)
+	}
+	got := KeyReport([]string{held, stray}, rks)
+	if len(got) != 2 {
+		t.Fatalf("listed %d keys, want 2: %+v", len(got), got)
+	}
+	if k := got[0]; k.Stray || k.RemoveCommand != "" {
+		t.Errorf("the held key: %+v", k)
+	}
+	if k := got[1]; !k.Stray || k.RemoveCommand != "" || !strings.Contains(k.RemoveCommandWithheld, "r.toml:bad") {
+		t.Errorf("a stray beside an unparsable roster key: %+v; want no command, and the target named", k)
+	}
+	// With every roster key parsing, the same stray gets its command.
+	if k := KeyReport([]string{stray}, []RosterKeys{RosterKeysOf("r.toml", &roster.Roster{Targets: r.Targets[:1]})})[0]; k.RemoveCommand == "" {
+		t.Errorf("a stray with every roster key parsing: %+v; want its command", k)
+	}
+}

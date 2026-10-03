@@ -39,14 +39,18 @@ func (a *RootAccess) AuthorizedKeys(ctx context.Context) ([]string, error) {
 
 // RosterKeys is one roster's SSH public keys, for KeyReport: Path names
 // the roster, Held maps each target's public key (its wire-format blob,
-// whatever options or comment a line carries) to the targets holding it.
+// whatever options or comment a line carries) to the targets holding it,
+// and Unparsed names each target whose public_key does not parse.
 type RosterKeys struct {
-	Path string
-	Held map[string][]string
+	Path     string
+	Held     map[string][]string
+	Unparsed []string
 }
 
-// RosterKeysOf lists the SSH public keys r's targets hold. A public_key
-// that does not parse holds nothing.
+// RosterKeysOf lists the SSH public keys r's targets hold. A target whose
+// public_key does not parse is never skipped silently: it is listed in
+// Unparsed, since its key may be live on the node, and a line that is its
+// key must never read as a stray with a removal command.
 func RosterKeysOf(path string, r *roster.Roster) RosterKeys {
 	rk := RosterKeys{Path: path, Held: map[string][]string{}}
 	for _, t := range r.Targets {
@@ -55,6 +59,7 @@ func RosterKeysOf(path string, r *roster.Roster) RosterKeys {
 		}
 		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(t.SSH.PublicKey)))
 		if err != nil {
+			rk.Unparsed = append(rk.Unparsed, t.ID)
 			continue
 		}
 		blob := string(pub.Marshal())
@@ -76,10 +81,25 @@ type KeyLine struct {
 	// RemoveCommand, for a stray, removes exactly this line, options
 	// included, when run as root on the node. pveforge never runs it.
 	RemoveCommand string `json:"remove_command,omitempty"`
-	// RemoveCommandWithheld says why a stray has no RemoveCommand: its line
-	// holds a carriage return (a CRLF file), which no whole-line match can
-	// name exactly.
+	// RemoveCommandWithheld says why a stray has no RemoveCommand: a roster
+	// checked holds a public_key that does not parse (Unverifiable), so this
+	// line may be that target's live key; or its line holds a carriage
+	// return (a CRLF file), which no whole-line match can name exactly.
 	RemoveCommandWithheld string `json:"remove_command_withheld,omitempty"`
+}
+
+// Unverifiable names each "<roster>:<target>" among rosters whose
+// public_key does not parse. While any is listed, KeyReport cannot tell
+// whether a line is that target's key, and gives no stray a removal
+// command.
+func Unverifiable(rosters []RosterKeys) []string {
+	out := []string{}
+	for _, rk := range rosters {
+		for _, id := range rk.Unparsed {
+			out = append(out, rk.Path+":"+id)
+		}
+	}
+	return out
 }
 
 // KeyReport lists every line of root's authorized_keys whose comment begins
@@ -91,9 +111,12 @@ type KeyLine struct {
 // listed. It changes nothing.
 //
 // A key held by a roster NOT among rosters reads as a stray here: another
-// person's roster, or one on another machine, may still use it.
+// person's roster, or one on another machine, may still use it. While a
+// roster checked holds a public_key that does not parse (Unverifiable), no
+// stray gets a removal command.
 func KeyReport(lines []string, rosters []RosterKeys) []KeyLine {
 	out := []KeyLine{}
+	unverifiable := Unverifiable(rosters)
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -113,7 +136,9 @@ func KeyReport(lines []string, rosters []RosterKeys) []KeyLine {
 		if len(k.HeldBy) == 0 {
 			k.Stray = true
 			// The file's own bytes: the command matches the whole line exactly.
-			if cmd, err := sshexec.ManualKeyRemovalCommand(raw); err != nil {
+			if len(unverifiable) > 0 {
+				k.RemoveCommandWithheld = "a roster target's public_key does not parse (" + strings.Join(unverifiable, ", ") + "), so whether this line is its live key cannot be told; fix that public_key, then report again"
+			} else if cmd, err := sshexec.ManualKeyRemovalCommand(raw); err != nil {
 				k.RemoveCommandWithheld = "its line holds a carriage return (a CRLF file), so no whole-line match can name it exactly; remove it by hand"
 			} else {
 				k.RemoveCommand = cmd
