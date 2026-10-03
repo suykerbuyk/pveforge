@@ -933,8 +933,9 @@ is no VM migration support. The only PVE version exercised is 9.2.11.
   tool installed beside it. The Makefile is the interface: `make build`, `make
   test` (race detector and coverage), `make check` (lint, then test: what CI
   runs), `make lint` (module hygiene, gofmt, go vet), `make modcheck`
-  (offline, read-only), `make vuln` (govulncheck), `make man`, `make
-  install`, `make harness` (§7.7).
+  (offline, read-only), `make deps` (the one online module step, which
+  fills the module cache for the offline checks), `make vuln` (govulncheck),
+  `make man`, `make install`, `make harness` (§7.7).
 - **CI:** `.github/workflows/ci.yml` runs `make check` and `make vuln`
   (operator, 2026-09-23).
 - **Dependencies are pinned and attributed, and a test holds both**
