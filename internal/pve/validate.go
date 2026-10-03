@@ -68,7 +68,9 @@ var ErrScopeTooWide = errors.New("token's grants reach beyond what was requested
 // cluster filesystem) — is ErrUnverifiableRead naming it. Every failure
 // of the membership and existence reads is flattened into
 // ErrUnverifiableRead and never wraps its cause, so no 401/403 there can
-// become a revoking ErrNotAuthorized.
+// become an ErrNotAuthorized, which bootstrap treats as a verdict (revoking
+// after a mint; before one, against a held token PVE still lists, it
+// refuses instead).
 //
 // Known limits:
 //
@@ -101,9 +103,11 @@ var ErrScopeTooWide = errors.New("token's grants reach beyond what was requested
 //     (both user => 'all') and sees its own tree, and the propagate-0 flag
 //     on pool-derived privileges, come from PVE 9.2.11's source; every live
 //     capture so far was made as root (pvesh --userid <token>). A token
-//     refused a role read would read as ErrNotAuthorized, a verdict. So do
-//     the membership reads: the GET /pools?poolid= answer (whose Pool.Audit
-//     check PVE 9.2.11 does not enforce), the /cluster/nextid and GET
+//     refused a role read would read as ErrNotAuthorized: a verdict after a
+//     mint, and before one a refusal when the token is held and still
+//     listed (bootstrap's ErrTokenSecretRejected). So do the membership
+//     reads: the GET /pools?poolid= answer (whose Pool.Audit check PVE
+//     9.2.11 does not enforce), the /cluster/nextid and GET
 //     /storage existence reads, and that the members list can omit an
 //     orphaned guest (its config gone) the permission tree still derives
 //     from the pool.
@@ -368,7 +372,8 @@ func (e *existence) check(ctx context.Context, path string) (bool, error) {
 // membership and existence reads. It never wraps the cause (%w): bootstrap
 // decides whether to revoke with errors.Is over the whole chain
 // (isVerdict), so a wrapped 401/403 would still be ErrNotAuthorized, a
-// revoking verdict, from a read that proves nothing about the grants. An
+// verdict (revoking after a mint, a refusal before one against a held,
+// listed token), from a read that proves nothing about the grants. An
 // HTTP answer is named by its status alone, never its body; any other
 // cause is bounded and quoted onto one line.
 func unverifiable(what string, err error) error {

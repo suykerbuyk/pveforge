@@ -309,7 +309,11 @@ that already holds a different token refuses the import unless you add
 ### 5. Rotating and revoking a token
 
 pveforge has no dedicated rotate command. It revokes a token only on a
-definite verdict about it, and never on a read failure.
+definite verdict about it, and never on a read failure. Before any mint, a
+401 or 403 against a token this roster holds and PVE still lists is a
+refusal, not a verdict: nothing is touched (see section 8). After a mint, a
+fresh token's persistent 401 is still a verdict: that token is removed and
+nothing is persisted.
 
 - **Rotate a token you suspect has leaked.** Revoke it on PVE as root (in your
   terminal, over your own root access):
@@ -429,11 +433,20 @@ manager.
   4. Delete the old SSH key lines (procedure 6).
 - **Lost roster file, passphrase known.** Restore the backup, or rebuild as
   for a lost passphrase.
-  - A restored copy whose token was rotated since holds a stale secret. Its
-    next bootstrap reads that 401 as a verdict. If a token of that name exists
-    on PVE, the run revokes it for every holder, including a newer roster copy
-    that still used it, then mints a replacement.
-  - So restore only the copy you actually use.
+  - A restored copy whose token was rotated since holds a stale secret, and
+    so does any other copy of a roster once one copy rotates its token. Its
+    next bootstrap gets a 401 for a token PVE still lists, and refuses:
+    nothing is touched on PVE or in the roster, so the copies still using
+    the token keep working. This refusal comes after the prompts, since only
+    PVE's answer shows the secret is stale.
+  - Put the current secret into the stale copy with `roster import-token
+    <target> --token-id <id> --grant … --replace`, piping it in. The refusal
+    names the exact line. No pveforge command prints a stored secret, so the
+    current one must come from wherever it was recorded when it was minted
+    or imported: a password manager, or its holder's own copy.
+  - The refusal also names `pveum user token remove`: a last resort, once you
+    know no copy holds the live secret, since it revokes it for every holder.
+  - Restore only the copy you actually use.
   - **Verify:** `pveforge roster validate <path> --require-tls-pins`.
 - **Lost age identity.** You can no longer decrypt `secrets.age`.
   1. Generate a new identity (`age-keygen -o <file>`, mode 0600).

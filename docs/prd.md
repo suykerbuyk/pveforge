@@ -294,6 +294,12 @@ node's host-key fingerprint read on its console:
      `revoked_not_replaced`). Since propagate defaults to 0, a token granted
      `PVEVMAdmin` on `/` with propagate 1 must be re-requested as
      `--grant /:PVEVMAdmin::1` to be kept.
+   - A held token that PVE still lists but rejects (HTTP 401 or 403) is
+     refused, never revoked: a stale roster copy, a token another holder
+     rotated, a disabled owner and a proxy's 403 all look the same from
+     here. The refusal names `roster import-token --replace` for a stale
+     copy, and `pveum user token remove` only as the last resort (operator,
+     2026-10-02).
 4. From that point forward, default to token auth for everything token auth
    can do.
 
@@ -739,8 +745,9 @@ ciphertext, so the file stays reviewable.
   mode (`bootstrap.CheckPinTLS`). Each command applies them again itself. What
   still follows a prompt needs the secret (a wrong passphrase, a held token
   that will not decrypt, a token secret's shape, whether the import repeats
-  the held token), the node's answer, or the run's lock (another run holding
-  it, or a lock directory it cannot write).
+  the held token), the node's answer (among them a held token PVE still
+  lists but rejects, refused rather than revoked, §3.2), or the run's lock
+  (another run holding it, or a lock directory it cannot write).
 - **Provenance is recorded, not inferred.**
   - `[targets.tls] source` records how the TLS pin was first obtained:
     `ssh-verified`, `ssh-stored`, `ssh-tofu` or `expect`.
@@ -1029,10 +1036,12 @@ is no VM migration support. The only PVE version exercised is 9.2.11.
    why.
 10. **Release and versioning policy** (operator, 2026-10-02): tags, a
     `--version` flag, and bundling `THIRD-PARTY-NOTICES.md` with a binary.
-11. **A stale roster backup** (`pveforge-stale-roster-backup-revokes-live-token`):
+11. ~~**A stale roster backup** (`pveforge-stale-roster-backup-revokes-live-token`):
     restoring an old roster and re-running bootstrap revokes the live token,
-    because a persistent 401 counts as a verdict. Whether that rule should be
-    amended needs an operator ruling; the guide documents the hazard.
+    because a persistent 401 counts as a verdict.~~ **Resolved** (operator,
+    2026-10-02): before any mint, a 401 or 403 against a held token PVE
+    still lists is a refusal, not a verdict (§3.2). An absent token is still
+    replaced, and a fresh token's persistent 401 is still a verdict.
 
 ## 7. Implementation architecture (as built)
 
@@ -1224,8 +1233,7 @@ worktree with no commits yet: its branch still points at an older `main`.
   (`pveforge-keyless-target-host-key-pin`): every `--no-ssh-key` run needs
   the fingerprint again, or trusts the host key on first use (only with
   `--ssh-tofu` where the run captures a TLS pin).
-- **Stale roster backups** (§6 item 11) and **destroy after a failed stop**
-  (§6 item 8): awaiting rulings.
+- **Destroy after a failed stop** (§6 item 8): awaiting a ruling.
 - **The nested harness** (`pveforge-nested-pve-test-harness`): the build and
   golden-snapshot/reset code is merged; the first live build, cluster
   formation and golden run are owed, then the Go port of the outer scripts.

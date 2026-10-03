@@ -3,11 +3,13 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
+	"github.com/suykerbuyk/pveforge/internal/tlspin"
 )
 
 // ---- helpers ----
@@ -265,11 +268,12 @@ func TestRun_RL3_LockHeldThroughTheTokenPhase(t *testing.T) {
 // R3, R4, R4b (+R8b, RC1): a skip-check verdict about the held token, which
 // is present on PVE: checked remove, then the roster clear (no token while
 // the add runs), then add; replaced, with the verdict as the reason.
+// ErrNotAuthorized is not a row: against a listed token it is a refusal
+// (SR1, ErrTokenSecretRejected), never a remove.
 func TestRun_R3_VerdictPresent_RemoveClearAdd(t *testing.T) {
 	for name, verdict := range map[string]error{
-		"ErrNoGrants":      fmt.Errorf("%w", ErrNoGrants),
-		"ErrWrongScope":    fmt.Errorf("%w", ErrWrongScope),
-		"ErrNotAuthorized": fmt.Errorf("%w", ErrNotAuthorized),
+		"ErrNoGrants":   fmt.Errorf("%w", ErrNoGrants),
+		"ErrWrongScope": fmt.Errorf("%w", ErrWrongScope),
 		// R3′: a held token wider than requested is a verdict too.
 		"ErrScopeTooWide": fmt.Errorf("%w: at / the token holds VM.Allocate", ErrScopeTooWide),
 	} {
@@ -326,6 +330,162 @@ func TestRun_R3b_VerdictNotPresent_NoRemove(t *testing.T) {
 	}
 	if tokenDuringAdd != nil {
 		t.Fatal("the dead copy was not cleared before the add")
+	}
+}
+
+// ---- SR: a held, listed token PVE rejects is refused, never removed ----
+
+// countMetaWrites counts persistTargetMetaFn calls for the test's duration:
+// an identical rewrite of the roster would pass a bytes check, this does not.
+func countMetaWrites(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	orig := persistTargetMetaFn
+	persistTargetMetaFn = func(o Options) error { n++; return orig(o) }
+	t.Cleanup(func() { persistTargetMetaFn = orig })
+	return &n
+}
+
+// assertSecretRejectedUntouched requires the SR1 refusal: the sentinel, no
+// result, no token command, the roster byte for byte as it was, and no
+// target-meta write.
+func assertSecretRejectedUntouched(t *testing.T, res *Result, err error, session *fakeSession, path string, before []byte, metaWrites int) {
+	t.Helper()
+	if !errors.Is(err, ErrTokenSecretRejected) || res != nil {
+		t.Fatalf("want ErrTokenSecretRejected and no result, got %+v, %v", res, err)
+	}
+	if m := session.mutating(); len(m) != 0 {
+		t.Fatalf("token commands issued against a token PVE still lists: %v", m)
+	}
+	if !session.state().has("root@pam!pveforge") {
+		t.Fatal("the listed token is gone from PVE")
+	}
+	if after := rosterBytes(t, path); !bytes.Equal(before, after) {
+		t.Fatalf("the roster changed:\nbefore %s\nafter %s", before, after)
+	}
+	if metaWrites != 0 {
+		t.Fatalf("target meta was written %d times by a refused run", metaWrites)
+	}
+}
+
+// SR1 (M1, M5′, X4): a re-run (SSH auth stored, a CA-verified target that
+// captures nothing, so nothing before the token phase writes) whose held
+// token PVE lists but answers 401: refused, nothing touched.
+func TestRun_SR1_HeldListedRejectedIsRefused(t *testing.T) {
+	s := seedRoster(t, heldID, "")
+	before := rosterBytes(t, s.path)
+	metaWrites := countMetaWrites(t)
+	session := &fakeSession{pve: newFakePVE("pveforge")}
+	v := &fakeValidator{errs: []error{fmt.Errorf("read effective permissions: %w (PVE answered HTTP 401)", ErrNotAuthorized)}}
+	res, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, v)
+	assertSecretRejectedUntouched(t, res, err, session, s.path, before, *metaWrites)
+	// X4: the refusal still wraps its cause, so an auth failure stays
+	// classifiable as one (Chair ruling).
+	if !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("the refusal no longer wraps ErrNotAuthorized: %v", err)
+	}
+	if v.calls != 1 {
+		t.Fatalf("validator called %d times, want only the skip-check", v.calls)
+	}
+}
+
+// realValidatorAt validates through the REAL validator, against cfg (an
+// httptest server) instead of the address a run asks for.
+type realValidatorAt struct{ cfg APIConfig }
+
+func (r realValidatorAt) ValidateTokenGrants(ctx context.Context, _ APIConfig, want []Grant) error {
+	return NewAPIValidator().ValidateTokenGrants(ctx, r.cfg, want)
+}
+
+func (r realValidatorAt) ServedPin(context.Context, string, int, bool) (tlspin.Pin, *x509.Certificate, error) {
+	return "", nil, errors.New("realValidatorAt: ServedPin is not scripted")
+}
+
+// SR1b (M6): a 403, through the real validator's mapping, is refused the
+// same way, and the refusal carries the status.
+func TestRun_SR1b_Forbidden403IsRefused(t *testing.T) {
+	s := seedRoster(t, heldID, "")
+	before := rosterBytes(t, s.path)
+	metaWrites := countMetaWrites(t)
+	session := &fakeSession{pve: newFakePVE("pveforge")}
+	v := realValidatorAt{d1Server(t, http.StatusForbidden, `{"data":null}`, nil, nil)}
+	res, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, v)
+	assertSecretRejectedUntouched(t, res, err, session, s.path, before, *metaWrites)
+	if !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("the refusal does not carry the status: %v", err)
+	}
+}
+
+// SR1c (M7, M7b): the refusal names the token, the import that repairs a
+// stale copy, and the remove as the LAST resort, after it, for the run's
+// own owner and token, all shell-quoted, on one line.
+func TestRun_SR1c_RefusalNamesRemedyThenLastResort(t *testing.T) {
+	for _, owner := range []string{"root@pam", aliceOwner} {
+		t.Run(owner, func(t *testing.T) {
+			s := seedRoster(t, owner+"!pveforge", "")
+			if owner != "root@pam" {
+				s.opts.TokenOwner = owner
+			}
+			session := ownerSession(nil, newFakePVEFor(owner, "pveforge"))
+			_, err := Run(context.Background(), s.opts, &fakeTransport{session: session}, &fakeValidator{err: fmt.Errorf("%w", ErrNotAuthorized)})
+			if !errors.Is(err, ErrTokenSecretRejected) {
+				t.Fatalf("err = %v", err)
+			}
+			msg := err.Error()
+			if strings.Contains(msg, "\n") {
+				t.Fatalf("the refusal spans lines: %q", msg)
+			}
+			assertOrdered(t, msg,
+				owner+"!pveforge",
+				"left untouched on PVE and in the roster",
+				"another holder rotated the token",
+				"pveforge roster import-token 'qa-pve-01' --token-id '"+owner+"!pveforge' --replace",
+				"--grant flags",
+				"Only as a last resort",
+				"pveum user token remove '"+owner+"' 'pveforge' (this revokes it for every holder)",
+			)
+		})
+	}
+}
+
+// secretValidator accepts only the live secret: what PVE does with a token
+// that has exactly one secret, whoever holds a copy.
+type secretValidator struct{ live string }
+
+func (v secretValidator) ValidateTokenGrants(_ context.Context, cfg APIConfig, _ []Grant) error {
+	if cfg.TokenSecret != v.live {
+		return fmt.Errorf("read effective permissions: %w (PVE answered HTTP 401)", ErrNotAuthorized)
+	}
+	return nil
+}
+
+func (secretValidator) ServedPin(context.Context, string, int, bool) (tlspin.Pin, *x509.Certificate, error) {
+	return "", nil, errors.New("secretValidator: ServedPin is not scripted")
+}
+
+// SR2 (M1, end to end): two copies of one target's roster against one PVE.
+// B is an older copy (its secret stale); A holds the live secret. B's run
+// is refused and leaves PVE's token alone, so A's next run still reuses it.
+func TestRun_SR2_StaleCopyDoesNotRevokeTheLiveCopy(t *testing.T) {
+	pve := newFakePVE("pveforge")
+	v := secretValidator{live: "live-secret"}
+	a := seedRoster(t, heldID, "")
+	if err := roster.WriteTokenAuth(a.path, a.opts.TargetID, roster.TokenWrite{TokenID: heldID, SecretPlaintext: []byte("live-secret")}, a.opts.Passphrase); err != nil {
+		t.Fatal(err)
+	}
+	b := seedRoster(t, heldID, "") // "held-secret": stale
+
+	sb := &fakeSession{pve: pve}
+	if _, err := Run(context.Background(), b.opts, &fakeTransport{session: sb}, v); !errors.Is(err, ErrTokenSecretRejected) {
+		t.Fatalf("the stale copy: %v", err)
+	}
+	if m := sb.mutating(); len(m) != 0 || !pve.has(heldID) {
+		t.Fatalf("the stale copy changed PVE: %v", m)
+	}
+	sa := &fakeSession{pve: pve}
+	res, err := Run(context.Background(), a.opts, &fakeTransport{session: sa}, v)
+	if err != nil || res.TokenOutcome != OutcomeReused || res.Validation != ValidationVerified {
+		t.Fatalf("the live copy after the stale one: %+v, %v", res, err)
 	}
 }
 
@@ -1268,6 +1428,20 @@ func TestIsVerdict_RV1(t *testing.T) {
 	}
 }
 
+// RV3 (M3, M5): only ErrNotAuthorized condemns at most the roster's copy.
+func TestHeldSecretRejected_RV3(t *testing.T) {
+	for e, want := range map[error]bool{
+		ErrNotAuthorized: true, fmt.Errorf("w: %w", ErrNotAuthorized): true,
+		ErrNoGrants: false, ErrWrongScope: false, ErrScopeTooWide: false, fmt.Errorf("w: %w", ErrNoGrants): false,
+		ErrOwnerDisabled: false, ErrTokenSecretRejected: false,
+		errors.New("plain"): false, context.DeadlineExceeded: false,
+	} {
+		if got := heldSecretRejected(e); got != want {
+			t.Errorf("heldSecretRejected(%v) = %v, want %v", e, got, want)
+		}
+	}
+}
+
 func TestPostMintRetryable_RV2(t *testing.T) {
 	for e, want := range map[error]bool{
 		ErrNotAuthorized: true, fmt.Errorf("w: %w", ErrNotAuthorized): true,
@@ -1283,9 +1457,10 @@ func TestPostMintRetryable_RV2(t *testing.T) {
 
 // MR1's guard: the verdict sentinels are referenced in this package's
 // non-test code only where they are declared (deps.go's aliases) and in the
-// two classification slices; the slices only in their declarations and in
-// isVerdict/postMintRetryable. A classification that bypasses the tables
-// (an inline errors.Is against a sentinel) turns this red.
+// classification slices; the slices only in their declarations and in
+// isVerdict, postMintRetryable and heldSecretRejected. A classification
+// that bypasses the tables (any reference to a sentinel: an inline
+// errors.Is, a selector, .Error()) turns this red.
 func TestVerdictSentinelsOnlyReachedThroughTheTables(t *testing.T) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
@@ -1293,8 +1468,8 @@ func TestVerdictSentinelsOnlyReachedThroughTheTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinels := map[string]bool{"ErrNoGrants": true, "ErrWrongScope": true, "ErrNotAuthorized": true, "ErrScopeTooWide": true}
-	tables := map[string]bool{"verdictSentinels": true, "postMintRetrySentinels": true}
-	allowedFuncs := map[string]bool{"isVerdict": true, "postMintRetryable": true}
+	tables := map[string]bool{"verdictSentinels": true, "postMintRetrySentinels": true, "heldSecretRejectedSentinels": true}
+	allowedFuncs := map[string]bool{"isVerdict": true, "postMintRetryable": true, "heldSecretRejected": true}
 	parsed := 0
 	for _, e := range entries {
 		name := e.Name()
