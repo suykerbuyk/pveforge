@@ -570,7 +570,9 @@ nested password means re-provisioning the nested nodes with a new one.
 
 ## Development
 
-`make help` lists the targets. `make check` runs everything CI runs: offline
+`make help` lists the targets. `make deps` fetches, online, every module the
+checks need; run it once in a fresh clone (or on a fresh module cache), since
+the checks themselves never fetch. `make check` runs everything CI runs: offline
 module hygiene, gofmt, vet, and the tests under the race detector.
 `make vuln` runs govulncheck. Changes are expected to be proven by mutation:
 break the behaviour a test claims to guard, and watch that test fail by name.

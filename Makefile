@@ -21,7 +21,7 @@ GO_DIRS := cmd internal
 # OFFLINE runs a go command read-only and without a module proxy: it can
 # neither fetch a module nor edit go.mod/go.sum, so an import that would
 # need a new module fails instead of being resolved silently, and a cold
-# module cache fails loudly ("run 'go mod download' once, online").
+# module cache fails loudly ("run 'make deps' once, online").
 # GOWORK=off: a developer's go.work must not redirect these checks — it
 # would resolve the fork to an unpinned local directory. OFFLINE also
 # overrides any GOFLAGS the developer has set, for these commands only.
@@ -98,10 +98,42 @@ lint: modcheck ## Check module hygiene (modcheck), formatting (gofmt) and static
 # TestModuleGraph_ForkPinnedAndUpstreamAbsent, so `make test` runs them.
 .PHONY: modcheck
 modcheck: ## Module hygiene, offline and read-only: go.mod/go.sum tidy, go.sum matches the module cache, and everything builds without fetching
-	@echo "modcheck: go mod download (cache check)"; $(OFFLINE) go mod download || { echo "modcheck: the module cache is missing modules this module needs; run 'go mod download' once, online"; exit 1; }
-	@echo "modcheck: go mod tidy -diff"; $(OFFLINE) go mod tidy -diff || { echo "modcheck: go.mod/go.sum are not tidy (the diff above; run 'go mod tidy' and commit it)"; exit 1; }
+	@echo "modcheck: go mod download (cache check)"; $(OFFLINE) go mod download || { echo "modcheck: the module cache is missing modules this module needs; run 'make deps' once, online"; exit 1; }
+	@echo "modcheck: go mod tidy -diff"; out="$$($(OFFLINE) go mod tidy -diff 2>&1)"; rc=$$?; \
+	[ -z "$$out" ] || printf '%s\n' "$$out"; \
+	if [ $$rc -ne 0 ]; then \
+		if printf '%s\n' "$$out" | grep -q 'module lookup disabled by GOPROXY=off'; then \
+			echo "modcheck: go mod tidy needs a module that is not in the module cache (above): run 'make deps' once, online; if that prints a diff, go.mod/go.sum are not tidy: run 'go mod tidy' and commit it"; \
+		else \
+			echo "modcheck: go.mod/go.sum are not tidy (the diff above; run 'go mod tidy' and commit it)"; \
+		fi; \
+		exit 1; \
+	fi
 	@echo "modcheck: go mod verify"; $(OFFLINE) go mod verify
 	@echo "modcheck: offline build"; $(OFFLINE) go build ./...
+
+# deps is the one networked module step: it fills the module cache with
+# every module the offline checks load, so modcheck, vet and the tests can
+# then run with GOPROXY=off. No one go command fetches that set, so deps
+# runs, online, each module-loading command those checks run offline:
+#   - `go mod download` fetches every module go.mod requires (modcheck's
+#     cache check, go mod verify, the builds);
+#   - `go mod tidy -diff` also loads the tests of every dependency
+#     package, under every build tag (go-diskfs's iso9660 tests,
+#     go-proxmox's, age's...), so it fetches the modules only those tests
+#     import, which `go mod download` does not (modcheck's tidy check);
+#   - `go list -m all` fetches the metadata of every module in the graph,
+#     which neither of the others does (sourceguard's module-graph test).
+# None of them writes go.mod or go.sum. `go mod download all` is no
+# substitute: it fetches the whole module graph and adds checksums for all
+# of it to go.sum.
+DEPS_ENV := GOFLAGS=-mod=readonly GOWORK=off
+
+.PHONY: deps
+deps: ## Fetch, online, every module the offline checks need (once per fresh module cache; CI's only networked module step)
+	@echo "deps: go mod download (online)"; $(DEPS_ENV) go mod download || { echo "deps: go mod download failed (the error above: a network or proxy error, or a module whose checksum does not match go.sum)"; exit 1; }
+	@echo "deps: go mod tidy -diff (online)"; $(DEPS_ENV) go mod tidy -diff || { echo "deps: failed (a network error above, or the diff above: go.mod/go.sum are not tidy; run 'go mod tidy' and commit it)"; exit 1; }
+	@echo "deps: go list -m all (online)"; $(DEPS_ENV) go list -m all >/dev/null
 
 .PHONY: vuln
 vuln: ## Scan for known vulnerabilities with govulncheck (needs its database: online, or VULNDB=file:///mirror) — never part of lint/test
