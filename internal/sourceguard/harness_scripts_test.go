@@ -75,6 +75,125 @@ func TestHarnessScripts_ParseAndHideNoFailure(t *testing.T) {
 	}
 }
 
+// The harness README tells the operator and the implementors to run its
+// scripts as commands, most through `unlock.sh run -- <script>`, which execs
+// the script directly: one committed without its executable bit fails there
+// with "permission denied" (prepare-iso.sh did, on its first live run). So
+// every script the README runs is mode 100755 in the git index, which is what
+// a clone checks out; a chmod on one workstation's disk proves nothing.
+
+// harnessReadmeCommand is a script path in a command position of a code span:
+// a span's first word when the span has arguments, or the word after "--".
+var harnessReadmeCommand = regexp.MustCompile("`([^`]*)`")
+
+// harnessReadmeScripts is every script hack/harness/README.md runs as a
+// command, as a path relative to the repository root. A bare name (unlock.sh,
+// build.sh) is the one script of that name under hack/harness.
+func harnessReadmeScripts(t *testing.T) []string {
+	t.Helper()
+	readme, err := os.ReadFile(filepath.Join(harnessDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byBase := map[string][]string{}
+	err = filepath.WalkDir(harnessDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".sh") {
+			rel := filepath.ToSlash(strings.TrimPrefix(p, "../../"))
+			byBase[filepath.Base(p)] = append(byBase[filepath.Base(p)], rel)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range harnessReadmeCommand.FindAllStringSubmatch(string(readme), -1) {
+		words := strings.Fields(m[1])
+		var cmds []string
+		if len(words) > 1 {
+			cmds = append(cmds, words[0])
+		}
+		for i, w := range words[:max(len(words)-1, 0)] {
+			if w == "--" {
+				cmds = append(cmds, words[i+1])
+			}
+		}
+		for _, c := range cmds {
+			if !strings.HasSuffix(c, ".sh") {
+				continue
+			}
+			path := c
+			if !strings.Contains(c, "/") {
+				if len(byBase[c]) != 1 {
+					t.Fatalf("the harness README runs %s, which names %d scripts under hack/harness: %q", c, len(byBase[c]), byBase[c])
+				}
+				path = byBase[c][0]
+			}
+			if !seen[path] {
+				seen[path] = true
+				out = append(out, path)
+			}
+		}
+	}
+	return out
+}
+
+// gitIndexModes is `git ls-files -s`'s mode for each path, read in the
+// repository at root; ok is false when root is not the top of a git work
+// tree (an exported tree, as a gate runs on), whose files then carry the
+// modes the index gave them (git archive keeps the executable bit).
+func gitIndexModes(t *testing.T, root string, paths []string) (modes map[string]string, ok bool) {
+	t.Helper()
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := exec.Command("git", "-C", abs, "rev-parse", "--show-toplevel").Output()
+	if err != nil || filepath.Clean(strings.TrimSpace(string(top))) != abs {
+		return nil, false
+	}
+	out, err := exec.Command("git", append([]string{"-C", abs, "ls-files", "-s", "--"}, paths...)...).Output()
+	if err != nil {
+		t.Fatalf("git ls-files -s: %v", err)
+	}
+	modes = map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		// <mode> <object> <stage>\t<path>
+		meta, path, found := strings.Cut(line, "\t")
+		if f := strings.Fields(meta); found && len(f) == 3 {
+			modes[path] = f[0]
+		}
+	}
+	return modes, true
+}
+
+func TestHarnessReadme_ScriptsItRunsAreExecutable(t *testing.T) {
+	scripts := harnessReadmeScripts(t)
+	// Anti-vacuity: the README's steps run eight scripts (unlock.sh, the
+	// probe, prepare-iso, build, cluster, nested, golden and reset); a
+	// parser that found fewer would check too little.
+	if len(scripts) != 8 {
+		t.Fatalf("found %d scripts the harness README runs, want 8: %q", len(scripts), scripts)
+	}
+	modes, inGit := gitIndexModes(t, "../..", scripts)
+	for _, s := range scripts {
+		if inGit {
+			if modes[s] != "100755" {
+				t.Errorf("%s: mode %q in the git index, want 100755: the harness README runs it as a command (git update-index --chmod=+x %s)", s, modes[s], s)
+			}
+			continue
+		}
+		fi, err := os.Stat(filepath.Join("../..", s))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o111 != 0o111 {
+			t.Errorf("%s: mode %v, want executable: the harness README runs it as a command", s, fi.Mode().Perm())
+		}
+	}
+}
+
 // harnessCase is one offline run of a driver script that sources lib.sh.
 type harnessCase struct {
 	name string
