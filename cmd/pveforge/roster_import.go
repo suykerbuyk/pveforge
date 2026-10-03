@@ -78,27 +78,14 @@ An imported target holds a token but no SSH key, so a later plain
 			if importStdinIsTerminal() {
 				return fmt.Errorf("import-token reads the token secret from stdin, which is a terminal: pipe the secret in instead")
 			}
-			// The passphrase before the secret: with stdin piped it can
-			// only come from the environment, and a missing one must not
-			// cost the piped secret.
-			rawPassphrase, err := roster.ResolvePassphraseContext(cmd.Context())
-			if err != nil {
-				return err
-			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
-			if err != nil {
-				return err
-			}
-			// And proven before the secret is read, for the same reason: a
-			// mistyped passphrase must not cost the piped secret either.
-			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
 			if err != nil {
 				return err
 			}
 			iopts := bootstrap.ImportOptions{
 				TargetID: args[0], Host: host, Node: node, APIPort: apiPort, InsecureTLS: insecureTLS,
 				TokenID: tokenID, Grants: grants, Replace: replace,
-				RosterPath: rosterPath, Passphrase: passphrase,
+				RosterPath: rosterPath,
 			}
 			if cmd.Flags().Changed("expect") {
 				// A value that was GIVEN must be one: an empty --expect is
@@ -109,11 +96,27 @@ An imported target holds a token but no SSH key, so a later plain
 				}
 				iopts.Expect = p
 			}
-			// The TLS rule before the secret is read: an unpinned insecure
-			// target must not cost the piped secret.
-			if err := bootstrap.CheckImportTLS(iopts); err != nil {
+			// Every refusal that needs no secret before the passphrase and
+			// the secret: they read only the roster's unencrypted fields, and
+			// a new target with no host, an unpinned insecure target or a
+			// roster that cannot take the write must cost neither.
+			if err := bootstrap.CheckImportBeforePrompt(iopts); err != nil {
 				return err
 			}
+			// The passphrase before the secret: with stdin piped it can
+			// only come from the environment, and a missing one must not
+			// cost the piped secret.
+			rawPassphrase, err := promptRosterPassphrase(cmd.Context())
+			if err != nil {
+				return err
+			}
+			// And proven before the secret is read, for the same reason: a
+			// mistyped passphrase must not cost the piped secret either.
+			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
+			if err != nil {
+				return err
+			}
+			iopts.Passphrase = passphrase
 			secret, err := readImportedSecret(importStdin())
 			if err != nil {
 				return err

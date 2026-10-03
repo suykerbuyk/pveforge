@@ -82,7 +82,7 @@ that step has been run and has passed.
    is refused (fail-closed), and the error names the type it got.
 2. **Create the roster if it does not exist yet.** Bootstrap never creates
    one: it refuses a missing roster ("create it first with `pveforge roster
-   init`").
+   init`"), before any prompt.
 
    ```
    pveforge roster init ./pveforge.toml
@@ -114,9 +114,15 @@ that step has been run and has passed.
      later bootstrap of it needs `--host-key-fingerprint` again (or
      `--ssh-tofu`).
    - The B′ refusal ("a TLS pin captured over a password SSH session needs
-     --host-key-fingerprint …") comes after both the passphrase prompt and the
-     password prompt. Answering them does no harm: nothing is dialed and the
-     roster is not written before the refusal.
+     --host-key-fingerprint …") comes before any prompt, as do the other
+     refusals that need no secret (the `--ssh-tofu` conflicts, the
+     `--reprovisioned` rules, a missing `--host`, `--node` or `--token-id`, a
+     login that is not `@pam`, a held token another principal owns, a
+     `--no-ssh-key` that does not match the roster's SSH state, a
+     `--host-key-fingerprint` that is not the stored pin, a roster that is
+     missing or cannot take the write). They read only the roster's
+     unencrypted fields, so a run they refuse asks for neither the
+     passphrase nor the password.
    - A CA-verified target (no `--insecure-tls`) is never pinned implicitly. Its
      chain is its identity.
 4. **Verify.**
@@ -175,8 +181,9 @@ none"). `roster pin-tls` pins it without touching its token.
   address must serve the same key. It writes with source `ssh-stored` and
   takes the target's bootstrap lock. The passphrase is needed even for
   `--print`, which decrypts the SSH key. `--expect` is refused here ("drop
-  --expect"). Name `--roster` explicitly, so you never pin the default
-  `./pveforge.toml` by accident.
+  --expect"), before the passphrase prompt, as is every flag that does not
+  fit the target's mode. Name `--roster` explicitly, so you never pin the
+  default `./pveforge.toml` by accident.
 - **A keyless target** (no SSH key in the roster) needs `--expect` with a pin
   you verified by other means:
 
@@ -255,8 +262,7 @@ it runs as a plain bootstrap, reports `reprovisioned` false, and says "the
 stored pins already match this node" on stderr. So after a partial failure,
 rerun the same line. `--reprovisioned` refuses `--ssh-tofu`, requires
 `--host-key-fingerprint`, and refuses a target with no stored pin ("nothing to
-replace"). These refusals come after the roster passphrase prompt and before
-the PVE password prompt.
+replace"). These refusals come before any prompt.
 
 A disposable roster (a harness nested target) can instead be moved aside and
 bootstrapped afresh. `hack/harness/README.md` ("After `build.sh --repin`, or
@@ -285,7 +291,12 @@ that already holds a different token refuses the import unless you add
 - An `insecure_tls` target (by the flag, or by the roster's own setting)
   needs a pin: the roster's, or `--expect`. `--expect` also pins a new
   CA-verified target (source `expect`), whose chain must verify as well. Without one, the import is refused
-  before the secret is read ("nothing was read, validated or written").
+  before the passphrase is resolved or the secret read ("nothing was read,
+  validated or written"). So is an `--expect` that differs from the roster's
+  pin.
+- A new target with no `--host` or `--node`, a missing roster, and a roster
+  whose directory cannot take the write are refused at the same point,
+  before the passphrase or the secret.
 - The validation connects through the pin, so a wrong key fails in the
   handshake before the token is sent. The pin is written (source `expect`)
   only after the token validated, and before the token itself.
@@ -538,7 +549,7 @@ Every refusal below writes nothing unless it says otherwise. The central rule:
 | `could not capture the node's TLS certificate over SSH …` | openssl is missing on the node, or pveproxy is not on `127.0.0.1:8006`. | Pass `--capture-port` if pveproxy listens elsewhere on the node, and repeat it on every later capture (it is not stored). | |
 | `a proxy is configured for this address (HTTPS_PROXY/NO_PROXY); the served-pin probe dials directly …` | The network cross-check cannot see what REST will reach through a proxy. | Set `NO_PROXY` for the host. | |
 | `the roster's TLS pin is not the one this write expected (another pveforge wrote it since it was read)` (and its SSH twin) | A compare-and-set lost a race. Nothing was written. | Rerun. | |
-| `--reprovisioned needs --host-key-fingerprint …`, `--reprovisioned: the roster holds no SSH or TLS pin …`, `--ssh-tofu does not apply with --reprovisioned …` | The reprovision rules. Refused before the PVE password prompt. | Give the console value. For a target never pinned, drop `--reprovisioned`. | |
+| `--reprovisioned needs --host-key-fingerprint …`, `--reprovisioned: the roster holds no SSH or TLS pin …`, `--ssh-tofu does not apply with --reprovisioned …` | The reprovision rules. Refused before any prompt. | Give the console value. For a target never pinned, drop `--reprovisioned`. | |
 | `the roster's secrets do not all open with this passphrase: …` (rekey) | Some secrets open with the passphrase given and some do not: the roster is already split, or damaged. Nothing was written. | Find which passphrase opens the named secrets. Re-bootstrap or re-import the targets named, then rekey. | Rekey only part of the roster by hand-editing. |
 | `the two passphrase entries differ; nothing was changed` | The two entries of a passphrase being set (a new roster's first, or rekey's new one) differ. | Run the command again. | |
 | `the new roster passphrase is read from a terminal only …` | `roster rekey` was run without a terminal: in a script, a pipe, an agent's session or Claude Code's `!` prefix. | Run it in your own terminal. | |

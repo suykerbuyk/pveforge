@@ -177,8 +177,14 @@ func TestBootstrap_ConfirmsAFirstPassphrase(t *testing.T) {
 		gotPath = path
 		return "", roster.ErrPassphraseMismatch
 	}
+	// A roster that exists and holds no secret yet, as `roster init` leaves
+	// it; and a first bootstrap names its host and node. Without either it
+	// is refused before any prompt (bootstrap.CheckBeforePrompt).
 	path := filepath.Join(t.TempDir(), "r.toml")
-	code, _, stderr := runRootArgs("bootstrap", "t", "--roster", path, "--grant", "/:PVEAuditor")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runRootArgs("bootstrap", "t", "--roster", path, "--host", "h", "--node", "n", "--grant", "/:PVEAuditor")
 	if code == 0 || !strings.Contains(stderr, "differ") || gotPath != path {
 		t.Errorf("exit %d, stderr %q, resolver saw %q; want the mismatch refused for %s", code, stderr, gotPath, path)
 	}

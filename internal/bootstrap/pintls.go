@@ -115,6 +115,49 @@ type PinTLSResult struct {
 	Written bool
 }
 
+// CheckPinTLS is every refusal PinTLS makes that needs no secret, no lock
+// and no connection: the roster must load and hold the target, and the
+// flags must fit its mode (checkPinTLSMode). The CLI calls it before it asks
+// for the passphrase; PinTLS applies the same rules again under its lock.
+func CheckPinTLS(opts PinTLSOptions) error {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return fmt.Errorf("pin-tls %s: %w", opts.TargetID, err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil {
+		return fmt.Errorf("pin-tls %s: no such target in roster %s", opts.TargetID, opts.RosterPath)
+	}
+	return checkPinTLSMode(opts, tg)
+}
+
+// checkPinTLSMode is which flags fit the target's mode, from its
+// unencrypted fields: a CA-verified target is pinned only with --expect and
+// never repinned; a target with SSH auth is captured over its pinned
+// session, never from --expect; one without SSH auth needs --expect and
+// cannot --repin.
+func checkPinTLSMode(opts PinTLSOptions, tg *roster.Target) error {
+	keyful := tg.SSH != nil && tg.SSH.HostKeyFingerprint != ""
+	switch {
+	case !tg.InsecureTLS && opts.Expect == "":
+		// Ruling 5 and D4: a CA-verified target's chain is its identity, and
+		// pinning it as well is the operator's explicit choice, never a
+		// capture.
+		return fmt.Errorf("pin-tls %s: the target verifies its certificate against the system CAs (insecure_tls is false), so it is pinned only explicitly: pass the pin you verified with --expect", opts.TargetID)
+	case !tg.InsecureTLS && opts.Repin:
+		return fmt.Errorf("pin-tls %s: --repin needs an insecure_tls target with SSH auth to vouch for the new key", opts.TargetID)
+	case !tg.InsecureTLS:
+		return nil
+	case keyful && opts.Expect != "":
+		return fmt.Errorf("pin-tls %s: the target has SSH auth, so its pin is captured over the pinned SSH session; drop --expect", opts.TargetID)
+	case !keyful && opts.Repin:
+		return fmt.Errorf("pin-tls %s: --repin needs SSH auth to vouch for the new key, and the target has none", opts.TargetID)
+	case !keyful && opts.Expect == "":
+		return fmt.Errorf("pin-tls %s: the target has no SSH auth to capture its key over; verify its pin by other means and pass it with --expect", opts.TargetID)
+	}
+	return nil
+}
+
 // PinTLS pins a target's TLS key without touching its token: the
 // migration path for a target bootstrapped before TLS pins existed.
 //
@@ -162,24 +205,16 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 	}
 	keyful := tg.SSH != nil && tg.SSH.HostKeyFingerprint != ""
 
+	if err := checkPinTLSMode(opts, tg); err != nil {
+		return nil, err
+	}
 	switch {
-	case !tg.InsecureTLS && opts.Expect == "":
-		// Ruling 5 and D4: a CA-verified target's chain is its identity, and
-		// pinning it as well is the operator's explicit choice, never a
-		// capture.
-		return nil, fmt.Errorf("pin-tls %s: the target verifies its certificate against the system CAs (insecure_tls is false), so it is pinned only explicitly: pass the pin you verified with --expect", opts.TargetID)
-	case !tg.InsecureTLS && opts.Repin:
-		return nil, fmt.Errorf("pin-tls %s: --repin needs an insecure_tls target with SSH auth to vouch for the new key", opts.TargetID)
 	case !tg.InsecureTLS:
 		pin, err := checkServed(ctx, api, tg.Host, apiPort, opts.Expect, true)
 		if err != nil {
 			return nil, fmt.Errorf("pin-tls %s: --expect: %w", opts.TargetID, err)
 		}
 		res.Pin, res.Source = pin, tlspin.SourceExpect
-	case keyful && opts.Expect != "":
-		return nil, fmt.Errorf("pin-tls %s: the target has SSH auth, so its pin is captured over the pinned SSH session; drop --expect", opts.TargetID)
-	case !keyful && opts.Repin:
-		return nil, fmt.Errorf("pin-tls %s: --repin needs SSH auth to vouch for the new key, and the target has none", opts.TargetID)
 	case keyful:
 		keyPEM, err := opts.Passphrase.Decrypt(tg.SSH.PrivateKeyEnc)
 		if err != nil {
@@ -196,14 +231,13 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 			return nil, fmt.Errorf("pin-tls %s: %w", opts.TargetID, err)
 		}
 		res.Pin, res.Source = pin, tlspin.SourceSSHStored
-	case opts.Expect != "":
+	default:
+		// checkPinTLSMode left only --expect for a target without SSH auth.
 		pin, err := checkServed(ctx, api, tg.Host, apiPort, opts.Expect, false)
 		if err != nil {
 			return nil, fmt.Errorf("pin-tls %s: --expect: %w", opts.TargetID, err)
 		}
 		res.Pin, res.Source = pin, tlspin.SourceExpect
-	default:
-		return nil, fmt.Errorf("pin-tls %s: the target has no SSH auth to capture its key over; verify its pin by other means and pass it with --expect", opts.TargetID)
 	}
 
 	if res.Previous == res.Pin {

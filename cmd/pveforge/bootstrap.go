@@ -85,6 +85,19 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Every refusal that needs no secret, before ANY prompt: the
+			// roster fields they read (its host, node, insecure_tls, pins,
+			// SSH state and held token id) are unencrypted, so a run that
+			// will be refused must not ask for the passphrase, let alone
+			// the PVE password.
+			if err := bootstrap.CheckBeforePrompt(bootstrap.Options{
+				TargetID: args[0], Host: host, Node: node, InsecureTLS: insecureTLS,
+				PVEUsername: pveUser, TokenOwner: tokenOwner, TokenID: tokenID,
+				NoSSHKey: noSSHKey, SSHTOFU: sshTOFU,
+				Reprovisioned: reprovisioned, HostKeyFingerprint: hostKeyFP, RosterPath: rosterPath,
+			}); err != nil {
+				return err
+			}
 			// A roster with no secret yet takes its passphrase from this run:
 			// asked for twice when it is prompted for.
 			rawPassphrase, err := bootstrapPassphrase(cmd.Context(), rosterPath)
@@ -97,15 +110,7 @@ func newBootstrapCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// --reprovisioned's refusals before any password prompt: a run
-			// that cannot reprovision must not ask for a secret first.
-			if err := bootstrap.CheckReprovision(bootstrap.Options{
-				TargetID: args[0], RosterPath: rosterPath, Reprovisioned: reprovisioned,
-				SSHTOFU: sshTOFU, HostKeyFingerprint: hostKeyFP,
-			}); err != nil {
-				return fmt.Errorf("bootstrap %s: %w", args[0], err)
-			}
-			pvePassword, err := resolvePVEPassword(cmd.Context())
+			pvePassword, err := promptPVEPassword(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -183,8 +188,18 @@ func proveRosterPassphrase(path, targetID, pass string) (roster.Passphrase, erro
 
 // bootstrapPassphrase resolves the roster passphrase for bootstrap, which
 // may seal the roster's first secret and so set its passphrase: the
-// confirming prompt. A seam only so a test can pin which resolver it is.
+// confirming prompt. A seam so a test can pin which resolver it is, and
+// replace it with a recorder to prove which refusals come before it.
 var bootstrapPassphrase = roster.ResolvePassphraseForWriteContext
+
+// The other secret prompts, as seams: a test replaces them with recorders to
+// prove which refusals come before any prompt. promptRosterPassphrase is
+// import-token's and pin-tls's (neither can set a passphrase);
+// promptPVEPassword is bootstrap's.
+var (
+	promptRosterPassphrase = roster.ResolvePassphraseContext
+	promptPVEPassword      = resolvePVEPassword
+)
 
 // resolvePVEPassword reads the PAM/realm login password used once, for
 // the pubkey-install step: environment variable first, else an
