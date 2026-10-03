@@ -1,10 +1,9 @@
 package pve
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -352,55 +351,54 @@ func TestRollbackWitness_W11_OneSharedDeadline(t *testing.T) {
 	}
 }
 
-// cancelAfterPoll is a transport that answers exec-status polls in full,
-// then — before handing the answer back — ends the caller's context and
-// waits until past the witness deadline. WaitForAgentExec then meets its
-// final select with its context AND its deadline both ready, where Go
-// picks at random: the case the caller's-stop-first rule exists for.
-type cancelAfterPoll struct {
-	next   http.RoundTripper
-	cancel func()
-	after  time.Duration
-}
-
-func (c *cancelAfterPoll) RoundTrip(r *http.Request) (*http.Response, error) {
-	resp, err := c.next.RoundTrip(r)
-	if err != nil || !strings.HasSuffix(r.URL.Path, "/agent/exec-status") {
-		return resp, err
-	}
-	body, rerr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if rerr != nil {
-		return nil, rerr
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	c.cancel()
-	time.Sleep(c.after)
-	return resp, nil
-}
-
 // W12 (R1): a caller's stop that lands just as the deadline does is still
-// the caller's stop — never WitnessNeverResponded. Run 40 times: the race
-// it guards is a 50/50 pick, so a missing check survives 2^-40 of runs.
-// (About 6s: each run waits out the 150ms sleep.)
+// the caller's stop, never WitnessNeverResponded. What it guards is
+// RollbackWitness's own order: it checks the caller's stop BEFORE it
+// classifies the exec wait's error. WaitForAgentExec's final select picks
+// at random when its ctx and its deadline are both ready, so either error
+// can come back with the caller's context already ended; both rows hand
+// RollbackWitness one of them through the waitForAgentExec seam. Without
+// the check, both rows read as WitnessNeverResponded, since the wait's
+// context inherits the caller's stop. Which way that select picks is
+// WaitForAgentExec's own contract, pinned without wall time by
+// TestWaitForAgentExec_ContextCancellationIsNotADeadline and
+// TestWaitForAgentExec_CancellationWinsOverAnAlreadyElapsedDeadline.
+//
+// No wall-clock deadline is in play: the stub returns at once, so the
+// minute-long witness timeout is never waited on. (The test it replaces
+// raced a 100ms deadline against the dispatch round trip, and failed
+// under load: pveforge-flaky-rollback-witness-w12.)
 func TestRollbackWitness_W12_CancelAtTheDeadline(t *testing.T) {
-	cause := errors.New("interrupted at the deadline")
-	for i := 0; i < 40; i++ {
-		f := &witnessFake{dispatch: []string{"pid"}, status: []string{`{"exited":0}`}}
-		c := newWitness(t, f)
-		ctx, cancel := context.WithCancelCause(context.Background())
-		next := c.httpClient.Transport
-		if next == nil {
-			next = http.DefaultTransport // netguard's loopback-only clone, under this package's TestMain
-		}
-		// The dispatch must beat the deadline (100ms, generous under -race),
-		// and the transport then sleeps past it (150ms) after cancelling.
-		c.httpClient.Transport = &cancelAfterPoll{next: next, cancel: func() { cancel(cause) }, after: 150 * time.Millisecond}
-		_, err := c.RollbackWitness(ctx, "qa-pve-01", 100, []string{"/bin/true"}, "", 100*time.Millisecond)
-		cancel(nil)
-		if err == nil || IsRollbackNotWitnessed(err) || !errors.Is(err, context.Canceled) {
-			t.Fatalf("run %d: err = %v, want the caller's stop, not a witness reason", i, err)
-		}
+	for name, waitErr := range map[string]func(ctx context.Context) error{
+		"the deadline won the select": func(context.Context) error {
+			return &AgentExecTimeoutError{VMID: 100, PID: 7, Timeout: time.Minute}
+		},
+		"the caller's stop won the select": func(ctx context.Context) error {
+			return fmt.Errorf("wait for agent exec on vm 100 pid 7: %w", ctx.Err())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cause := errors.New("interrupted at the deadline")
+			f := &witnessFake{dispatch: []string{"pid"}}
+			c := newWitness(t, f)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			orig := waitForAgentExec
+			t.Cleanup(func() { waitForAgentExec = orig })
+			calls := 0
+			waitForAgentExec = func(_ *Client, wctx context.Context, _ string, _, _ int, _, _ time.Duration) (*AgentExecStatus, error) {
+				calls++
+				cancel(cause)
+				return nil, waitErr(wctx)
+			}
+			_, err := c.RollbackWitness(ctx, "qa-pve-01", 100, []string{"/bin/true"}, "", time.Minute)
+			if calls != 1 {
+				t.Fatalf("the exec wait was called %d times, want once: RollbackWitness did not wait through waitForAgentExec", calls)
+			}
+			if err == nil || IsRollbackNotWitnessed(err) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want the caller's stop, not a witness reason", err)
+			}
+		})
 	}
 }
 

@@ -18,6 +18,13 @@ import (
 // that hangs.
 const witnessWaitGrace = 250 * time.Millisecond
 
+// waitForAgentExec is the exec wait RollbackWitness calls. A var, not a
+// direct call, for the same test-override reason as
+// defaultAgentExecPollInterval: a test can hand RollbackWitness a wait
+// that ends exactly as it needs, with no wall-clock deadline to race.
+// Production code never changes it.
+var waitForAgentExec = (*Client).WaitForAgentExec
+
 // ErrRollbackNotWitnessed is what every RollbackWitnessError matches: the
 // guest was not shown to be running the rolled-back state. It is NOT a
 // verdict that the rollback failed — only that it was not proven — and a
@@ -214,7 +221,7 @@ func (c *Client) RollbackWitness(ctx context.Context, node string, vmid int, com
 
 	wctx, wcancel := context.WithDeadline(ctx, deadline.Add(witnessWaitGrace))
 	defer wcancel()
-	status, err := c.WaitForAgentExec(wctx, node, vmid, pid, 0, time.Until(deadline))
+	status, err := waitForAgentExec(c, wctx, node, vmid, pid, 0, time.Until(deadline))
 	if err != nil {
 		// The caller's stop first: WaitForAgentExec's final select picks
 		// at random when its ctx and its deadline are both ready.
