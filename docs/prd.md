@@ -722,6 +722,25 @@ ciphertext, so the file stays reviewable.
   ssh-tofu`; a `--no-ssh-key` run stores no SSH pin at all. Every other
   command's `--no-ssh-key` dial follows the same general rule (§3.1): the
   stored pin, else the fingerprint, else trust on first use.
+- **A refusal that needs no secret comes before any prompt.** The roster
+  fields these refusals read (host, node, `insecure_tls`, the SSH and TLS
+  pins, the SSH state and the held token's id) are unencrypted, so a run that
+  will be refused never asks for the passphrase or the PVE password, nor reads
+  import-token's secret. Bootstrap checks the token owner's shape, a missing
+  host, node or token id, a login that is not `@pam`, B′, the `--ssh-tofu`
+  conflicts, the `--reprovisioned` rules, a roster that does not load, the
+  held token's owner, the SSH state against `--no-ssh-key`, a
+  `--host-key-fingerprint` that is not the stored pin and a roster that would
+  refuse the write (for a target it holds, the token's; for a new one, any
+  file in its directory) (`bootstrap.CheckBeforePrompt`); `roster
+  import-token` a roster that does not load, a new target with no host or
+  node, its TLS rule and the same write (`bootstrap.CheckImportBeforePrompt`);
+  `roster pin-tls` a target the roster lacks and the flags that do not fit its
+  mode (`bootstrap.CheckPinTLS`). Each command applies them again itself. What
+  still follows a prompt needs the secret (a wrong passphrase, a held token
+  that will not decrypt, a token secret's shape, whether the import repeats
+  the held token), the node's answer, or the run's lock (another run holding
+  it, or a lock directory it cannot write).
 - **Provenance is recorded, not inferred.**
   - `[targets.tls] source` records how the TLS pin was first obtained:
     `ssh-verified`, `ssh-stored`, `ssh-tofu` or `expect`.
@@ -1194,12 +1213,6 @@ As of the status line at the top. Work listed here is not merged; this
 document describes `main` only. Where work exists, it is staged in a
 worktree with no commits yet: its branch still points at an older `main`.
 
-- **Refusals after a prompt** (`pveforge-refuse-before-prompting`; staged in
-  the `refuse-early` worktree): bootstrap's B′, `--ssh-tofu` and reprovision
-  refusals currently fire after the operator has typed the password or
-  passphrase, and `roster pin-tls` and `roster import-token` have the same
-  order. §3.2's "before it prompts" holds for `--grant` today, not yet for
-  these.
 - **TLS pinning, remainder** (`pveforge-rest-tls-certificate-pinning`): T1a
   to T3 are merged. T2k (staged in the `t2k` worktree; sent back in review)
   removes pveforge's own `authorized_keys` line after a failed first run and

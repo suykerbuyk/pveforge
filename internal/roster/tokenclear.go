@@ -169,14 +169,25 @@ func DryRunTokenWrite(path, targetID string) error {
 		dryRunCompose("clear-then-write", afterClear)
 	}
 
+	if err := ProbeRosterDir(path); err != nil {
+		return fmt.Errorf("roster dry run: %w", err)
+	}
+	return nil
+}
+
+// ProbeRosterDir creates and removes one temp file in the directory of the
+// roster at path, proving a writer's atomic rename can happen there: the
+// part of DryRunTokenWrite that needs no target, so a command about to add
+// one can ask it too.
+func ProbeRosterDir(path string) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".pveforge-roster-dryrun-*.tmp")
 	if err != nil {
-		return fmt.Errorf("roster dry run: the roster directory is not writable: %w", err)
+		return fmt.Errorf("the roster directory is not writable: %w", err)
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 	if err := os.Remove(tmpPath); err != nil {
-		return fmt.Errorf("roster dry run: remove probe file: %w", err)
+		return fmt.Errorf("remove probe file: %w", err)
 	}
 	return nil
 }

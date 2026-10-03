@@ -58,18 +58,24 @@ the target's bootstrap lock.`,
 			if err != nil {
 				return err
 			}
-			rawPassphrase, err := roster.ResolvePassphraseContext(cmd.Context())
-			if err != nil {
-				return err
-			}
-			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
-			if err != nil {
-				return err
-			}
-			res, err := bootstrap.PinTLS(cmd.Context(), bootstrap.PinTLSOptions{
-				TargetID: args[0], RosterPath: rosterPath, Passphrase: passphrase,
+			popts := bootstrap.PinTLSOptions{
+				TargetID: args[0], RosterPath: rosterPath,
 				Expect: want, Repin: repin, Print: printOnly, SSHPort: sshPort, CapturePort: capPort,
-			}, newBootstrapTransport(), newBootstrapValidator())
+			}
+			// The mode refusals before the passphrase: they read only the
+			// roster's unencrypted fields.
+			if err := bootstrap.CheckPinTLS(popts); err != nil {
+				return err
+			}
+			rawPassphrase, err := promptRosterPassphrase(cmd.Context())
+			if err != nil {
+				return err
+			}
+			popts.Passphrase, err = proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
+			if err != nil {
+				return err
+			}
+			res, err := bootstrap.PinTLS(cmd.Context(), popts, newBootstrapTransport(), newBootstrapValidator())
 			if res != nil && res.Pin != "" {
 				if rerr := kvjson.Render(cmd.OutOrStdout(), format, pinTLSView{
 					Target: res.TargetID, TLSPin: string(res.Pin), TLSPinSource: string(res.Source),

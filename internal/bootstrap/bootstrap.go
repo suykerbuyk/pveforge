@@ -465,8 +465,8 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		r.ident = sshIdentity{addr: addr, user: sshUser, password: opts.PVEPassword, hostKeyFP: fp, keyless: true}
 
 	case existing != nil && !reprovisionSSH:
-		if opts.HostKeyFingerprint != "" && opts.HostKeyFingerprint != existing.HostKeyFingerprint {
-			return nil, fmt.Errorf("bootstrap %s: --host-key-fingerprint %s is not the host key this target is pinned to (%s); nothing was dialed. If %s is the key you read on the node's CONSOLE after a rebuild, add --reprovisioned; pveforge will not re-pin otherwise", opts.TargetID, opts.HostKeyFingerprint, existing.HostKeyFingerprint, opts.HostKeyFingerprint)
+		if err := checkGivenFingerprint(opts, existing.HostKeyFingerprint); err != nil {
+			return nil, err
 		}
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
 		if err != nil {
@@ -650,9 +650,87 @@ func checkCaptureTrust(opts Options) error {
 	return nil
 }
 
+// CheckBeforePrompt is every refusal Run makes that needs no secret and no
+// answer from the node, on the options and the roster's unencrypted fields
+// alone, with the roster's host, node and insecure_tls filling in what the
+// options leave unset, as Run does: the token owner's shape, the target's
+// host and node, the token id and roster path, the SSH login's realm, the
+// capture-trust rules (B′, the --ssh-tofu conflicts and CheckReprovision),
+// a roster that does not load, the held token's owner, the roster's SSH
+// state against --no-ssh-key, a --host-key-fingerprint that is not the
+// stored pin, and a roster that would refuse the write (the token's, or a
+// new target's). The CLI calls
+// it before it asks for any secret, so no refusal it could have made
+// without one costs the operator a passphrase or a password. Run applies
+// the same rules again, the roster's under its lock.
+func CheckBeforePrompt(opts Options) error {
+	ownerGiven := opts.TokenOwner != ""
+	applyDefaults(&opts)
+	if err := CheckTokenOwner(opts.TokenOwner); err != nil {
+		return fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+	defaultHostNodeFromRoster(&opts)
+	if err := checkTargetAddress(&opts); err != nil {
+		return err
+	}
+	if err := checkOptionsNeedingNoSecret(&opts); err != nil {
+		return err
+	}
+	if _, err := pamLocalUser(opts.PVEUsername); err != nil {
+		return err
+	}
+	if err := checkCaptureTrust(opts); err != nil {
+		return fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return fmt.Errorf("bootstrap %s: %w", opts.TargetID, rosterLoadError(opts.RosterPath, err))
+	}
+	if err := checkHeldTokenOwner(opts, ownerGiven); err != nil {
+		return fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+	if err := checkKeylessState(opts); err != nil {
+		return fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	}
+	tg := r.Find(opts.TargetID)
+	if tg == nil {
+		if err := roster.ProbeRosterDir(opts.RosterPath); err != nil {
+			return fmt.Errorf("bootstrap %s: the roster cannot take the new target, so nothing was asked for, dialed or written: %w", opts.TargetID, err)
+		}
+		return nil
+	}
+	if !opts.NoSSHKey && tg.SSH != nil {
+		if err := checkGivenFingerprint(opts, tg.SSH.HostKeyFingerprint); err != nil {
+			return err
+		}
+	}
+	if err := dryRunTokenWrite(opts.RosterPath, opts.TargetID); err != nil {
+		return fmt.Errorf("bootstrap %s: the roster would refuse the token write, so nothing was asked for, dialed or written: %w", opts.TargetID, err)
+	}
+	return nil
+}
+
+// rosterLoadError is how bootstrap and import-token refuse a roster that
+// does not load: the target is added to an existing roster, never one these
+// commands create.
+func rosterLoadError(path string, err error) error {
+	return fmt.Errorf("load roster %s (create it first with `pveforge roster init`): %w", path, err)
+}
+
+// checkGivenFingerprint refuses a --host-key-fingerprint that is not the SSH
+// pin the roster holds, unless the run is a reprovision (which replaces
+// that pin). Nothing is dialed: a different key is the operator's to verify
+// on the console, never pveforge's to re-pin.
+func checkGivenFingerprint(opts Options, stored string) error {
+	if opts.Reprovisioned || stored == "" || opts.HostKeyFingerprint == "" || opts.HostKeyFingerprint == stored {
+		return nil
+	}
+	return fmt.Errorf("bootstrap %s: --host-key-fingerprint %s is not the host key this target is pinned to (%s); nothing was dialed. If %s is the key you read on the node's CONSOLE after a rebuild, add --reprovisioned; pveforge will not re-pin otherwise", opts.TargetID, opts.HostKeyFingerprint, stored, opts.HostKeyFingerprint)
+}
+
 // CheckReprovision is --reprovisioned's own refusals, on the options and the
-// roster alone: no lock, no write, no connection. Run applies it first; the
-// CLI calls it too, before it prompts for any password. It is nil for a
+// roster alone: no lock, no write, no connection. Run applies it first (via
+// checkCaptureTrust), and the CLI through CheckBeforePrompt. It is nil for a
 // run that is not a reprovision.
 func CheckReprovision(opts Options) error {
 	if !opts.Reprovisioned {
@@ -897,7 +975,8 @@ func applyDefaults(opts *Options) {
 	}
 }
 
-func validateOptions(opts *Options) error {
+// checkTargetAddress is validateOptions' part that needs no secret.
+func checkTargetAddress(opts *Options) error {
 	switch {
 	case opts.TargetID == "":
 		return fmt.Errorf("bootstrap: target id is required")
@@ -905,19 +984,39 @@ func validateOptions(opts *Options) error {
 		return fmt.Errorf("bootstrap: host is required")
 	case opts.Node == "":
 		return fmt.Errorf("bootstrap: node is required")
-	case opts.PVEPassword == "":
-		return fmt.Errorf("bootstrap: PVE password is required")
+	}
+	return nil
+}
+
+// checkOptionsNeedingNoSecret is the rest of validateOptions that needs no
+// secret: the token id, the roster path and the fingerprint's shape.
+func checkOptionsNeedingNoSecret(opts *Options) error {
+	switch {
 	case opts.TokenID == "":
 		return fmt.Errorf("bootstrap: token id is required")
 	case opts.RosterPath == "":
 		return fmt.Errorf("bootstrap: roster path is required")
-	case opts.Passphrase.IsZero():
-		return fmt.Errorf("bootstrap: roster passphrase is required")
 	}
 	if opts.HostKeyFingerprint != "" {
 		if err := sshexec.CheckFingerprint(opts.HostKeyFingerprint); err != nil {
 			return fmt.Errorf("bootstrap: --host-key-fingerprint: %w", err)
 		}
+	}
+	return nil
+}
+
+func validateOptions(opts *Options) error {
+	if err := checkTargetAddress(opts); err != nil {
+		return err
+	}
+	if opts.PVEPassword == "" {
+		return fmt.Errorf("bootstrap: PVE password is required")
+	}
+	if err := checkOptionsNeedingNoSecret(opts); err != nil {
+		return err
+	}
+	if opts.Passphrase.IsZero() {
+		return fmt.Errorf("bootstrap: roster passphrase is required")
 	}
 	return nil
 }
@@ -951,7 +1050,7 @@ func pamLocalUser(pveUsername string) (string, error) {
 func ensureTargetExists(opts Options) error {
 	r, err := roster.Load(opts.RosterPath)
 	if err != nil {
-		return fmt.Errorf("load roster %s (create it first with `pveforge roster init`): %w", opts.RosterPath, err)
+		return rosterLoadError(opts.RosterPath, err)
 	}
 	if r.Find(opts.TargetID) != nil {
 		return nil
@@ -1477,15 +1576,16 @@ type ImportOptions struct {
 // options and the roster alone: an insecure_tls target (the flag, or the
 // roster's own setting for a target it holds) needs a TLS pin, the
 // roster's or --expect. An --expect that differs from a stored pin is
-// refused. The CLI calls it before the secret is read from stdin; Import
-// calls it again under its lock.
+// refused. The CLI calls it before it asks for the passphrase or reads the
+// secret from stdin; Import calls it again under its lock.
 func CheckImportTLS(opts ImportOptions) error {
 	insecure := opts.InsecureTLS
 	var stored tlspin.Pin
-	// A load error is deliberately not returned here: this is a pre-check,
-	// and a roster that does not load (missing, unreadable, invalid) is
-	// refused by Import's own load under the lock, before anything is
-	// validated or written. The rule then runs on the options alone.
+	// A load error is deliberately not returned here: a roster that does
+	// not load (missing, unreadable, invalid) is refused by
+	// CheckImportBeforePrompt, and by Import's own load under the lock,
+	// before anything is validated or written. The rule then runs on the
+	// options alone.
 	if r, err := roster.Load(opts.RosterPath); err == nil {
 		if tg := r.Find(opts.TargetID); tg != nil {
 			insecure = insecure || tg.InsecureTLS
@@ -1499,6 +1599,47 @@ func CheckImportTLS(opts ImportOptions) error {
 	}
 	if insecure && stored == "" && opts.Expect == "" {
 		return fmt.Errorf("import token %s: %w: pass the pin you verified with --expect sha256//… (roster %s); nothing was read, validated or written", opts.TargetID, pve.ErrTLSPinRequired, opts.RosterPath)
+	}
+	return nil
+}
+
+// CheckImportBeforePrompt is every refusal Import makes that needs no
+// secret, no passphrase and no connection, on the options and the roster's
+// unencrypted fields alone: a roster that does not load, a new target with
+// no host or node, the TLS rule (CheckImportTLS), and a roster that would
+// refuse the write (the token's into a held target; any file into its
+// directory for a new one). The CLI calls it before it asks for the
+// passphrase or reads the secret from stdin; Import applies the same rules
+// again, the roster's under its lock.
+func CheckImportBeforePrompt(opts ImportOptions) error {
+	r, err := roster.Load(opts.RosterPath)
+	if err != nil {
+		return fmt.Errorf("import token %s: %w", opts.TargetID, rosterLoadError(opts.RosterPath, err))
+	}
+	bopts := Options{TargetID: opts.TargetID, Host: opts.Host, Node: opts.Node, RosterPath: opts.RosterPath}
+	defaultHostNodeFromRoster(&bopts)
+	if err := checkImportAddress(opts.TargetID, bopts); err != nil {
+		return err
+	}
+	if err := CheckImportTLS(opts); err != nil {
+		return err
+	}
+	if r.Find(opts.TargetID) != nil {
+		err = dryRunTokenWrite(opts.RosterPath, opts.TargetID)
+	} else {
+		err = roster.ProbeRosterDir(opts.RosterPath)
+	}
+	if err != nil {
+		return fmt.Errorf("import token %s: the roster would refuse the write, so nothing was read, validated or written: %w", opts.TargetID, err)
+	}
+	return nil
+}
+
+// checkImportAddress refuses a target with no host or node once the
+// roster's own have filled in what the flags left unset: a new target.
+func checkImportAddress(targetID string, b Options) error {
+	if b.Host == "" || b.Node == "" {
+		return fmt.Errorf("import token %s: --host and --node are required for a target the roster does not have yet", targetID)
 	}
 	return nil
 }
@@ -1546,8 +1687,8 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 		InsecureTLS: opts.InsecureTLS, RosterPath: opts.RosterPath, Passphrase: opts.Passphrase,
 	}
 	defaultHostNodeFromRoster(&bopts)
-	if bopts.Host == "" || bopts.Node == "" {
-		return nil, fmt.Errorf("import token %s: --host and --node are required for a target the roster does not have yet", opts.TargetID)
+	if err := checkImportAddress(opts.TargetID, bopts); err != nil {
+		return nil, err
 	}
 	if err := CheckImportTLS(opts); err != nil {
 		return nil, err
@@ -1564,7 +1705,7 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 
 	r, err := roster.Load(opts.RosterPath)
 	if err != nil {
-		return nil, fmt.Errorf("import token %s: load roster %s (create it first with `pveforge roster init`): %w", opts.TargetID, opts.RosterPath, err)
+		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, rosterLoadError(opts.RosterPath, err))
 	}
 	exists := r.Find(opts.TargetID) != nil
 	// The TLS rule again, under the lock, against the roster as read now;
