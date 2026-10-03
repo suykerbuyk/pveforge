@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -100,7 +101,28 @@ type probeSpec struct {
 	// as "2>&1 | head" gives; the test can close its reading end) or "pty"
 	// (a terminal; the test can hang it up).
 	out string
+	// clockStep, when above 1, makes each sleep advance the fake clock by
+	// clockStep times its argument (clockStubs): a long wait bounded by the
+	// clock (a 600 s usage wait, an 1800 s port poll) then reaches its bound
+	// in a tenth of the polls, and its real time no longer grows with the
+	// bound. The scripts' own poll intervals are untouched; a row that uses
+	// it asserts fake time (probeResult.clock, the bound's "after Ns"), not
+	// a count of polls.
+	clockStep int
+	// budget bounds the run in REAL time (default 60 s): a backstop against
+	// a hung script, under whatever load the machine carries. go test's own
+	// -timeout stays the outer guard.
+	budget time.Duration
 }
+
+// longWaitBudget is the real-time backstop for a run that waits out a long
+// fake bound (probeSpec.budget): generous, since the machine's load is not
+// the test's to choose; go test's -timeout stays the outer guard.
+const longWaitBudget = 5 * time.Minute
+
+// probeWaitStep is the clockStep for a probe run whose usage wait runs to
+// its 180 s bound: 6 polls of 5 s at 30 s each, not 36.
+const probeWaitStep = 6
 
 // blocked is a run held at spec.block.
 type blocked struct {
@@ -143,6 +165,9 @@ type probeResult struct {
 	calls          []string
 	home           string
 	sleeps         int
+	// clock is the fake clock when the run ended: the seconds every sleep
+	// (times the spec's clockStep) and every faked timeout added.
+	clock int
 }
 
 func (r probeResult) evidenceDir(t *testing.T) string {
@@ -318,7 +343,16 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 		}
 		defer fifo.Close()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if s.clockStep > 1 {
+		if err := os.WriteFile(filepath.Join(fakeDir, "clock.step"), []byte(strconv.Itoa(s.clockStep)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	budget := s.budget
+	if budget == 0 {
+		budget = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	argv := append([]string{}, s.bashArgs...)
 	if s.umask != "" {
@@ -439,6 +473,11 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 	}
 	if b, err := os.ReadFile(filepath.Join(fakeDir, "sleep.log")); err == nil {
 		res.sleeps = strings.Count(string(b), "\n")
+	}
+	if b, err := os.ReadFile(filepath.Join(fakeDir, "clock")); err == nil {
+		if res.clock, err = strconv.Atoi(strings.TrimSpace(string(b))); err != nil {
+			t.Fatalf("the fake clock %q: %v", b, err)
+		}
 	}
 	return res
 }
@@ -777,9 +816,10 @@ func TestProbe_PollIsBounded(t *testing.T) {
 	s := zfsWorld()
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
+	s.clockStep, s.budget = probeWaitStep, longWaitBudget
 	r := runProbe(t, s)
-	if r.code != 4 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (after 180s)") || r.sleeps != 36 {
-		t.Errorf("volumes never go: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	if r.code != 4 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (after 180s)") || r.clock < 180 {
+		t.Errorf("volumes never go: exit %d, fake clock %d (want the wait run to its 180 s)\n%s", r.code, r.clock, r.stderr)
 	}
 	if _, ok := r.rule(); ok {
 		t.Error("a probe that detected a leftover wrote the rule")
@@ -800,8 +840,9 @@ func TestProbe_PollIsBounded(t *testing.T) {
 	for n := 3; n < 60; n++ {
 		s.seq[pStatus][n] = storageStatus("zfspool", gib600-(2<<20), "")
 	}
-	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness's used is 2097152, not back within 1 MiB of its baseline 0 (after 180s)") {
-		t.Errorf("usage 2 MiB high: exit %d\n%s", r.code, r.stderr)
+	s.clockStep, s.budget = probeWaitStep, longWaitBudget
+	if r := runProbe(t, s); r.code != 4 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness's used is 2097152, not back within 1 MiB of its baseline 0 (after 180s)") || r.clock < 180 {
+		t.Errorf("usage 2 MiB high: exit %d, fake clock %d\n%s", r.code, r.clock, r.stderr)
 	}
 	s = zfsWorld()
 	delete(s.seq, pContent)
@@ -832,9 +873,10 @@ func TestProbe_PollIsBounded(t *testing.T) {
 		s = zfsWorld()
 		delete(s.seq, pContent)
 		edit(&s)
+		s.clockStep, s.budget = probeWaitStep, longWaitBudget
 		r := runProbe(t, s)
-		if r.code != 0 || r.sleeps != 36 || !strings.Contains(r.evidence(t, "poll.log"), "the status could not be read (after 180s): nothing detected, nothing proven") {
-			t.Errorf("%s: exit %d sleeps %d\n%s", name, r.code, r.sleeps, r.stderr)
+		if r.code != 0 || r.clock < 180 || !strings.Contains(r.evidence(t, "poll.log"), "the status could not be read (after 180s): nothing detected, nothing proven") {
+			t.Errorf("%s: exit %d, fake clock %d\n%s", name, r.code, r.clock, r.stderr)
 		}
 	}
 	// Accounting is evidence: thick (the whole disk in used at once), or thin
@@ -995,17 +1037,19 @@ func TestProbe_CleanupWaitsForVolumes(t *testing.T) {
 	// the listing is empty, but the usage never comes back.
 	s = dies()
 	s.gone[pStatus] = storageStatus("zfspool", gib600-(1<<30), "")
+	s.clockStep, s.budget = probeWaitStep, longWaitBudget
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness's used is 1073741824, not back within 1 MiB of its baseline 0 (after 180s)") || r.sleeps != 36 {
-		t.Errorf("a hidden leftover: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness's used is 1073741824, not back within 1 MiB of its baseline 0 (after 180s)") || r.clock < 180 {
+		t.Errorf("a hidden leftover: exit %d, fake clock %d\n%s", r.code, r.clock, r.stderr)
 	}
 	// A listed volume is a leftover even when the usage has come back.
 	s = dies()
 	s.resp[pContent] = oneVolume
 	s.seq[pContent] = map[int]string{1: `[]`}
+	s.clockStep, s.budget = probeWaitStep, longWaitBudget
 	r = runProbe(t, s)
-	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (after 180s)") || r.sleeps != 36 {
-		t.Errorf("volumes never go: exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	if r.code != 5 || !strings.Contains(r.stderr, leftover+"storage pveforge-harness still lists volumes of VM(s) 690 (after 180s)") || r.clock < 180 {
+		t.Errorf("volumes never go: exit %d, fake clock %d\n%s", r.code, r.clock, r.stderr)
 	}
 	// A sleep that fails ends the wait there, and what was last seen is
 	// reported; cleanup still reports.

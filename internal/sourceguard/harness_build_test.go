@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -246,6 +247,15 @@ func buildWorld(t *testing.T, h buildHome) probeSpec {
 		env:   map[string]string{"HARNESS_PINS_BIN": pinsTool(t)},
 		gone:  map[string]string{},
 	}
+	// A port that never opens: the poll runs to its 1800 s bound, and
+	// cleanup's usage wait may run to its 600 s. With clockStep 10 those take
+	// a few dozen polls, not 120 each, so the run's real time no longer
+	// grows with the bounds; the budget is a backstop under load.
+	for _, attempts := range h.tcp {
+		if attempts == "never" {
+			s.clockStep, s.budget = 10, longWaitBudget
+		}
+	}
 	if h.pins != "" {
 		p := filepath.Join(t.TempDir(), "pins")
 		writeFile(t, p, h.pins, 0o700)
@@ -272,7 +282,9 @@ func clockStubs(t *testing.T, stubs map[string]string) map[string]string {
 		t.Fatal(err)
 	}
 	stubs["date"] = "#!/usr/bin/env bash\nif [ \"$*\" = +%s ]; then\n\tc=0\n\t[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\n\techo $((1790000000 + c))\n\texit 0\nfi\nexec " + realDate + " \"$@\"\n"
-	stubs["sleep"] = "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nc=0\n[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\nprintf '%s' $((c + $1)) >\"$FAKE_PVEFORGE_DIR/clock\"\n"
+	// The step (probeSpec.clockStep, in clock.step) multiplies what a sleep
+	// adds to the clock; the script still sleeps its own interval.
+	stubs["sleep"] = "#!/usr/bin/env bash\necho \"$*\" >>\"$FAKE_PVEFORGE_DIR/sleep.log\"\nc=0\n[ -f \"$FAKE_PVEFORGE_DIR/clock\" ] && c=$(cat \"$FAKE_PVEFORGE_DIR/clock\")\nk=1\n[ -f \"$FAKE_PVEFORGE_DIR/clock.step\" ] && k=$(cat \"$FAKE_PVEFORGE_DIR/clock.step\")\nprintf '%s' $((c + $1 * k)) >\"$FAKE_PVEFORGE_DIR/clock\"\n"
 	return stubs
 }
 
@@ -501,10 +513,10 @@ func TestBuild_Repin(t *testing.T) {
 func TestBuild_PollTimeoutCleansUp(t *testing.T) {
 	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
 	r := runProbe(t, s)
-	// A clock, not a count: each round's timed-out attempt (5 s) and sleep
-	// (10 s) spend 15 s of the 1800, so 120 sleeps, never 180.
-	if r.code != 4 || !strings.Contains(r.stderr, "after 1800s, still closed: pvh-n2=192.0.2.91:8006") || r.sleeps != 120 {
-		t.Fatalf("exit %d sleeps %d\n%s", r.code, r.sleeps, r.stderr)
+	// A clock, not a count: the poll ends when the fake clock passes 1800 s
+	// (buildWorld's clockStep makes that a few dozen sleeps, not 120).
+	if r.code != 4 || !strings.Contains(r.stderr, "after 1800s, still closed: pvh-n2=192.0.2.91:8006") || r.clock < 1800 {
+		t.Fatalf("exit %d, fake clock %d (want the poll run to its 1800 s)\n%s", r.code, r.clock, r.stderr)
 	}
 	equalCalls(t, "writes", r.writes(), bTornDown)
 	if !strings.Contains(r.stderr, "build: cleanup: this run's VM(s) 690 691 692 destroyed") || strings.Contains(r.stderr, "LEFTOVER") {
@@ -1278,7 +1290,7 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 	for name, c := range map[string]struct {
 		edit   func(s *probeSpec)
 		left   []string // named in LEFTOVER; the rest DESTROYED
-		sleeps int
+		waits  bool     // the usage wait runs to its 600 s bound
 		writes []string // nil: bTornDown
 	}{
 		"nextid 400": {edit: func(s *probeSpec) { s.rc[bNextID("691")] = map[int]int{2: 1} }, left: []string{"691"}},
@@ -1294,14 +1306,14 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 		"/pools empty": {edit: func(s *probeSpec) { s.gone[pPool] = `[]` }, left: all, writes: firstDestroyOnly},
 		// The listing is empty (the token is not shown them), but the usage
 		// stays 128 GiB up: a hidden leftover.
-		"the usage stays up": {edit: func(s *probeSpec) { s.gone[pStatus] = storageStatus("zfspool", gib600-(128<<30), "") }, left: all, sleeps: 120},
+		"the usage stays up": {edit: func(s *probeSpec) { s.gone[pStatus] = storageStatus("zfspool", gib600-(128<<30), "") }, left: all, waits: true},
 		"a volume still listed": {edit: func(s *probeSpec) {
 			s.gone[bContent("691")] = `[{"volid":"pveforge-harness:vm-691-disk-0","vmid":691}]`
-		}, left: all, sleeps: 120},
+		}, left: all, waits: true},
 		// A status the wait cannot read detects nothing: the destroy tasks'
 		// proof stands.
-		"the status unreadable": {edit: func(s *probeSpec) { s.goneRC = map[string]int{pStatus: 1} }, sleeps: 120},
-		"the status lacks used": {edit: func(s *probeSpec) { s.gone[pStatus] = `{"type":"zfspool","avail":1}` }, sleeps: 120},
+		"the status unreadable": {edit: func(s *probeSpec) { s.goneRC = map[string]int{pStatus: 1} }, waits: true},
+		"the status lacks used": {edit: func(s *probeSpec) { s.gone[pStatus] = `{"type":"zfspool","avail":1}` }, waits: true},
 		// The destroy task of 691: WARNINGS (a disk PVE could not free), or
 		// no UPID printed.
 		"691's task WARNINGS": {edit: func(s *probeSpec) {
@@ -1346,9 +1358,19 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 					t.Errorf("VM %s: named in LEFTOVER %t, DESTROYED %t; want named %t\n%s\n%s", v, named, strings.Contains(res, "DESTROYED "+v), want, r.stderr, res)
 				}
 			}
-			// 120: the TCP poll's own; then the usage poll's, 120 at most (600 s).
-			if r.sleeps != 120+c.sleeps {
-				t.Errorf("slept %d times, want %d", r.sleeps, 120+c.sleeps)
+			// Fake time, not a count of polls: the port poll ran to its
+			// 1800 s bound; then the usage wait ran to its 600 s bound
+			// exactly where the row expects it to (a wait that ends early
+			// leaves the clock short of 1800+600 even when it says "after
+			// 600s", which names the bound, not the time spent).
+			if r.clock < 1800 || !strings.Contains(r.stderr, "after 1800s, still closed") {
+				t.Errorf("the port poll: clock %d, want at least 1800 and its bound named\n%s", r.clock, r.stderr)
+			}
+			if waited := r.clock >= 1800+600; waited != c.waits {
+				t.Errorf("the usage wait: clock %d; want it to run to its 600 s bound: %t", r.clock, c.waits)
+			}
+			if c.waits && !strings.Contains(r.buildEvidence(t, "cleanup.log")+r.stderr, "(after 600s)") {
+				t.Errorf("the usage wait's end is not named \"(after 600s)\"\n%s", r.buildEvidence(t, "cleanup.log"))
 			}
 		})
 	}
@@ -1495,5 +1517,17 @@ func TestEvidenceSh_OpenIsPrivate(t *testing.T) {
 		if fi.Mode().Perm() != want {
 			t.Errorf("%q: mode %v, want %v", name, fi.Mode().Perm(), want)
 		}
+	}
+}
+
+// The run's real-time budget is the spec's (probeSpec.budget): a run longer
+// than it is cut off (exit -1), where the default 60 s would let it finish.
+func TestRunProbe_BudgetBoundsTheRun(t *testing.T) {
+	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
+	s.budget = 300 * time.Millisecond
+	start := time.Now()
+	r := runProbe(t, s)
+	if r.code != -1 {
+		t.Fatalf("exit %d after %v with a 300 ms budget, want -1 (cut off)\n%s", r.code, time.Since(start), r.stderr)
 	}
 }
