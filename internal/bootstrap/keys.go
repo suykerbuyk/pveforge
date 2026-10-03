@@ -15,16 +15,19 @@ import (
 // installs (pveforge@<target-id>).
 const PveforgeKeyCommentPrefix = "pveforge@"
 
-// authorizedKeysReadCmd reads root's authorized_keys. A missing file is an
-// empty one: no key at all, so none of pveforge's.
-const authorizedKeysReadCmd = "cat ~/.ssh/authorized_keys 2>/dev/null || true"
+// AuthorizedKeysReadCmd reads root's authorized_keys, and nothing else. A
+// missing file reads as an empty one: no key at all, so none of pveforge's.
+// A file that is there but cannot be read is an error, never "no keys":
+// on PVE a dangling symlink means pmxcfs is down, and reporting no strays
+// then would be false.
+const AuthorizedKeysReadCmd = `f=~/.ssh/authorized_keys; if [ -e "$f" ] || [ -L "$f" ]; then cat "$f"; fi`
 
 // AuthorizedKeys reads root's authorized_keys on the node, as root, and
 // returns its lines. It writes nothing. On PVE the file is
 // /etc/pve/priv/authorized_keys, shared by the cluster, so any node's copy
 // is every node's.
 func (a *RootAccess) AuthorizedKeys(ctx context.Context) ([]string, error) {
-	res, err := a.rootRun(ctx, authorizedKeysReadCmd)
+	res, err := a.rootRun(ctx, AuthorizedKeysReadCmd)
 	if err != nil {
 		return nil, err
 	}
@@ -35,20 +38,27 @@ func (a *RootAccess) AuthorizedKeys(ctx context.Context) ([]string, error) {
 }
 
 // RosterKeys is one roster's SSH public keys, for KeyReport: Path names
-// the roster, Held maps each target's exact public_key line to its id.
+// the roster, Held maps each target's public key (its wire-format blob,
+// whatever options or comment a line carries) to the targets holding it.
 type RosterKeys struct {
 	Path string
 	Held map[string][]string
 }
 
-// RosterKeysOf lists the SSH public keys r's targets hold.
+// RosterKeysOf lists the SSH public keys r's targets hold. A public_key
+// that does not parse holds nothing.
 func RosterKeysOf(path string, r *roster.Roster) RosterKeys {
 	rk := RosterKeys{Path: path, Held: map[string][]string{}}
 	for _, t := range r.Targets {
-		if t.SSH != nil && strings.TrimSpace(t.SSH.PublicKey) != "" {
-			line := strings.TrimSpace(t.SSH.PublicKey)
-			rk.Held[line] = append(rk.Held[line], t.ID)
+		if t.SSH == nil {
+			continue
 		}
+		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(t.SSH.PublicKey)))
+		if err != nil {
+			continue
+		}
+		blob := string(pub.Marshal())
+		rk.Held[blob] = append(rk.Held[blob], t.ID)
 	}
 	return rk
 }
@@ -57,19 +67,25 @@ func RosterKeysOf(path string, r *roster.Roster) RosterKeys {
 type KeyLine struct {
 	Comment     string `json:"comment"`
 	Fingerprint string `json:"fingerprint"`
-	// HeldBy names each "<roster>:<target>" whose public_key is exactly
-	// this line, among the rosters checked.
+	// HeldBy names each "<roster>:<target>" whose public_key is this key
+	// (the same key, whatever options the line carries), among the rosters
+	// checked.
 	HeldBy []string `json:"held_by"`
 	// Stray: no roster checked holds it.
 	Stray bool `json:"stray"`
-	// RemoveCommand, for a stray, removes exactly this line when run as
-	// root on the node. pveforge never runs it.
+	// RemoveCommand, for a stray, removes exactly this line, options
+	// included, when run as root on the node. pveforge never runs it.
 	RemoveCommand string `json:"remove_command,omitempty"`
+	// RemoveCommandWithheld says why a stray has no RemoveCommand: its line
+	// holds a carriage return (a CRLF file), which no whole-line match can
+	// name exactly.
+	RemoveCommandWithheld string `json:"remove_command_withheld,omitempty"`
 }
 
 // KeyReport lists every line of root's authorized_keys whose comment begins
-// pveforge@, and which of rosters hold it (the exact line, compared with
-// each target's public_key). A line nothing holds is a stray, with the
+// pveforge@, and which of rosters hold it (the same key, compared by its
+// blob with each target's public_key, so a line with options still reads
+// as held). A line nothing holds is a stray, with the
 // exact manual removal command. Any other line (not parsable as a key, or
 // without a pveforge@ comment) is not pveforge's to judge and is never
 // listed. It changes nothing.
@@ -88,15 +104,20 @@ func KeyReport(lines []string, rosters []RosterKeys) []KeyLine {
 			continue
 		}
 		k := KeyLine{Comment: comment, Fingerprint: ssh.FingerprintSHA256(pub), HeldBy: []string{}}
+		blob := string(pub.Marshal())
 		for _, rk := range rosters {
-			for _, id := range rk.Held[line] {
+			for _, id := range rk.Held[blob] {
 				k.HeldBy = append(k.HeldBy, rk.Path+":"+id)
 			}
 		}
 		if len(k.HeldBy) == 0 {
 			k.Stray = true
 			// The file's own bytes: the command matches the whole line exactly.
-			k.RemoveCommand = sshexec.ManualKeyRemovalCommand(raw)
+			if cmd, err := sshexec.ManualKeyRemovalCommand(raw); err != nil {
+				k.RemoveCommandWithheld = "its line holds a carriage return (a CRLF file), so no whole-line match can name it exactly; remove it by hand"
+			} else {
+				k.RemoveCommand = cmd
+			}
 		}
 		out = append(out, k)
 	}

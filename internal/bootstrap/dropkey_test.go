@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,8 +15,35 @@ import (
 // and failed before the roster held it removes exactly that key again;
 // nothing else, and nothing on success.
 
-// removeScriptPrefix is how RemoveAuthorizedKeyScript begins.
-var removeScriptPrefix = strings.SplitN(sshexec.RemoveAuthorizedKeyScript("x"), "\nsnap=", 2)[0]
+// removeScriptPrefix is how every RemoveAuthorizedKeyScript begins: its
+// commands before the first one that names the file.
+var removeScriptPrefix = func() string {
+	s, err := sshexec.RemoveAuthorizedKeyScript("x")
+	if err != nil {
+		panic(err)
+	}
+	return strings.SplitN(s, "\nf=", 2)[0]
+}()
+
+// removeScriptFor and manualFor are the program and the manual command for
+// line, which the tests build only for valid lines.
+func removeScriptFor(t *testing.T, line string) string {
+	t.Helper()
+	s, err := sshexec.RemoveAuthorizedKeyScript(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func manualFor(t *testing.T, line string) string {
+	t.Helper()
+	s, err := sshexec.ManualKeyRemovalCommand(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
 // removals is every removal script the session ran.
 func removals(s *fakeSession) []string {
@@ -47,7 +75,7 @@ func requireRemovedExactly(t *testing.T, s *fakeSession, tr *fakeTransport) {
 		t.Fatalf("installed %d key(s), want 1", len(tr.installedKeyLines))
 	}
 	got := removals(s)
-	if len(got) != 1 || got[0] != sshexec.RemoveAuthorizedKeyScript(tr.installedKeyLines[0]) {
+	if len(got) != 1 || got[0] != removeScriptFor(t, tr.installedKeyLines[0]) {
 		t.Fatalf("removals %q, want exactly the script for the installed line %q", got, tr.installedKeyLines[0])
 	}
 }
@@ -171,25 +199,81 @@ func TestRun_KeyThatCouldNotBeRemovedIsReported(t *testing.T) {
 			tr := &fakeTransport{session: session}
 			_, err := Run(context.Background(), opts, tr, &fakeValidator{})
 			if !errors.Is(err, ErrTLSCapture) || !strings.Contains(err.Error(), "may still be in root's authorized_keys") ||
-				!strings.Contains(err.Error(), sshexec.ManualKeyRemovalCommand(tr.installedKeyLines[0])) {
+				!strings.Contains(err.Error(), manualFor(t, tr.installedKeyLines[0])) {
 				t.Fatalf("err = %v; want the cause, the leftover, and the manual command for the installed line", err)
 			}
 		})
 	}
 }
 
-// When the key dial itself fails there is no session to remove the key
-// over: the error gives the manual command, and nothing was run.
-func TestRun_KeyDialFailureReportsTheKey(t *testing.T) {
+// Test 9 (K1, K1b): the dial with the fresh key fails, which is still
+// before the roster holds it (ruling (a)): the key is removed over a
+// password session pinned to the host key fingerprint the install
+// returned, never an empty one. A trust-on-first-use install makes that
+// fingerprint the install's own, distinct from any flag.
+func TestRun_KeyDialFailureRemovesTheKeyOverAPinnedPasswordSession(t *testing.T) {
+	const installed = "SHA256:IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII"
 	_, opts := bareTarget(t)
-	opts.HostKeyFingerprint = testHostKey
+	opts.SSHTOFU = true
 	session := &fakeSession{}
-	tr := &fakeTransport{session: session, dialErr: errors.New("permission denied (publickey)")}
+	answerRemoval(session, removedOK)
+	tr := &fakeTransport{session: session, installFingerprint: installed, dialErr: errors.New("permission denied (publickey)")}
 	_, err := Run(context.Background(), opts, tr, &fakeValidator{})
-	if err == nil || !strings.Contains(err.Error(), "connect with fresh key") || !strings.Contains(err.Error(), sshexec.ManualKeyRemovalCommand(tr.installedKeyLines[0])) {
+	if err == nil || !strings.Contains(err.Error(), "connect with fresh key") || !strings.Contains(err.Error(), "removed from root's authorized_keys again") {
 		t.Fatalf("err = %v", err)
 	}
-	if len(session.commands) != 0 {
-		t.Fatalf("commands ran without a session: %q", session.commands)
+	if tr.dialPWCalls != 1 || tr.dialPWPins[0] != installed {
+		t.Fatalf("password dials %d, pins %q: want one, pinned to the install's %s", tr.dialPWCalls, tr.dialPWPins, installed)
+	}
+	if tr.dialPWPasswords[0] != opts.PVEPassword {
+		t.Errorf("the password session used %q, not the run's password", tr.dialPWPasswords[0])
+	}
+	requireRemovedExactly(t, session, tr)
+
+	// The password session fails too: the key is reported, with the exact
+	// manual command, and nothing ran.
+	_, opts2 := bareTarget(t)
+	opts2.SSHTOFU = true
+	session2 := &fakeSession{}
+	tr2 := &fakeTransport{session: session2, installFingerprint: installed, dialErr: errors.New("permission denied (publickey)"), dialPWErr: errors.New("connection refused")}
+	_, err = Run(context.Background(), opts2, tr2, &fakeValidator{})
+	if err == nil || !strings.Contains(err.Error(), "the password session failed too") || !strings.Contains(err.Error(), manualFor(t, tr2.installedKeyLines[0])) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(session2.commands) != 0 {
+		t.Fatalf("commands ran without a session: %q", session2.commands)
+	}
+}
+
+// Test 13 (U1): an install whose script was sent and then failed (or
+// timed out) may have appended the key: the error says so, with the exact
+// manual command. One that never ran anything on the node (its dial
+// failed: ErrNoCommandSent) says nothing of a key.
+func TestRun_InstallWithAnUnknownOutcomeReportsTheKey(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		report bool
+	}{
+		"the script timed out":  {errors.New("install pubkey: run remote script: context deadline exceeded"), true},
+		"the script exited 1":   {errors.New("install pubkey: remote script exited 1: Read-only file system"), true},
+		"the dial was refused":  {fmt.Errorf("install pubkey: ssh: unable to authenticate (%w)", sshexec.ErrNoCommandSent), false},
+		"no session was opened": {fmt.Errorf("install pubkey: run remote script: %w", sshexec.ErrNoCommandSent), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, opts := bareTarget(t)
+			opts.HostKeyFingerprint = testHostKey
+			tr := &fakeTransport{session: &fakeSession{}, installErr: tc.err}
+			_, err := Run(context.Background(), opts, tr, &fakeValidator{})
+			if err == nil || !strings.Contains(err.Error(), "install pubkey") {
+				t.Fatalf("err = %v", err)
+			}
+			reported := strings.Contains(err.Error(), "may still be in root's authorized_keys") && strings.Contains(err.Error(), manualFor(t, tr.installedKeyLines[0]))
+			if reported != tc.report {
+				t.Fatalf("reported the key: %v, want %v: %v", reported, tc.report, err)
+			}
+			if tr.dialCalls != 0 || tr.dialPWCalls != 0 {
+				t.Fatalf("dialed after a failed install (key %d, password %d)", tr.dialCalls, tr.dialPWCalls)
+			}
+		})
 	}
 }

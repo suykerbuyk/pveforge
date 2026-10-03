@@ -779,11 +779,20 @@ ciphertext, so the file stays reviewable.
 
 **A failed run's own SSH key (operator ruling T2k, 2026-09-26).** A first
 run or a reprovision installs a key it generated, then captures, then writes
-the roster. If it fails in that window it removes exactly that line again
-(a whole-line match, over the session it opened with that key, refusing
-unless the line appears exactly once, rewriting in place so PVE's symlink to
-the cluster-shared `/etc/pve/priv/authorized_keys` survives, and writing
-nothing if the file changed meanwhile). A comment is never a match key:
+the roster. If it fails in that window it removes exactly that line again: a
+whole-line match, over the session it opened with that key (or, if that
+dial failed, over a password session pinned to the host key the install was
+checked against), refusing unless the line appears exactly once, writing
+nothing if the file changed meanwhile, and writing the new file beside the
+resolved target and renaming it onto it, as PVE's own `file_set_contents`
+writes `/etc/pve/priv/authorized_keys`, so PVE's symlink to that
+cluster-shared file survives and no reader sees a truncated file. A line
+another writer adds between the last check and the rename is lost (an
+accepted risk: the window is two commands wide, PVE's own lockless
+`ssh_merge_keys` takes the same one, and no lock helps). An install whose
+outcome is unknown (its script was sent, then failed or timed out) is
+reported with the manual command; install also guarantees its line starts
+on a line of its own. A comment is never a match key:
 `pveforge@<target>` is not unique to a roster, since two rosters can hold the
 same target id, and removing by comment could cut another roster's root
 access on every node. Nothing is removed on success, or once the roster

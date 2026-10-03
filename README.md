@@ -449,10 +449,12 @@ These rest on PVE's documentation or source, not yet on observation. Each is
 owed to the nested PVE test harness:
 
 - A failed first bootstrap's removal of its own key from root's
-  `authorized_keys`: that the in-place rewrite keeps `~/.ssh/authorized_keys`
-  a symlink to `/etc/pve/priv/authorized_keys` and reaches the other nodes,
-  that pmxcfs accepts the truncate-and-write, and that root logins made
-  during the rewrite survive it.
+  `authorized_keys`: that pmxcfs allows creating `authorized_keys.tmp.*`
+  beside `/etc/pve/priv/authorized_keys` and renaming it onto it; that the
+  other nodes see the result; that `~/.ssh/authorized_keys` stays a symlink;
+  that root logins during the rename survive it; that with quorum lost the
+  removal fails at that create and leaves the file intact; and that a hangup
+  mid-run leaves no `.tmp.` file in `/etc/pve/priv`.
 
 - `vm set`'s pending-change detection: the `/pending` answer's shape, that a
   stopped VM reports nothing pending, and that hot-pluggable changes are not

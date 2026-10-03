@@ -21,12 +21,20 @@ every node of the cluster: the list is the cluster's, whichever node is read.
 
 .PP
 A key no roster checked holds is a "stray", listed with remove_command: the
-exact command that removes that one line when run as root on the node,
-rewriting the file in place (never sed -i or mv, which would replace the
-cluster's shared file with a local one). A stray is typically left by a
-first bootstrap that failed after installing its key, on a pveforge older
-than the one that removes its own key again. pveforge never removes a
-stray itself.
+exact command that removes that one line when run as root on the node. It
+removes the line only if it appears exactly once, writes nothing if the
+file changes while it runs, and writes the new file beside the resolved
+target (on PVE in /etc/pve/priv) and renames it onto it, so the symlink
+~/.ssh/authorized_keys is never replaced and the cluster's file never
+unshared. A stray whose line holds a carriage return (a CRLF file) gets no
+command (remove_command_withheld says why): remove it by hand. A stray is
+typically left by a first bootstrap that failed after installing its key,
+on a pveforge older than the one that removes its own key again. pveforge
+never removes a stray itself.
+
+.PP
+A key is held when a target's public_key is the same key, whatever options
+(from="...", no-pty) or comment the line in the file carries.
 
 .PP
 The rosters checked are --roster (the one the target is read from) and each

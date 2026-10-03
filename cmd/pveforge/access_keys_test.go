@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/suykerbuyk/pveforge/internal/bootstrap"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -54,7 +55,7 @@ type keysResult struct {
 func TestAccessKeys_ReportsStraysReadOnly(t *testing.T) {
 	var file string
 	path, fs, rf := accessSetupExec(t, nil, func(cmd string) (string, string, int) {
-		if strings.HasPrefix(cmd, "cat ~/.ssh/authorized_keys") {
+		if cmd == bootstrap.AuthorizedKeysReadCmd {
 			return file, "", 0
 		}
 		return "", "unexpected", 1
@@ -104,7 +105,11 @@ func TestAccessKeys_ReportsStraysReadOnly(t *testing.T) {
 	if k := got.Keys[0]; k.Stray || len(k.HeldBy) != 1 || k.HeldBy[0] != path+":qa-pve-02" || k.RemoveCommand != "" {
 		t.Errorf("the roster's key: %+v, want held by %s:qa-pve-02 with no removal command", k, path)
 	}
-	if k := got.Keys[1]; !k.Stray || len(k.HeldBy) != 0 || k.RemoveCommand != sshexec.ManualKeyRemovalCommand(strayKey) || k.Comment != "pveforge@qa-pve-02" || !strings.HasPrefix(k.Fingerprint, "SHA256:") {
+	wantRemove, err := sshexec.ManualKeyRemovalCommand(strayKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := got.Keys[1]; !k.Stray || len(k.HeldBy) != 0 || k.RemoveCommand != wantRemove || k.Comment != "pveforge@qa-pve-02" || !strings.HasPrefix(k.Fingerprint, "SHA256:") {
 		t.Errorf("the stray: %+v", k)
 	}
 	if k := got.Keys[2]; !k.Stray {
@@ -124,9 +129,11 @@ func TestAccessKeys_ReportsStraysReadOnly(t *testing.T) {
 		t.Errorf("the colleague's key with its roster checked: %+v", k)
 	}
 
+	// Test 11 (SF4): exactly the read command, not merely one that begins
+	// like it: anything appended to it (a sed -i, say) would run as root.
 	for _, c := range fs.Commands() {
-		if !strings.HasPrefix(c, "cat ~/.ssh/authorized_keys") {
-			t.Errorf("root ran %q: the report must only read", c)
+		if c != bootstrap.AuthorizedKeysReadCmd {
+			t.Errorf("root ran %q, want exactly %q: the report must only read", c, bootstrap.AuthorizedKeysReadCmd)
 		}
 	}
 	if len(fs.Commands()) != 2 {
@@ -137,8 +144,10 @@ func TestAccessKeys_ReportsStraysReadOnly(t *testing.T) {
 	}
 }
 
-// TestAccessKeys_ReadFailureIsAnError: a read that fails is an error, never
-// an empty report that would look like "no strays".
+// TestAccessKeys_ReadFailureIsAnError: a read that fails (the read command
+// exits non-zero for a dangling symlink, pmxcfs down, or an unreadable
+// file: TestAuthorizedKeysReadCmd) is an error, never an empty report that
+// would look like "no strays".
 func TestAccessKeys_ReadFailureIsAnError(t *testing.T) {
 	path, _, _ := accessSetupExec(t, nil, func(string) (string, string, int) { return "", "permission denied", 1 })
 	code, stdout, stderr := runRootArgs("access", "keys", "--roster", path, "qa-pve-01")
