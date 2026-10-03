@@ -155,3 +155,69 @@ func TestAccessKeys_ReadFailureIsAnError(t *testing.T) {
 		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
+
+// R2 through the CLI (T2k delta review, mutant R2c): a roster target whose
+// public_key does not parse is listed in the JSON's unverifiable, as
+// "<roster>:<target>", and while it is no stray carries a remove_command,
+// only remove_command_withheld. A roster whose keys all parse reports
+// "unverifiable": [], never null.
+func TestAccessKeys_UnparsableRosterKeyIsUnverifiable(t *testing.T) {
+	var file string
+	path, _, _ := accessSetupExec(t, nil, func(cmd string) (string, string, int) {
+		if cmd == bootstrap.AuthorizedKeysReadCmd {
+			return file, "", 0
+		}
+		return "", "unexpected", 1
+	})
+	strayKey := genKey(t, "pveforge@qa-pve-02")
+	file = strayKey + "\n"
+	run := func(t *testing.T) (map[string]json.RawMessage, []map[string]json.RawMessage) {
+		t.Helper()
+		code, stdout, stderr := runRootArgs("access", "keys", "--roster", path, "qa-pve-01", "-o", "json")
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &top); err != nil {
+			t.Fatalf("%v: %s", err, stdout)
+		}
+		var keys []map[string]json.RawMessage
+		if err := json.Unmarshal(top["keys"], &keys); err != nil {
+			t.Fatalf("keys: %v: %s", err, stdout)
+		}
+		return top, keys
+	}
+
+	top, keys := run(t)
+	if got := string(top["unverifiable"]); got != "[]" {
+		t.Errorf("a roster whose keys all parse: unverifiable = %s, want []", got)
+	}
+	if len(keys) != 1 || keys[0]["remove_command"] == nil {
+		t.Fatalf("a roster whose keys all parse: keys %v, want the stray with its remove_command", keys)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(sshTargetBlock(t, "broken", "ssh-ed25519 not-base64!! pveforge@broken")); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	top, keys = run(t)
+	var unverifiable []string
+	if err := json.Unmarshal(top["unverifiable"], &unverifiable); err != nil || len(unverifiable) != 1 || unverifiable[0] != path+":broken" {
+		t.Fatalf("unverifiable = %s (%v), want [%q]", top["unverifiable"], err, path+":broken")
+	}
+	if len(keys) != 1 {
+		t.Fatalf("keys %v, want the one stray", keys)
+	}
+	if rc, ok := keys[0]["remove_command"]; ok {
+		t.Errorf("the stray beside an unparsable roster key carries remove_command %s", rc)
+	}
+	var withheld string
+	if err := json.Unmarshal(keys[0]["remove_command_withheld"], &withheld); err != nil || !strings.Contains(withheld, path+":broken") {
+		t.Errorf("remove_command_withheld = %s (%v), want the reason naming %s:broken", keys[0]["remove_command_withheld"], err, path)
+	}
+}
