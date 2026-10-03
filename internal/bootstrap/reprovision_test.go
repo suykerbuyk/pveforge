@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -272,6 +273,101 @@ func TestReprovision_PreflightFailureSaysThePinsAreDone(t *testing.T) {
 	}
 	if sshBlock(t, rosterPath, opts.TargetID).HostKeyFingerprint != newHostKey || rosterPin(t, rosterPath, opts.TargetID) != cp.pin {
 		t.Fatal("the pins are not the new node's, yet the message says they are")
+	}
+}
+
+// RP1 (MP1, MP2): a token-phase refusal returns no result, so no view
+// reports the pins this run replaced: the error names them, as preflight's
+// does, and still matches its own sentinel.
+func TestReprovision_RP1_TokenPhaseRefusalSaysThePinsAreDone(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tokenID string // the run's --token-id; "" keeps "pveforge"
+		listed  string // the token name the node lists
+		reseal  bool   // the held token will not decrypt
+		verdict error  // the skip-check's answer
+		remove  *fakeRunResult
+		want    error // the refusal's sentinel, nil for an unnamed one
+		wantMsg string
+	}{
+		"rejected secret": {listed: "pveforge", verdict: fmt.Errorf("%w", ErrNotAuthorized), want: ErrTokenSecretRejected},
+		"not held":        {tokenID: "other", listed: "other", want: ErrTokenNotHeld},
+		"undecryptable":   {listed: "pveforge", reseal: true, want: ErrTokenUndecryptable},
+		"non-verdict":     {listed: "pveforge", verdict: errors.New("connection refused"), wantMsg: "could not be checked"},
+		"remove refused": {listed: "pveforge", verdict: fmt.Errorf("%w", ErrNoGrants),
+			remove: &fakeRunResult{res: RunResult{ExitCode: 1, Stderr: "permission denied"}}, wantMsg: "pveforge did not revoke the token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rosterPath, opts := rebuiltKeyful(t, newCapturePair(t))
+			if tc.tokenID != "" {
+				opts.TokenID = tc.tokenID
+			}
+			if tc.reseal {
+				r, err := roster.Load(rosterPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resealUnder(t, rosterPath, r.Find(opts.TargetID).Token.SecretEnc, []byte("old-node-secret"), "another-passphrase")
+			}
+			session, v := rebuiltNode(newCapturePair(t))
+			session.pve = newFakePVE(tc.listed)
+			v.errs = []error{tc.verdict}
+			if tc.remove != nil {
+				session.byCmd["pveum user token remove"] = *tc.remove
+			}
+			res, err := Run(context.Background(), opts, &fakeTransport{session: session}, v)
+			if err == nil || res != nil {
+				t.Fatalf("want a refusal with no result, got %+v, %v", res, err)
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want errors.Is(%v)", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("err = %v, want %q", err, tc.wantMsg)
+			}
+			if !strings.Contains(err.Error(), "this run replaced the SSH host key pin (previous "+testHostKey+") and the TLS pin (previous ") {
+				t.Fatalf("the refusal does not name the replaced pins: %v", err)
+			}
+		})
+	}
+}
+
+// RP1b (X1): a reprovisioned run whose token phase fails WITH a partial
+// result: its view reports the replaced pins, so the error does not name
+// them a second time.
+func TestReprovision_RP1b_PartialResultLeavesThePinsToTheView(t *testing.T) {
+	_, opts := rebuiltKeyful(t, newCapturePair(t))
+	session, v := rebuiltNode(newCapturePair(t))
+	session.pve = newFakePVE("pveforge")
+	v.errs = []error{fmt.Errorf("%w", ErrNoGrants)}
+	session.byCmd["pveum user token add"] = fakeRunResult{res: RunResult{ExitCode: 1, Stderr: "boom"}}
+	res, err := Run(context.Background(), opts, &fakeTransport{session: session}, v)
+	if err == nil || res == nil || !res.Reprovisioned || res.PreviousHostKeyFingerprint != testHostKey || res.PreviousTLSPin == "" {
+		t.Fatalf("want a failure with a partial, reprovisioned result, got %+v, %v", res, err)
+	}
+	if strings.Contains(err.Error(), "this run replaced") {
+		t.Fatalf("the error repeats what the result's view reports: %v", err)
+	}
+}
+
+// RP1c (X2): --reprovisioned against a node whose pins already match runs
+// as a plain rerun and replaces nothing; a refusal after that names no
+// pins, neither "replaced" nor "already match".
+func TestReprovision_RP1c_ConvergedRunRefusedNamesNoPins(t *testing.T) {
+	cp := newCapturePair(t)
+	rosterPath, opts := sshTarget(t, true, cp.pin)
+	if err := roster.WriteTokenAuth(rosterPath, opts.TargetID, roster.TokenWrite{TokenID: "root@pam!pveforge", SecretPlaintext: []byte("stale")}, opts.Passphrase); err != nil {
+		t.Fatal(err)
+	}
+	opts.Reprovisioned, opts.HostKeyFingerprint = true, testHostKey
+	session := &fakeSession{pve: newFakePVE("pveforge")}
+	v := &fakeValidator{errs: []error{fmt.Errorf("%w", ErrNotAuthorized)}}
+	scriptCapture(session, v, cp)
+	res, err := Run(context.Background(), opts, &fakeTransport{session: session}, v)
+	if !errors.Is(err, ErrTokenSecretRejected) || res != nil {
+		t.Fatalf("want the rejected-secret refusal, got %+v, %v", res, err)
+	}
+	if strings.Contains(err.Error(), "this run replaced") || strings.Contains(err.Error(), "already match") {
+		t.Fatalf("a run that replaced nothing names pins: %v", err)
 	}
 }
 

@@ -554,7 +554,13 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		}
 		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
 	}
-	return r.tokenPhase(present)
+	// A token-phase refusal returns no result, so no view reports the pins
+	// this run replaced: name them in the error, as preflight's does.
+	res, err := r.tokenPhase(present)
+	if err != nil && res == nil && r.res.Reprovisioned {
+		err = fmt.Errorf("%w; %s", err, replacedPins(r.res))
+	}
+	return res, err
 }
 
 // tlsCapture is one run's TLS pin capture: over the run's verified

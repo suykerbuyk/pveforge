@@ -101,6 +101,16 @@ var (
 	// passphrase. A decrypt failure is not a verdict about the token (the
 	// passphrase may simply be wrong), so it is never removed.
 	ErrTokenUndecryptable = errors.New("the roster's token for this target will not decrypt with the given passphrase (a wrong passphrase, or corruption)")
+	// ErrTokenSecretRejected: the roster holds the requested token, PVE
+	// still lists it, and PVE rejected it before any mint (HTTP 401 or
+	// 403). That proves nothing about the token: the roster's copy may be
+	// stale (an older backup, or a token another holder rotated since), the
+	// owner may be disabled or expired (root@pam included, which checkOwner
+	// does not read) or the token itself expired, a 403 may have refused a
+	// role read of a valid token, or a proxy may have answered 403.
+	// Removing it would revoke a secret another holder may be using, so it
+	// is never removed. Never a verdict.
+	ErrTokenSecretRejected = errors.New("PVE lists this roster's token but rejected it (HTTP 401 or 403), which is not a verdict about the token, so nothing was removed")
 	// ErrInvalidTokenOwner: --token-owner is not a PVE principal pveforge
 	// can own a token with (CheckTokenOwner). Refused before any SSH, and
 	// never a verdict.
@@ -167,8 +177,16 @@ var verdictSentinels = []error{ErrWrongScope, ErrNoGrants, ErrNotAuthorized, Err
 // "too wide" cannot be lag.
 var postMintRetrySentinels = []error{ErrNotAuthorized, ErrNoGrants, ErrWrongScope}
 
-func isVerdict(err error) bool         { return matchesAny(err, verdictSentinels) }
-func postMintRetryable(err error) bool { return matchesAny(err, postMintRetrySentinels) }
+// heldSecretRejectedSentinels are the verdicts that, against a held token
+// PVE still lists, prove nothing about the token: they condemn at most
+// this roster's copy of its secret, or the path to PVE
+// (ErrTokenSecretRejected). Before a mint they refuse instead of removing;
+// after a mint (the run's own fresh token) they stay verdicts.
+var heldSecretRejectedSentinels = []error{ErrNotAuthorized}
+
+func isVerdict(err error) bool          { return matchesAny(err, verdictSentinels) }
+func postMintRetryable(err error) bool  { return matchesAny(err, postMintRetrySentinels) }
+func heldSecretRejected(err error) bool { return matchesAny(err, heldSecretRejectedSentinels) }
 
 func matchesAny(err error, set []error) bool {
 	for _, s := range set {
@@ -943,6 +961,9 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 		if !isVerdict(err) {
 			return nil, fmt.Errorf("bootstrap %s: the existing token could not be checked (not a verdict about it, so nothing was changed): %w", r.opts.TargetID, err)
 		}
+		if present && heldSecretRejected(err) {
+			return nil, r.secretRejected(err)
+		}
 		reason, reasonErr = err.Error(), err
 	}
 	r.res.ReplacedReason = reason
@@ -966,6 +987,20 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 	}
 	r.res.RosterToken = RosterTokenCleared
 	return r.mintAndPersist(OutcomeReplaced, "")
+}
+
+// secretRejected is the refusal for a held, listed token PVE rejected
+// before any mint (ErrTokenSecretRejected): it names the causes to check,
+// the import that repairs a stale copy, and the remove as the last resort.
+func (r *runner) secretRejected(cause error) error {
+	return fmt.Errorf("bootstrap %s: %w: %s (%w); the token was left untouched on PVE and in the roster. "+
+		"Check which cause applies: this roster is an older copy than the one in use, or another holder rotated the token; "+
+		"the owner is disabled or expired, or the token itself expired; a 403 refused a role read; a proxy answered 403. "+
+		"For a stale copy, put the current secret in this roster: pipe it into pveforge roster import-token %s --token-id %s --replace, with this run's --grant flags. "+
+		"Only as a last resort, once the cause is known: pveum user token remove %s %s (this revokes it for every holder), then run bootstrap again",
+		r.opts.TargetID, ErrTokenSecretRejected, r.fullID, cause,
+		sshexec.ShellQuote(r.opts.TargetID), sshexec.ShellQuote(r.fullID),
+		sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
 }
 
 // priorUnknown ends the run when whether the roster-held token was revoked
