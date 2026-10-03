@@ -2,6 +2,7 @@ package sourceguard
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -783,7 +784,9 @@ func TestPrepareISO_Full(t *testing.T) {
 		`echo "$PVE_KEYRING_SHA512  $keyring" | sha512sum -c -`,
 		"apt-get install -y --no-install-recommends proxmox-auto-install-assistant xorriso",
 		`proxmox-auto-install-assistant validate-answer "/work/$n.toml"`,
-		`proxmox-auto-install-assistant prepare-iso "/src/$SOURCE_ISO_NAME" --fetch-from iso --answer-file "/work/$n.toml" --output "/work/$n-auto.iso"`,
+		// --tmp: the staging copy's default is the source ISO's own
+		// directory, mounted read-only (live run 3, 2026-10-03).
+		`proxmox-auto-install-assistant prepare-iso "/src/$SOURCE_ISO_NAME" --fetch-from iso --answer-file "/work/$n.toml" --output "/work/$n-auto.iso" --tmp /work/tmp`,
 		`proxmox-auto-install-assistant inspect-iso "/work/$n-auto.iso"`,
 		"Components: pve-no-subscription",
 	} {
@@ -793,6 +796,135 @@ func TestPrepareISO_Full(t *testing.T) {
 	}
 	if strings.Index(script, "sha512sum -c") > strings.Index(script, "proxmox-auto-install-assistant xorriso") {
 		t.Error("the keyring is trusted before it is checked")
+	}
+}
+
+// isoExecWorld is isoWorld with the container script RUN (fake-podman.sh's
+// exec mode) against fake-auto-install-assistant.sh, which exits 0 on a
+// failed step as proxmox-auto-install-assistant 9.2.8 does. fails names the
+// fake's failure files (assistant.prepare-fails, assistant.inspect-silent),
+// each holding the nodes it fails.
+func isoExecWorld(t *testing.T, fails map[string]string) probeSpec {
+	s := isoWorld(t, nestedPw, func(t *testing.T, home string) {
+		fake := filepath.Join(filepath.Dir(home), "fake")
+		writeFile(t, filepath.Join(fake, "podman.exec"), "", 0o600)
+		for name, nodes := range fails {
+			writeFile(t, filepath.Join(fake, name), nodes, 0o600)
+		}
+	})
+	s.stubs["proxmox-auto-install-assistant"] = fakeBody(t, "fake-auto-install-assistant.sh")
+	for _, tool := range []string{"apt-get", "curl"} {
+		s.stubs[tool] = "#!/bin/sh\nexit 0\n"
+	}
+	s.stubs["sha512sum"] = "#!/bin/sh\ncat >/dev/null\nexit 0\n"
+	return s
+}
+
+// isoContainerLog is the run's container.log.
+func isoContainerLog(t *testing.T, r probeResult) string {
+	t.Helper()
+	logs, _ := filepath.Glob(filepath.Join(r.home, ".config/pveforge/harness-evidence/prepare-iso/*/container.log"))
+	if len(logs) != 1 {
+		t.Fatalf("container logs %q", logs)
+	}
+	b, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// I1b: the container script itself, run: each node is validated, prepared
+// with its staging copy under /work/tmp, and inspected, in order; the
+// staging directory is gone afterwards. Anti-vacuity for I1c: the exec mode
+// reaches the fake tool.
+func TestPrepareISO_ContainerScriptRuns(t *testing.T) {
+	r := runProbe(t, isoExecWorld(t, nil))
+	if r.code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", r.code, r.stderr, isoContainerLog(t, r))
+	}
+	out := isoOut(t, r)
+	tmp := filepath.Join(out, "tmp")
+	want := strings.Join([]string{
+		"validate-answer pvh-n1", "prepare-iso pvh-n1 tmp=" + tmp, "inspect-iso pvh-n1",
+		"validate-answer pvh-n2", "prepare-iso pvh-n2 tmp=" + tmp, "inspect-iso pvh-n2",
+	}, "\n") + "\n"
+	if got := fakeLog(r, "assistant.log"); got != want {
+		t.Errorf("the tool's calls:\n%s\nwant:\n%s", got, want)
+	}
+	if got := strings.Count(isoContainerLog(t, r), "Auto-install:  enabled"); got != 2 {
+		t.Errorf("container.log holds %d inspect-iso reports, want 2", got)
+	}
+	if _, err := os.Stat(tmp); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the staging directory %s is left: %v", tmp, err)
+	}
+}
+
+// I1c: the tool exits 0 when a step fails, so the container checks each
+// step's output itself and stops at the first failure, naming the node and
+// the step: status 4, a later node never attempted.
+func TestPrepareISO_ContainerFailsClosedOnASilentFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fails map[string]string
+		want  string // in container.log
+		calls []string
+	}{
+		"prepare-iso writes nothing for pvh-n1": {
+			map[string]string{"assistant.prepare-fails": "pvh-n1\n"}, "pvh-n1: prepare-iso wrote no ",
+			[]string{"validate-answer pvh-n1", "prepare-iso pvh-n1"}},
+		"inspect-iso prints nothing for pvh-n1": {
+			map[string]string{"assistant.inspect-silent": "pvh-n1\n"}, "pvh-n1: inspect-iso printed nothing",
+			[]string{"validate-answer pvh-n1", "prepare-iso pvh-n1", "inspect-iso pvh-n1"}},
+		"prepare-iso writes nothing for pvh-n2": {
+			map[string]string{"assistant.prepare-fails": "pvh-n2\n"}, "pvh-n2: prepare-iso wrote no ",
+			[]string{"validate-answer pvh-n1", "prepare-iso pvh-n1", "inspect-iso pvh-n1", "validate-answer pvh-n2", "prepare-iso pvh-n2"}},
+		"inspect-iso prints nothing for pvh-n2": {
+			map[string]string{"assistant.inspect-silent": "pvh-n2\n"}, "pvh-n2: inspect-iso printed nothing",
+			[]string{"validate-answer pvh-n1", "prepare-iso pvh-n1", "inspect-iso pvh-n1", "validate-answer pvh-n2", "prepare-iso pvh-n2", "inspect-iso pvh-n2"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runProbe(t, isoExecWorld(t, tc.fails))
+			if r.code != 4 || !strings.Contains(r.stderr, "the container exited 4") {
+				t.Fatalf("exit %d, stderr %q; want 4, the container's own failure", r.code, r.stderr)
+			}
+			if log := isoContainerLog(t, r); !strings.Contains(log, tc.want) {
+				t.Errorf("container.log lacks %q:\n%s", tc.want, log)
+			}
+			var calls []string
+			for _, c := range strings.Split(strings.TrimSpace(fakeLog(r, "assistant.log")), "\n") {
+				calls = append(calls, strings.SplitN(c, " tmp=", 2)[0])
+			}
+			if !slices.Equal(calls, tc.calls) {
+				t.Errorf("the tool's calls %q, want %q", calls, tc.calls)
+			}
+			if fails, _ := filepath.Glob(filepath.Join(r.home, ".config/pveforge/harness-evidence/prepare-iso/*/FAILED")); len(fails) != 1 {
+				t.Errorf("FAILED evidence %q", fails)
+			}
+		})
+	}
+}
+
+// I1d: what the container leaves is checked outside it as well: an ISO it
+// did not write, or one that is a symlink (which chmod and sha256sum would
+// follow), is refused naming the file, status 4, and a symlink's target is
+// left as it was.
+func TestPrepareISO_OutputIsCheckedOutsideTheContainer(t *testing.T) {
+	for _, mode := range []string{"none", "symlink"} {
+		t.Run(mode, func(t *testing.T) {
+			r := runProbe(t, isoWorld(t, nestedPw, func(t *testing.T, home string) {
+				fake := filepath.Join(filepath.Dir(home), "fake")
+				writeFile(t, filepath.Join(fake, "podman.iso"), mode, 0o600)
+				writeFile(t, filepath.Join(fake, "victim"), "not an ISO\n", 0o644)
+			}))
+			want := "the container did not write " + filepath.Join(isoOut(t, r), "pvh-n1-auto.iso")
+			if r.code != 4 || !strings.Contains(r.stderr, want) {
+				t.Fatalf("exit %d, stderr %q; want 4 and %q", r.code, r.stderr, want)
+			}
+			fi, err := os.Stat(filepath.Join(filepath.Dir(r.home), "fake", "victim"))
+			if err != nil || fi.Mode().Perm() != 0o644 {
+				t.Errorf("the symlink's target: mode %v %v, want 0644 untouched", fi.Mode().Perm(), err)
+			}
+		})
 	}
 }
 

@@ -18,7 +18,14 @@
 #    proxmox-auto-install-assistant and xorriso from pve-no-subscription,
 #    trusting the Proxmox keyring only if its SHA-512 is PVE_KEYRING_SHA512;
 #    then validate-answer, prepare-iso --fetch-from iso, and inspect-iso for
-#    each node.
+#    each node. The tool (9.2.8) exits 0 even when a step fails, so after
+#    prepare-iso the container checks the node's ISO exists and is non-empty,
+#    and after inspect-iso that it printed something, and stops at the first
+#    failure (exit 4), naming the node and the step.
+#    prepare-iso stages a copy of the source ISO in /work/tmp (--tmp): its
+#    default is the source ISO's own directory, which is mounted read-only.
+#    So the output directory needs about 1.7 GB free beyond the two finished
+#    ISOs (about 1.7 GB each), while a node's ISO is being prepared.
 # 5. Prints each prepared ISO's sha256. The operator uploads the two ISOs by
 #    hand, as root, to qa-pve-02's local:iso/ under these exact names:
 #    pvh-n1-auto.iso and pvh-n2-auto.iso.
@@ -181,11 +188,16 @@ echo "$PVE_KEYRING_SHA512  $keyring" | sha512sum -c -
 printf "%s\n" "Types: deb" "URIs: http://download.proxmox.com/debian/pve" "Suites: trixie" "Components: pve-no-subscription" "Signed-By: $keyring" >/etc/apt/sources.list.d/pve.sources
 apt-get update
 apt-get install -y --no-install-recommends proxmox-auto-install-assistant xorriso
+mkdir -p /work/tmp
 for n in pvh-n1 pvh-n2; do
 	proxmox-auto-install-assistant validate-answer "/work/$n.toml"
-	proxmox-auto-install-assistant prepare-iso "/src/$SOURCE_ISO_NAME" --fetch-from iso --answer-file "/work/$n.toml" --output "/work/$n-auto.iso"
-	proxmox-auto-install-assistant inspect-iso "/work/$n-auto.iso"
+	proxmox-auto-install-assistant prepare-iso "/src/$SOURCE_ISO_NAME" --fetch-from iso --answer-file "/work/$n.toml" --output "/work/$n-auto.iso" --tmp /work/tmp
+	[ -s "/work/$n-auto.iso" ] || { echo "$n: prepare-iso wrote no /work/$n-auto.iso" >&2; exit 4; }
+	inspect=$(proxmox-auto-install-assistant inspect-iso "/work/$n-auto.iso")
+	printf "%s\n" "$inspect"
+	[ -n "$inspect" ] || { echo "$n: inspect-iso printed nothing for /work/$n-auto.iso" >&2; exit 4; }
 done
+rm -rf /work/tmp
 '
 iso_dir=${HB[SOURCE_ISO]%/*}
 iso_name=${HB[SOURCE_ISO]##*/}
