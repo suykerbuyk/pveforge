@@ -817,6 +817,7 @@ func applyLockBridgeOp(c *recordingNetworkClient) Op {
 		Iface:            applyLockCreateIface,
 		ManagementBridge: applyLockMgmtIface,
 		Wanted:           map[string]string{"type": "bridge", "bridge_ports": "eth1"},
+		mode:             modeCreate,
 	}
 }
 

@@ -454,3 +454,61 @@ func TestNewNetworkBridgeDestroyCmd_AlreadyAbsent_ReportsNoOpAndDoesNotStage(t *
 		t.Error("expected the op to have actually read the interface — a no-op line printed without reading anything would be vacuous")
 	}
 }
+
+// TestNewNetworkBridgeCreateCmd_FieldlessAbsent_IsNotASilentNoOp is the
+// cmd-level regression for pveforge-network-bridge-create-false-noop-live: a
+// bare `network bridge create` (NO field=value args) against an ABSENT bridge
+// must be dispatched as a CREATE, not silently satisfied as a destroy. The
+// server models absence exactly as PVE 9.2.11 does (400
+// {"errors":{"iface":"interface does not exist"}}). Before the fix this
+// printed "already up to date", exited 0, and wrote nothing. After the fix it
+// enters Apply as a create: it stages a POST, then errors at the kernel
+// LinkState read (which goes over SSH and has no endpoint in this REST-only
+// harness) — the "actually created" happy path is covered at the idempotent
+// layer by TestNetworkBridgeEnsure_Apply_FieldlessCreateCreates, where
+// LinkState is fakeable.
+func TestNewNetworkBridgeCreateCmd_FieldlessAbsent_IsNotASilentNoOp(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/nodes/qa-pve-01/network/vmbr0") {
+			// The management-bridge canary read must succeed.
+			_, _ = w.Write([]byte(`{"data":{"type":"bridge","bridge_ports":"eth0","active":1}}`))
+			return
+		}
+		// The target interface (vmbr5) is absent, exactly as PVE 9.2.11 reports.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":{"iface":"interface does not exist"},"data":null}`))
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-01", "qa-pve-01")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newNetworkBridgeCreateCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"--roster", rosterPath, "--management-bridge", "vmbr0",
+		"qa-pve-01", "vmbr5", // NO field=value args: a field-less create
+	})
+
+	err := cmd.Execute()
+	// It must NOT silently no-op. Before the fix a field-less create of an
+	// absent bridge was dispatched as a destroy, which absence satisfies, so
+	// Run never called Apply: it returned nil and printed "already up to date".
+	// After the fix it is a create, Satisfied is false, and Run enters Apply —
+	// which in this REST-only harness fails at the management-bridge kernel
+	// (LinkState) read, surfacing the Op's own error. Either way it is no
+	// longer a silent success-as-no-op.
+	if err == nil {
+		t.Fatalf("a field-less create of an ABSENT bridge must not succeed-as-no-op; out=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "network bridge ensure") {
+		t.Fatalf("expected the error to come from Apply (a create was attempted), got: %v", err)
+	}
+	if strings.Contains(out.String(), "already up to date") {
+		t.Errorf("a field-less create of an absent bridge must NOT report 'already up to date' (the shipped bug), got: %q", out.String())
+	}
+}

@@ -28,6 +28,7 @@ func newStageLeakBridgeOp(client *fakeNetworkBridgeClient) *NetworkBridgeEnsure 
 	return &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 }
 

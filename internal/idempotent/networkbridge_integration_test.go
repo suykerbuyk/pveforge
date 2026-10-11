@@ -198,6 +198,7 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 		Iface:            targetIface,
 		ManagementBridge: mgmtIface,
 		Wanted:           map[string]string{"type": "bridge", "bridge_ports": "eth1"},
+		mode:             modeCreate,
 	}
 	if err := op.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -295,7 +296,7 @@ func TestNetworkBridgeEnsure_Apply_Destroy_FullStack(t *testing.T) {
 		Node:             rc.Node(),
 		Iface:            targetIface,
 		ManagementBridge: mgmtIface,
-		Wanted:           nil, // destroy
+		mode:             modeDestroy,
 	}
 	if err := op.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
