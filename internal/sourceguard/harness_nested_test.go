@@ -188,7 +188,7 @@ func childEnv(t *testing.T, r probeResult, n int) string {
 }
 
 func bootstrapCall(node, ip, v string) string {
-	return "bootstrap " + node + " --roster ~/.config/pveforge/harness-nested.toml --host " + ip + " --node " + node + " --insecure-tls --grant " + nestedGrant + " --host-key-fingerprint " + ecdsaFP(v) + " -o json"
+	return "bootstrap " + node + " --roster ~/.config/pveforge/harness-nested.toml --host " + ip + " --node " + node + " --insecure-tls --grant " + nestedGrant + " --token-id " + node + " --host-key-fingerprint " + ecdsaFP(v) + " -o json"
 }
 
 func bridgeCall(node string) string {
@@ -249,6 +249,48 @@ func noPasswordLeaked(t *testing.T, r probeResult, mode string) {
 	}
 }
 
+// assertTokenIDIsNode reads the ACTUAL recorded bootstrap argv (not the
+// expected strings) and requires every "bootstrap <node> ... --token-id <tid>"
+// line to carry a --token-id equal to that line's own positional node, so each
+// nested node gets a distinct, node-named token that cannot collide in PVE's
+// cluster-wide token store. This is deliberately NOT a "the two ids differ"
+// check: two distinct-but-wrong ids (tok-a/tok-b) would pass a differ check but
+// must fail here. It fails if fewer than wantN bootstrap lines carry a
+// --token-id, so it can never pass vacuously.
+func assertTokenIDIsNode(t *testing.T, calls []string, wantN int) {
+	t.Helper()
+	seen := 0
+	for _, c := range calls {
+		f := strings.Fields(c)
+		if len(f) < 2 || f[0] != "bootstrap" {
+			continue
+		}
+		node := f[1]
+		tid, found := "", false
+		for i := 2; i < len(f); i++ {
+			if f[i] != "--token-id" {
+				continue
+			}
+			if i+1 >= len(f) {
+				t.Errorf("bootstrap %q: --token-id has no value: %s", node, c)
+				break
+			}
+			tid, found = f[i+1], true
+		}
+		if !found {
+			t.Errorf("bootstrap %q carries no --token-id: %s", node, c)
+			continue
+		}
+		if tid != node {
+			t.Errorf("bootstrap %q: --token-id = %q, want the node's own id %q (distinct per-node token): %s", node, tid, node, c)
+		}
+		seen++
+	}
+	if seen < wantN {
+		t.Fatalf("saw %d bootstrap calls carrying --token-id, want at least %d: the per-node token-id assertion must see both nodes and never pass vacuously", seen, wantN)
+	}
+}
+
 // N1: a first bootstrap: the roster is made, each node proves its pinned key
 // before its bootstrap, the password reaches bootstrap's environment only,
 // the grant is /:Administrator::1, and the pins agree.
@@ -258,6 +300,10 @@ func TestNested_Bootstrap(t *testing.T) {
 		t.Fatalf("exit %d:\n%s", r.code, r.stderr)
 	}
 	equalCalls(t, "calls", nestedCalls(r), nestedBootstrapCalls)
+	// M3: each node's token-id is its own name (distinct per node), verified
+	// against the real recorded argv, so the cluster-wide token store never
+	// collides as it did in the step-6 run that surfaced this fix.
+	assertTokenIDIsNode(t, nestedCalls(r), 2)
 	noPasswordLeaked(t, r, "bootstrap")
 	for i, c := range r.calls {
 		if strings.HasPrefix(c, "bootstrap ") && !strings.Contains(childEnv(t, r, i+1), "\nPVEFORGE_ROSTER_PASSPHRASE=not-a-secret\n") {

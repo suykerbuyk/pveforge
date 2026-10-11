@@ -277,7 +277,7 @@ if [ "$mode" = bootstrap ]; then
 		# must present that key.
 		brc=0
 		PVEFORGE_PVE_PASSWORD=$pw PVEFORGE_ROSTER_PASSPHRASE=$pass "$PVEFORGE_BIN" bootstrap "$node" --roster "$NESTED" --host "$ip" --node "$node" \
-			--insecure-tls --grant "$GRANT" --host-key-fingerprint "$ecdsa" -o json </dev/null >"$EVID/bootstrap-$node.json" 2>"$EVID/bootstrap-$node.stderr" || brc=$?
+			--insecure-tls --grant "$GRANT" --token-id "$node" --host-key-fingerprint "$ecdsa" -o json </dev/null >"$EVID/bootstrap-$node.json" 2>"$EVID/bootstrap-$node.stderr" || brc=$?
 		# 4. Afterwards: what the roster recorded, and what bootstrap reported,
 		# must be that pin at the configured address.
 		rec=$(roster_record "$node")
