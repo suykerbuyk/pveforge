@@ -211,7 +211,7 @@ func rawField(v string) json.RawMessage {
 
 func TestNetworkBridgeEnsure_Validate(t *testing.T) {
 	base := func() NetworkBridgeEnsure {
-		return NetworkBridgeEnsure{Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0"}
+		return NetworkBridgeEnsure{Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", mode: modeCreate}
 	}
 
 	t.Run("missing node", func(t *testing.T) {
@@ -256,6 +256,34 @@ func TestNetworkBridgeEnsure_Validate(t *testing.T) {
 			t.Fatalf("expected no error, got %v", err)
 		}
 	})
+
+	t.Run("mode unset -> error", func(t *testing.T) {
+		op := base()
+		op.mode = modeUnset
+		err := op.Validate()
+		if err == nil || !strings.Contains(err.Error(), "mode is unset") {
+			t.Fatalf("expected a mode-unset error, got %v", err)
+		}
+	})
+
+	t.Run("destroy with Wanted fields -> error", func(t *testing.T) {
+		op := base()
+		op.mode = modeDestroy
+		op.Wanted = map[string]string{"bridge_ports": "eth0"}
+		err := op.Validate()
+		if err == nil || !strings.Contains(err.Error(), "destroy carries no Wanted") {
+			t.Fatalf("expected a destroy-with-Wanted error, got %v", err)
+		}
+	})
+
+	t.Run("valid destroy (no Wanted)", func(t *testing.T) {
+		op := base()
+		op.mode = modeDestroy
+		op.Wanted = nil
+		if err := op.Validate(); err != nil {
+			t.Fatalf("expected no error for a fieldless destroy, got %v", err)
+		}
+	})
 }
 
 // --- Read / Satisfied ---------------------------------------------------
@@ -263,7 +291,7 @@ func TestNetworkBridgeEnsure_Validate(t *testing.T) {
 func TestNetworkBridgeEnsure_Read(t *testing.T) {
 	t.Run("interface does not exist", func(t *testing.T) {
 		client := newFakeNetworkBridgeClient("pve1")
-		op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0"}
+		op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", mode: modeDestroy}
 		current, err := op.Read(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -276,7 +304,7 @@ func TestNetworkBridgeEnsure_Read(t *testing.T) {
 	t.Run("interface exists", func(t *testing.T) {
 		client := newFakeNetworkBridgeClient("pve1")
 		client.getResponses["vmbr99"] = []getResponse{{fields: map[string]json.RawMessage{"bridge_ports": rawField("eth0")}}}
-		op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0"}
+		op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", mode: modeDestroy}
 		current, err := op.Read(context.Background())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -295,57 +323,87 @@ func TestNetworkBridgeEnsure_Read(t *testing.T) {
 }
 
 func TestNetworkBridgeEnsure_Satisfied(t *testing.T) {
-	t.Run("does not exist, create wanted -> not satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{Wanted: map[string]string{"bridge_ports": "eth0"}}
+	// ANTI-VACUITY (resume #13): each pair runs the SAME `current` through a
+	// create op and a destroy op and asserts OPPOSITE results. A regression
+	// that ignores op.mode (or reverts to the len(Wanted) discriminator)
+	// collapses a pair to equal values and is caught here — these assertions
+	// cannot pass vacuously, because create and destroy must disagree on both
+	// an absent and a present interface.
+	const presentMatch = `{"type":"bridge","bridge_ports":"eth0"}`
+	mkCreate := func(w map[string]string) *NetworkBridgeEnsure {
+		return NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", w)
+	}
+	mkDestroy := func() *NetworkBridgeEnsure {
+		return NewNetworkBridgeDestroy(nil, "pve1", "vmbr99", "vmbr0")
+	}
+
+	t.Run("absent: create NOT satisfied, destroy satisfied", func(t *testing.T) {
+		c, d := mkCreate(map[string]string{"bridge_ports": "eth0"}), mkDestroy()
+		if c.Satisfied("") {
+			t.Error("create against an absent iface must NOT be satisfied")
+		}
+		if !d.Satisfied("") {
+			t.Error("destroy against an absent iface must be satisfied")
+		}
+	})
+
+	t.Run("present & matching: create satisfied, destroy NOT satisfied", func(t *testing.T) {
+		c, d := mkCreate(map[string]string{"bridge_ports": "eth0"}), mkDestroy()
+		if !c.Satisfied(presentMatch) {
+			t.Error("create with matching fields must be satisfied")
+		}
+		if d.Satisfied(presentMatch) {
+			t.Error("destroy against a present iface must NOT be satisfied")
+		}
+	})
+
+	// THE BUG-CATCHER (pveforge-network-bridge-create-false-noop-live): a
+	// field-less create (empty Wanted) against an absent iface must NOT be
+	// satisfied — the exact case that silently no-op'd as a destroy.
+	t.Run("field-less create, absent -> NOT satisfied (bug-catcher)", func(t *testing.T) {
+		if mkCreate(nil).Satisfied("") {
+			t.Fatal("a field-less create against an absent iface must NOT be satisfied")
+		}
+		// And effectiveWanted still seeds type=bridge for a field-less create.
+		if ew := mkCreate(nil).effectiveWanted(); ew["type"] != "bridge" {
+			t.Fatalf("field-less create effectiveWanted = %v, want type=bridge", ew)
+		}
+	})
+
+	// modeUnset must fail CLOSED in both directions — it is reachable by
+	// idempotent.Run before Apply/Validate run, so it must never report
+	// "already satisfied".
+	t.Run("modeUnset fails closed", func(t *testing.T) {
+		var op NetworkBridgeEnsure // zero value: modeUnset
 		if op.Satisfied("") {
-			t.Fatalf("expected not satisfied")
+			t.Error("modeUnset must not satisfy an absent iface")
+		}
+		if op.Satisfied(presentMatch) {
+			t.Error("modeUnset must not satisfy a present iface")
 		}
 	})
 
-	t.Run("exists with matching fields, create wanted -> satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{Wanted: map[string]string{"bridge_ports": "eth0"}}
-		current := `{"type":"bridge","bridge_ports":"eth0","active":"1"}`
-		if !op.Satisfied(current) {
-			t.Fatalf("expected satisfied")
-		}
-	})
-
-	// The create's type=bridge default is part of what is checked, not only
+	// The create's type=bridge default is part of what is CHECKED, not only
 	// of what is sent: an existing interface of another type with otherwise
 	// matching fields is not the bridge that was asked for.
-	t.Run("exists as another type with matching fields, no type named -> not satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{Wanted: map[string]string{"mtu": "9000"}}
-		if op.Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
-			t.Fatalf("an OVSBridge must not satisfy a bridge create")
+	t.Run("exists as another type, no type named -> create NOT satisfied", func(t *testing.T) {
+		if mkCreate(map[string]string{"mtu": "9000"}).Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
+			t.Fatal("an OVSBridge must not satisfy a bridge create")
 		}
 	})
-	t.Run("explicit type named and matching -> satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{Wanted: map[string]string{"mtu": "9000", "type": "OVSBridge"}}
-		if !op.Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
-			t.Fatalf("an explicitly named type that matches must satisfy")
+	t.Run("explicit type named and matching -> create satisfied", func(t *testing.T) {
+		if !mkCreate(map[string]string{"mtu": "9000", "type": "OVSBridge"}).Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
+			t.Fatal("an explicitly named type that matches must satisfy")
 		}
 	})
-
-	t.Run("exists with mismatching field, create wanted -> not satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{Wanted: map[string]string{"bridge_ports": "eth0"}}
-		current := `{"bridge_ports":"eth1"}`
-		if op.Satisfied(current) {
-			t.Fatalf("expected not satisfied")
+	t.Run("exists with mismatching field -> create NOT satisfied", func(t *testing.T) {
+		if mkCreate(map[string]string{"bridge_ports": "eth0"}).Satisfied(`{"type":"bridge","bridge_ports":"eth1"}`) {
+			t.Fatal("a mismatching field must not be satisfied")
 		}
 	})
-
-	t.Run("exists, destroy wanted -> not satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{}
-		current := `{"bridge_ports":"eth0"}`
-		if op.Satisfied(current) {
-			t.Fatalf("expected not satisfied")
-		}
-	})
-
-	t.Run("does not exist, destroy wanted -> satisfied", func(t *testing.T) {
-		op := &NetworkBridgeEnsure{}
-		if !op.Satisfied("") {
-			t.Fatalf("expected satisfied")
+	t.Run("missing wanted key -> create NOT satisfied", func(t *testing.T) {
+		if mkCreate(map[string]string{"mtu": "9000"}).Satisfied(`{"type":"bridge"}`) {
+			t.Fatal("an absent wanted key must not be satisfied")
 		}
 	})
 }
@@ -483,9 +541,14 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			op := &NetworkBridgeEnsure{Wanted: tc.wanted}
+			op := NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", tc.wanted)
 			if got := op.Satisfied(tc.current); got != tc.want {
 				t.Fatalf("Satisfied(%s) with Wanted %v = %v, want %v", tc.current, tc.wanted, got, tc.want)
+			}
+			// Anti-vacuity: the SAME current in destroy mode must follow
+			// !exists, never the create result — proof op.mode is consulted.
+			if d := NewNetworkBridgeDestroy(nil, "pve1", "vmbr99", "vmbr0").Satisfied(tc.current); d != (tc.current == "") {
+				t.Fatalf("destroy Satisfied(%s) = %v, want %v (!exists)", tc.current, d, tc.current == "")
 			}
 		})
 	}
@@ -523,7 +586,7 @@ func TestNetworkBridgeEnsure_Apply_ExistingOtherTypeRefusedBeforeStaging(t *test
 			client.getResponses["vmbr99"] = []getResponse{{fields: fields}}
 			client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
 
-			op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", Wanted: c.wanted}
+			op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", Wanted: c.wanted, mode: modeCreate}
 			err := op.Apply(context.Background())
 			if err == nil || !strings.Contains(err.Error(), "already exists as type") || !strings.Contains(err.Error(), "nothing staged") {
 				t.Fatalf("Apply = %v, want a refusal naming the existing type", err)
@@ -546,6 +609,7 @@ func TestNetworkBridgeEnsure_Apply_CreateSucceeds(t *testing.T) {
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -569,6 +633,33 @@ func TestNetworkBridgeEnsure_Apply_CreateSucceeds(t *testing.T) {
 	}
 }
 
+// TestNetworkBridgeEnsure_Apply_FieldlessCreateCreates is the end-to-end
+// regression for pveforge-network-bridge-create-false-noop-live: a create with
+// NO caller fields against an absent interface must actually stage (POST) and
+// commit (PUT) a plain bridge, never silently no-op as a destroy. Built via
+// the constructor, exactly as cmd/pveforge now does.
+func TestNetworkBridgeEnsure_Apply_FieldlessCreateCreates(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}} // absent before
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}, {Exists: true}}
+	client.commitUPID = "UPID:pve1:00000001:00000002:00000003:00000004:test:root@pam:"
+
+	op := NewNetworkBridgeCreate(client, "pve1", "vmbr99", "vmbr0", nil) // field-less
+	if err := op.Apply(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.commitCalls != 1 || client.revertCalls != 0 {
+		t.Fatalf("field-less create must stage+commit: commits=%d reverts=%d", client.commitCalls, client.revertCalls)
+	}
+	// Exactly the interface and the type=bridge default — a real create, not a
+	// destroy and not a no-op.
+	if got, want := client.lastStageParams.Encode(), "iface=vmbr99&type=bridge"; got != want {
+		t.Fatalf("stage params = %q, want exactly %q", got, want)
+	}
+}
+
 // TestNetworkBridgeEnsure_Apply_CreateSendsAnExplicitTypeAsGiven: a type the
 // caller named is sent as given, not replaced by the default.
 func TestNetworkBridgeEnsure_Apply_CreateSendsAnExplicitTypeAsGiven(t *testing.T) {
@@ -582,6 +673,7 @@ func TestNetworkBridgeEnsure_Apply_CreateSendsAnExplicitTypeAsGiven(t *testing.T
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1", "type": "OVSBridge"},
+		mode:   modeCreate,
 	}
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -621,6 +713,7 @@ func TestNetworkBridgeEnsure_Apply_StanzaChangedDuringStage_AbortsAndReverts(t *
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -651,6 +744,7 @@ func TestNetworkBridgeEnsure_Apply_PostApplyManagementBridgeKernelMismatch(t *te
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -682,6 +776,7 @@ func TestNetworkBridgeEnsure_Apply_ByteIdenticalStanzaStillGuardChecked(t *testi
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -718,6 +813,7 @@ func TestNetworkBridgeEnsure_Apply_WaitForTaskSucceeds_ThenRunsPostApplyCheck(t 
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -740,6 +836,7 @@ func TestNetworkBridgeEnsure_Apply_WaitForTaskFails_TaskFailedError(t *testing.T
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -764,6 +861,7 @@ func TestNetworkBridgeEnsure_Apply_WaitForTaskFails_Timeout(t *testing.T) {
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -788,6 +886,7 @@ func TestNetworkBridgeEnsure_Apply_Create_GuardPasses_ProceedsNormally(t *testin
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -813,6 +912,7 @@ func TestNetworkBridgeEnsure_Apply_Create_GuardActiveAlreadyTrue_Aborts(t *testi
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -845,6 +945,7 @@ func TestNetworkBridgeEnsure_Apply_Create_GuardLinkExists_Aborts(t *testing.T) {
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -874,7 +975,7 @@ func TestNetworkBridgeEnsure_Apply_Destroy_GuardPasses_ProceedsNormally(t *testi
 
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
-		// Wanted nil/empty means destroy.
+		mode: modeDestroy,
 	}
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -894,7 +995,7 @@ func TestNetworkBridgeEnsure_Apply_Destroy_GuardActiveAlreadyFalse_Aborts(t *tes
 	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
 	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: true}}
 
-	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0"}
+	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", mode: modeDestroy}
 	err := op.Apply(context.Background())
 	if err == nil {
 		t.Fatalf("expected error")
@@ -914,7 +1015,7 @@ func TestNetworkBridgeEnsure_Apply_Destroy_GuardLinkGone_Aborts(t *testing.T) {
 	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
 	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}} // kernel already shows it gone
 
-	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0"}
+	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", mode: modeDestroy}
 	err := op.Apply(context.Background())
 	if err == nil {
 		t.Fatalf("expected error")
@@ -937,6 +1038,7 @@ func TestNetworkBridgeEnsure_Apply_ManagementBridgeMissing_HardError(t *testing.
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
@@ -955,6 +1057,7 @@ func TestNetworkBridgeEnsure_Apply_ManagementBridgeVanishedDuringStage(t *testin
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "vanished") {
@@ -974,6 +1077,7 @@ func TestNetworkBridgeEnsure_Apply_StageError_Propagates(t *testing.T) {
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "pve rejected the staged create") {
@@ -991,6 +1095,7 @@ func TestNetworkBridgeEnsure_Apply_CommitError_Propagates(t *testing.T) {
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "pve rejected the commit") {
@@ -1014,6 +1119,7 @@ func TestNetworkBridgeEnsure_Apply_Step8Mismatch_HardError(t *testing.T) {
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "post-apply kernel state mismatch") {
@@ -1035,6 +1141,7 @@ func TestNetworkBridgeEnsure_Apply_CommitReturnsEmptyUPID_HardError(t *testing.T
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "commit returned no upid") {
@@ -1066,6 +1173,7 @@ func TestNetworkBridgeEnsure_Apply_GuardTripAndRevertBothFail_CombinedError(t *t
 	op := &NetworkBridgeEnsure{
 		Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0",
 		Wanted: map[string]string{"bridge_ports": "eth1"},
+		mode:   modeCreate,
 	}
 	err := op.Apply(context.Background())
 	if err == nil {
@@ -1088,7 +1196,7 @@ func TestNetworkBridgeEnsure_Apply_GuardTripAndRevertBothFail_CombinedError(t *t
 func TestNetworkBridgeEnsure_Read_PropagatesHardError(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
 	client.getResponses["vmbr99"] = []getResponse{{err: errors.New("connection reset")}}
-	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0"}
+	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", mode: modeDestroy}
 	_, err := op.Read(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "connection reset") {
 		t.Fatalf("expected hard error to propagate, got %v", err)

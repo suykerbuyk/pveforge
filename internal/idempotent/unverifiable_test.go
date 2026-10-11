@@ -321,9 +321,9 @@ func TestNetworkFieldsEnsure_EmptyOtherInterfacesListRefuses(t *testing.T) {
 // --- Network bridge: null body and the missing-interface classifier -------
 
 func uvNetOp(client *fakeNetworkBridgeClient, iface string) *NetworkBridgeEnsure {
-	// Wanted empty = destroy: the direction in which "absent" satisfies the
-	// Op and a misread silently no-ops while reporting success.
-	return &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: iface, ManagementBridge: "vmbr0"}
+	// Destroy: the direction in which "absent" satisfies the Op and a misread
+	// silently no-ops while reporting success.
+	return NewNetworkBridgeDestroy(client, "pve1", iface, "vmbr0")
 }
 
 func TestNetworkBridgeEnsure_Destroy_NullBodyIsUnverifiableNotAbsent(t *testing.T) {
@@ -475,7 +475,7 @@ func TestNetworkBridgeEnsure_NullManagementBridgeIsUnverifiable(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
 	client.getResponses["vmbr0"] = []getResponse{{fields: nil}}
 	op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr9", ManagementBridge: "vmbr0",
-		Wanted: map[string]string{"bridge_ports": "eth1"}}
+		Wanted: map[string]string{"bridge_ports": "eth1"}, mode: modeCreate}
 	err := op.Apply(context.Background())
 	if client.stageCalls != 0 {
 		t.Errorf("stage issued %d time(s) with an unverified management bridge", client.stageCalls)

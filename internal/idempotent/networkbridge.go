@@ -92,16 +92,58 @@ type NetworkBridgeClient interface {
 //     "vmbr1" never matches "vmbr1.100", "vmbr10", "vmbr1_x" or "vmbr1-x",
 //     and "br0" never matches "vmbr0".
 //
-// UNVERIFIED against a live host: PVE's exact response for GET
-// /nodes/{node}/network/{iface} on a missing interface. The expectation is
-// a 400 parameter-verification error (raise_param_exc({ iface =>
-// "interface does not exist" })), which form 2 accepts. Form 1 is a hedge
-// for a response that names the interface in free text instead. If PVE
-// answers in any other shape, the error propagates as a hard Read/Apply
-// error instead of "absent", which is the safe direction for both create
-// and destroy.
+// VERIFIED live on PVE 9.2.11 (pveforge-nested-pve-test-harness, 2026-10-11):
+// GET /nodes/{node}/network/{iface} on a missing interface returns HTTP 400
+// {"errors":{"iface":"interface does not exist"},"message":"Parameter
+// verification failed.\n","data":null} — form 2 (structured, generic phrase),
+// which this accepts. Form 1 remains a hedge for a response that names the
+// interface in free text instead. If PVE answers in any other shape, the
+// error propagates as a hard Read/Apply error instead of "absent", which is
+// the safe direction for both create and destroy.
 func isMissingNetworkInterfaceError(err error, iface string) bool {
 	return pve.NotFound(err, pve.Subject{Param: "iface", Name: iface, Nouns: []string{"iface", "interface"}})
+}
+
+// networkBridgeMode is NetworkBridgeEnsure's explicit create/destroy
+// discriminator. The zero value modeUnset is deliberately NOT a valid mode:
+// Validate rejects it and Satisfied fails closed on it, so an Op that never
+// declared intent can never be acted on. Create vs destroy is this, never
+// len(Wanted) — see Wanted's own doc comment and
+// pveforge-network-bridge-create-false-noop-live.
+type networkBridgeMode int
+
+const (
+	modeUnset networkBridgeMode = iota
+	modeCreate
+	modeDestroy
+)
+
+// NewNetworkBridgeCreate builds a CREATE NetworkBridgeEnsure for iface on node,
+// with mgmtBridge as the guard canary (see NetworkBridgeEnsure.ManagementBridge)
+// and wanted the caller's field=value pairs (may be nil/empty — a field-less
+// create still creates a plain bridge, since effectiveWanted seeds type=bridge).
+func NewNetworkBridgeCreate(client NetworkBridgeClient, node, iface, mgmtBridge string, wanted map[string]string) *NetworkBridgeEnsure {
+	return &NetworkBridgeEnsure{
+		Client:           client,
+		Node:             node,
+		Iface:            iface,
+		ManagementBridge: mgmtBridge,
+		Wanted:           wanted,
+		mode:             modeCreate,
+	}
+}
+
+// NewNetworkBridgeDestroy builds a DESTROY NetworkBridgeEnsure for iface on
+// node, with mgmtBridge as the guard canary. A destroy carries no Wanted
+// fields by construction.
+func NewNetworkBridgeDestroy(client NetworkBridgeClient, node, iface, mgmtBridge string) *NetworkBridgeEnsure {
+	return &NetworkBridgeEnsure{
+		Client:           client,
+		Node:             node,
+		Iface:            iface,
+		ManagementBridge: mgmtBridge,
+		mode:             modeDestroy,
+	}
 }
 
 // NetworkBridgeEnsure is idempotent.Op for creating or destroying one PVE
@@ -159,9 +201,20 @@ type NetworkBridgeEnsure struct {
 	// disguised as one. This is a deliberate safety property, not an
 	// oversight — do not add a default.
 	ManagementBridge string
-	// Wanted is the field=value pairs to ensure on Iface for a CREATE.
-	// nil or empty means "destroy Iface" instead.
+	// Wanted is the field=value pairs to ensure on Iface for a CREATE. It
+	// does NOT select create vs destroy — op.mode does. A create with no
+	// caller fields (empty Wanted) is still unambiguously a create (this is
+	// what pveforge-network-bridge-create-false-noop-live fixed: overloading
+	// Wanted-emptiness as the discriminator turned a field-less create into a
+	// destroy, which an absent interface silently satisfied).
 	Wanted map[string]string
+
+	// mode is the create/destroy discriminator. It is UNEXPORTED and set only
+	// by NewNetworkBridgeCreate / NewNetworkBridgeDestroy, so a caller outside
+	// this package cannot build the Op without declaring intent. Its zero
+	// value, modeUnset, is rejected by Validate and fails closed in Satisfied
+	// (which idempotent.Run calls before Apply/Validate ever run).
+	mode networkBridgeMode
 
 	// currentFields, preStanzaHash, and preKernelState are populated by
 	// Apply's own step 1 (the pre-stage snapshot of ManagementBridge) and
@@ -199,6 +252,12 @@ func (op *NetworkBridgeEnsure) Validate() error {
 	}
 	if _, ok := op.Wanted["iface"]; ok {
 		return fmt.Errorf("network bridge ensure: iface %s: Wanted must not itself contain an \"iface\" key; Apply always sets it from Iface", op.Iface)
+	}
+	if op.mode != modeCreate && op.mode != modeDestroy {
+		return fmt.Errorf("network bridge ensure: iface %s: mode is unset; construct with NewNetworkBridgeCreate or NewNetworkBridgeDestroy", op.Iface)
+	}
+	if op.mode == modeDestroy && len(op.Wanted) > 0 {
+		return fmt.Errorf("network bridge ensure: iface %s: a destroy carries no Wanted fields (got %d)", op.Iface, len(op.Wanted))
 	}
 	return nil
 }
@@ -270,32 +329,43 @@ func (op *NetworkBridgeEnsure) Read(ctx context.Context) (string, error) {
 func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 	exists := current != ""
 
-	wanted := op.effectiveWanted()
-	if len(wanted) == 0 {
+	switch op.mode {
+	case modeDestroy:
 		return !exists
-	}
-	if !exists {
-		return false
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(current), &fields); err != nil {
-		// Corrupted input reads as unsatisfied (safe to fail toward
-		// re-Apply) — Satisfied has no error return to report this any
-		// other way, matching parseBridgeIsolationState's own contract.
-		return false
-	}
-	for field, want := range wanted {
-		raw, ok := fields[field]
-		if !ok {
+	case modeCreate:
+		if !exists {
 			return false
 		}
-		got, err := kvjson.Scalar(raw)
-		if err != nil || !fieldsEqual(got, want) {
+		// effectiveWanted is never empty for a create (it seeds type=bridge),
+		// so a field-less create still demands the interface exist AND be a
+		// bridge — never the old len==0 "destroy satisfied by absence" path.
+		wanted := op.effectiveWanted()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(current), &fields); err != nil {
+			// Corrupted input reads as unsatisfied (safe to fail toward
+			// re-Apply) — Satisfied has no error return to report this any
+			// other way, matching parseBridgeIsolationState's own contract.
 			return false
 		}
+		for field, want := range wanted {
+			raw, ok := fields[field]
+			if !ok {
+				return false
+			}
+			got, err := kvjson.Scalar(raw)
+			if err != nil || !fieldsEqual(got, want) {
+				return false
+			}
+		}
+		return true
+	default:
+		// modeUnset: fail CLOSED. idempotent.Run calls Satisfied before Apply
+		// (and thus before Validate) ever run, so a non-false answer here
+		// would let an Op that never declared create/destroy intent vacuously
+		// report "already satisfied" and no-op. Returning false forces Apply,
+		// where Validate then rejects modeUnset loudly.
+		return false
 	}
-	return true
 }
 
 // effectiveWanted is what a create actually asks for: Wanted, plus
@@ -303,9 +373,10 @@ func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 // create, and a bridge is what this Op is named after. Satisfied and stage
 // both use it, so the default that is sent is also the default that is
 // checked: an existing interface of another type with otherwise matching
-// fields is not "already up to date". Empty for a destroy.
+// fields is not "already up to date". nil for a destroy or an unset mode;
+// never empty for a create (it always carries at least type=bridge).
 func (op *NetworkBridgeEnsure) effectiveWanted() map[string]string {
-	if len(op.Wanted) == 0 {
+	if op.mode != modeCreate {
 		return nil
 	}
 	out := make(map[string]string, len(op.Wanted)+1)
@@ -352,7 +423,8 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	// A create of an interface that already exists as another type cannot
 	// be what was asked: refuse it here, before anything is staged, rather
 	// than stage a create PVE (or the step-4 guard) would then reject.
-	if want := op.effectiveWanted(); len(want) > 0 {
+	if op.mode == modeCreate {
+		want := op.effectiveWanted()
 		existing, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
 		if err != nil {
 			return fmt.Errorf("network bridge ensure: %s: pre-stage read: %w", op.Iface, err)
@@ -456,7 +528,7 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("network bridge ensure: %s: post-apply kernel check: %w", op.Iface, err)
 	}
-	wantExists := len(op.Wanted) > 0
+	wantExists := op.mode == modeCreate
 	if ifaceLink.Exists != wantExists {
 		return fmt.Errorf("network bridge ensure: %s: post-apply kernel state mismatch: expected exists=%v, kernel reports exists=%v", op.Iface, wantExists, ifaceLink.Exists)
 	}
@@ -497,7 +569,7 @@ func (op *NetworkBridgeEnsure) guardSelfCheck(ctx context.Context) error {
 		return revertStagedAfter(ctx, op.Client, op.Node, fmt.Errorf("network bridge ensure: %s: guard self-check: read kernel link state: %w", op.Iface, err))
 	}
 
-	creating := len(op.Wanted) > 0
+	creating := op.mode == modeCreate
 	if creating {
 		if active {
 			return op.abortAndRevert(ctx, fmt.Sprintf("guard self-check failed: op.Iface %s already reports active=true immediately after staging, before commit", op.Iface))
@@ -538,7 +610,8 @@ func activeTruthy(s string) bool {
 // /nodes/{node}/network/{Iface}. Targets ONLY Iface — never
 // ManagementBridge.
 func (op *NetworkBridgeEnsure) stage(ctx context.Context) error {
-	if want := op.effectiveWanted(); len(want) > 0 {
+	if op.mode == modeCreate {
+		want := op.effectiveWanted()
 		// effectiveWanted carries the type=bridge default when the caller
 		// named no type: PVE's schema lists type as required on this
 		// create. UNVERIFIED against a live host: that PVE refuses the

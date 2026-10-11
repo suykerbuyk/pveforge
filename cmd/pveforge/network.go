@@ -149,13 +149,7 @@ status is still 0.`,
 			}
 
 			key := idempotent.NetworkLockKey(args[0], client.Node())
-			op := &idempotent.NetworkBridgeEnsure{
-				Client:           client,
-				Node:             client.Node(),
-				Iface:            args[1],
-				ManagementBridge: managementBridge,
-				Wanted:           wanted,
-			}
+			op := idempotent.NewNetworkBridgeCreate(client, client.Node(), args[1], managementBridge, wanted)
 
 			// Explicit, ahead of Run: idempotent.Run calls Satisfied before
 			// Apply, and if the bridge already matches the wanted fields,
@@ -240,13 +234,7 @@ status is still 0.`,
 			}
 
 			key := idempotent.NetworkLockKey(args[0], client.Node())
-			op := &idempotent.NetworkBridgeEnsure{
-				Client:           client,
-				Node:             client.Node(),
-				Iface:            args[1],
-				ManagementBridge: managementBridge,
-				Wanted:           nil,
-			}
+			op := idempotent.NewNetworkBridgeDestroy(client, client.Node(), args[1], managementBridge)
 
 			if err := op.Validate(); err != nil {
 				return err
