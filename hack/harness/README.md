@@ -71,6 +71,10 @@ Each step relies on the ones before it:
 
   A node that doesn't serve exactly one ECDSA key is refused before any
   password.
+
+  Each node is bootstrapped with its own `--token-id` (the node name), so the
+  tokens are `root@pam!pvh-n1` and `root@pam!pvh-n2`: PVE's token store is
+  cluster-wide, so one shared token-id would collide on the second node.
 - **After `build.sh --repin`, or any rebuild:** the new VMs have new host
   keys, so the old nested roster's pins no longer match. nested.sh refuses
   that roster before sending any password, naming what it holds. To recover:
