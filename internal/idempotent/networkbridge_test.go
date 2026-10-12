@@ -109,7 +109,8 @@ func (f *fakeNetworkBridgeClient) RawRequest(_ context.Context, method, path str
 		return json.RawMessage("null"), nil
 
 	case method == http.MethodPut && path == base:
-		// commit.
+		// commit (exact collection path; must be matched BEFORE the
+		// iface-path PUT stage arm below so a converge PUT never swallows it).
 		f.commitCalls++
 		if f.commitErr != nil {
 			return nil, f.commitErr
@@ -119,6 +120,20 @@ func (f *fakeNetworkBridgeClient) RawRequest(_ context.Context, method, path str
 			return nil, err
 		}
 		return json.RawMessage(b), nil
+
+	case method == http.MethodPut && strings.HasPrefix(path, base+"/"):
+		// stage: converge an existing same-type iface (PUT targets the iface
+		// path). Records all three fields exactly as the POST (create) arm
+		// does — stageCalls, lastStageMethod AND lastStageParams — so a
+		// param-shape assertion is never silently vacuous (unlike the DELETE
+		// arm, which intentionally drops params).
+		f.stageCalls++
+		f.lastStageMethod = method
+		f.lastStageParams = params
+		if f.stageErr != nil {
+			return nil, f.stageErr
+		}
+		return json.RawMessage("null"), nil
 
 	default:
 		return nil, fmt.Errorf("fakeNetworkBridgeClient: unexpected RawRequest %s %s", method, path)
@@ -615,6 +630,209 @@ func TestNetworkBridgeEnsure_Apply_ExistingOtherTypeRefusedBeforeStaging(t *test
 				t.Errorf("staged=%v commits=%d reverts=%d, want nothing sent", client.lastStageParams, client.commitCalls, client.revertCalls)
 			}
 		})
+	}
+}
+
+// TestNetworkBridgeEnsure_Run_AbsentCreatesViaPOST drives the ABSENT case
+// through idempotent.Run (the path the CLI and harness actually take: Read ->
+// Satisfied -> Apply), so a stage-always-PUT regression dies on the Run path,
+// not only under a direct Apply call. An absent interface must stage a POST to
+// the collection with iface in the body.
+func TestNetworkBridgeEnsure_Run_AbsentCreatesViaPOST(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+	// Read (absent) -> Satisfied false -> Apply create-block (absent) -> POST.
+	client.getResponses["vmbr99"] = []getResponse{{missing: true}, {missing: true}, {missing: true}}
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}, {Exists: true}}
+	client.commitUPID = "UPID:pve1:00000001:00000002:00000003:00000004:test:root@pam:"
+
+	op := NewNetworkBridgeCreate(client, "pve1", "vmbr99", "vmbr0", nil) // field-less
+	res, err := Run(context.Background(), testRosterPath(t), NetworkLockKey("pve1", "pve1"), op, false)
+	if err != nil {
+		t.Fatalf("Run: unexpected error: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("Run: expected Changed=true for an absent create")
+	}
+	if client.lastStageMethod != http.MethodPost {
+		t.Fatalf("absent create must stage a POST, got %q", client.lastStageMethod)
+	}
+	if got, want := client.lastStageParams.Encode(), "autostart=1&iface=vmbr99&type=bridge"; got != want {
+		t.Fatalf("stage params = %q, want exactly %q", got, want)
+	}
+	if client.commitCalls != 1 || client.revertCalls != 0 {
+		t.Fatalf("absent create must stage+commit once: commits=%d reverts=%d", client.commitCalls, client.revertCalls)
+	}
+}
+
+// TestNetworkBridgeEnsure_Run_ConvergeDormantViaPUT is THE harness case: a
+// field-less create over a pre-existing same-type DORMANT stanza ({"type":
+// "bridge"}, no autostart, not live) must CONVERGE it — stage a PUT to the
+// iface path with the wanted fields and NO iface param — not POST (which PVE
+// 400s "interface already exists", the pveforge-network-bridge-create-not-
+// idempotent-existing-stanza defect). Driven through idempotent.Run. The guard
+// GET still carries no `active`, so the guard passes legitimately (not because
+// the fixture handed it a magically-live stanza). Bring-up itself is NOT
+// asserted offline (the fakes script kernel liveness independently of the PUT);
+// the nested step-7 re-run is the sole bring-up proof.
+//
+// R-N2: this is NOT the guard pin — if it ever goes red on a guard-skip mutant
+// that is step-8 LinkState-script displacement, not a guard assertion.
+// TestNetworkBridgeEnsure_Apply_ConvergeLiveBridgeFailsGuard is the guard killer.
+func TestNetworkBridgeEnsure_Run_ConvergeDormantViaPUT(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+	dormant := map[string]json.RawMessage{"type": rawField("bridge")}             // no autostart, no active
+	converged := map[string]json.RawMessage{"type": rawField("bridge"), "autostart": json.RawMessage("1")}
+	// Run.Read (dormant, Satisfied false) -> Apply create-block (dormant, same
+	// type -> converge) -> guard GET (still no active -> not-live, passes) ->
+	// Run re-read (autostart now present).
+	client.getResponses["vmbr99"] = []getResponse{{fields: dormant}, {fields: dormant}, {fields: dormant}, {fields: converged}}
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}, {Exists: true}} // guard: not-live; step-8: live
+	client.commitUPID = "UPID:pve1:00000001:00000002:00000003:00000004:test:root@pam:"
+
+	op := NewNetworkBridgeCreate(client, "pve1", "vmbr99", "vmbr0", nil) // field-less, like nested.sh
+	res, err := Run(context.Background(), testRosterPath(t), NetworkLockKey("pve1", "pve1"), op, false)
+	if err != nil {
+		t.Fatalf("Run: unexpected error: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("Run: expected Changed=true converging a dormant stanza")
+	}
+	if client.lastStageMethod != http.MethodPut {
+		t.Fatalf("converge must stage a PUT, got %q", client.lastStageMethod)
+	}
+	// Exact body: the wanted fields only — type=bridge (matches the existing
+	// same-type) and autostart=1 (bring-up), and NO iface param (iface is in
+	// the path). This single assertion kills both "iface in the body" and
+	// "omits autostart".
+	if got, want := client.lastStageParams.Encode(), "autostart=1&type=bridge"; got != want {
+		t.Fatalf("converge PUT params = %q, want exactly %q", got, want)
+	}
+	// R-N4: THIS event-index assertion (not lastStageMethod) is what proves the
+	// stage was an iface-path PUT and not the collection PUT. lastStageMethod
+	// cannot distinguish them — the fake's commit arm (PUT == collection) never
+	// sets lastStageMethod, so a converge that wrongly PUT the collection would
+	// still read lastStageMethod=="" here and the method check above would be
+	// inconclusive. Do not delete this as redundant.
+	if idx := client.eventIndex("rawrequest:PUT:/nodes/pve1/network/vmbr99", 0); idx < 0 {
+		t.Fatalf("expected a PUT to the iface path; events=%v", client.events)
+	}
+	for _, e := range client.events {
+		if e == "rawrequest:POST:/nodes/pve1/network" {
+			t.Fatalf("converge must not POST; events=%v", client.events)
+		}
+	}
+	if client.commitCalls != 1 || client.revertCalls != 0 {
+		t.Fatalf("converge must stage+commit once: commits=%d reverts=%d", client.commitCalls, client.revertCalls)
+	}
+	if !strings.Contains(res.After, "autostart") {
+		t.Fatalf("re-read After = %q, want it to show the converged autostart field", res.After)
+	}
+}
+
+// TestNetworkBridgeEnsure_Run_ConvergeCarriesCallerFields pins R-N1 (mutant MF):
+// the converge PUT body is the FULL effectiveWanted() — every caller field plus
+// the type=bridge/autostart=1 seeds — not just type+autostart. A create of a
+// same-type dormant bridge with a caller field (bridge_ports=eth1) must PUT all
+// three; a mutant that drops non-type/non-autostart fields from the PUT body
+// goes red here on the exact Encode().
+func TestNetworkBridgeEnsure_Run_ConvergeCarriesCallerFields(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+	// Dormant same-type, and bridge_ports differs so Satisfied is false and the
+	// converge re-drives the field alongside the autostart bring-up.
+	dormant := map[string]json.RawMessage{"type": rawField("bridge")}
+	client.getResponses["vmbr99"] = []getResponse{{fields: dormant}, {fields: dormant}, {fields: dormant}, {fields: dormant}}
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}, {Exists: true}}
+	client.commitUPID = "UPID:pve1:00000001:00000002:00000003:00000004:test:root@pam:"
+
+	op := NewNetworkBridgeCreate(client, "pve1", "vmbr99", "vmbr0", map[string]string{"bridge_ports": "eth1"})
+	res, err := Run(context.Background(), testRosterPath(t), NetworkLockKey("pve1", "pve1"), op, false)
+	if err != nil {
+		t.Fatalf("Run: unexpected error: %v", err)
+	}
+	if !res.Changed || client.lastStageMethod != http.MethodPut {
+		t.Fatalf("expected a converge PUT, Changed=%v method=%q", res.Changed, client.lastStageMethod)
+	}
+	// The whole wanted set, no iface param: the caller field MUST survive into
+	// the PUT body, next to the type/autostart seeds.
+	if got, want := client.lastStageParams.Encode(), "autostart=1&bridge_ports=eth1&type=bridge"; got != want {
+		t.Fatalf("converge PUT params = %q, want exactly %q", got, want)
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_EmptyOrNonScalarTypeRefused pins R1/B3: the
+// converge predicate requires a NON-EMPTY existing type equal to the wanted
+// type. kvjson.Scalar yields "" (not an error) for an empty or non-scalar
+// value, so the `got == ""` clause — NOT any "successful decode" check — is
+// what refuses those. A caller who passes type= empty (kept as "" by
+// effectiveWanted, not seeded) over a stanza whose type is empty, absent, or
+// non-scalar must be REFUSED before staging — never PUT with type="" at an
+// iface PVE's update_network would then 400. Without the `got == ""` clause the
+// old `got != want["type"]` predicate treats both-empty as same-type and PUTs.
+func TestNetworkBridgeEnsure_Apply_EmptyOrNonScalarTypeRefused(t *testing.T) {
+	for name, existing := range map[string]map[string]json.RawMessage{
+		"existing type is empty string": {"type": rawField("")},
+		"existing has no type key":       {"mtu": rawField("9000")},
+		"existing type is non-scalar":    {"type": json.RawMessage(`[1,2]`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeNetworkBridgeClient("pve1")
+			client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+			client.getResponses["vmbr99"] = []getResponse{{fields: existing}}
+			client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+
+			// Caller passes type= empty explicitly: effectiveWanted keeps "".
+			op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", Wanted: map[string]string{"type": ""}, mode: modeCreate}
+			err := op.Apply(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "already exists as type") || !strings.Contains(err.Error(), "nothing staged") {
+				t.Fatalf("Apply = %v, want a refusal (no converge PUT of an empty type)", err)
+			}
+			if client.stageCalls != 0 || client.lastStageParams != nil || client.commitCalls != 0 || client.revertCalls != 0 {
+				t.Errorf("stageCalls=%d staged=%v commits=%d reverts=%d, want nothing sent", client.stageCalls, client.lastStageParams, client.commitCalls, client.revertCalls)
+			}
+		})
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_ConvergeLiveBridgeFailsGuard pins R3/N1: the
+// fix makes guardSelfCheck the SOLE backstop against converging a LIVE same-type
+// bridge (today's unconditional POST-400 made that structurally impossible). A
+// create over an existing same-type bridge that is already live (active=1 /
+// LinkState.Exists=true) stages the converge PUT, then the step-4 guard sees it
+// already live before commit and aborts+reverts (whole-node) — fail-closed, the
+// documented out-of-scope boundary, never a silent live reconfiguration.
+func TestNetworkBridgeEnsure_Apply_ConvergeLiveBridgeFailsGuard(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+	// Same-type (bridge) AND already live (active=1): create-block converges,
+	// guard then trips on active=true before commit.
+	live := map[string]json.RawMessage{"type": rawField("bridge"), "active": json.RawMessage("1")}
+	client.getResponses["vmbr99"] = []getResponse{{fields: live}}
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.commitUPID = "UPID:pve1:00000001:00000002:00000003:00000004:test:root@pam:"
+
+	op := NewNetworkBridgeCreate(client, "pve1", "vmbr99", "vmbr0", nil)
+	err := op.Apply(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "active=true") {
+		t.Fatalf("Apply = %v, want the guard to abort naming active=true", err)
+	}
+	if client.stageCalls != 1 {
+		t.Fatalf("the converge PUT must be staged before the guard aborts, stageCalls=%d", client.stageCalls)
+	}
+	if client.lastStageMethod != http.MethodPut {
+		t.Fatalf("converge stages a PUT, got %q", client.lastStageMethod)
+	}
+	if client.commitCalls != 0 {
+		t.Fatalf("a live-bridge converge must never commit, commitCalls=%d", client.commitCalls)
+	}
+	if client.revertCalls != 1 {
+		t.Fatalf("the guard must whole-node revert the staged PUT, revertCalls=%d", client.revertCalls)
 	}
 }
 

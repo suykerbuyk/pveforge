@@ -104,10 +104,14 @@ func newNetworkBridgeCreateCmd() *cobra.Command {
 		Use:   "create <target-id> <iface> [field=value ...]",
 		Short: "Stage and commit a new node-level network bridge",
 		Long: `Create a node-level network interface (typically a bridge) via PVE's own
-two-phase stage/commit model: the change is staged (POST
-/nodes/{node}/network), independently guard-checked, and only then
-committed (PUT /nodes/{node}/network), which is the single call that
-actually triggers ifupdown2's live reload.
+two-phase stage/commit model: the change is staged, independently
+guard-checked, and only then committed (PUT /nodes/{node}/network), which is
+the single call that actually triggers ifupdown2's live reload. An interface
+that does not yet exist is staged as a POST /nodes/{node}/network; an interface
+that already exists as the SAME type is converged (staged as a PUT
+/nodes/{node}/network/{iface}) so a dormant stanza is brought up to the
+requested fields rather than rejected — an existing interface of a DIFFERENT
+type is refused before anything is staged.
 
 --management-bridge is REQUIRED, with no default (e.g. it is never assumed
 to be "vmbr0"): this names the node's own management bridge, which the
