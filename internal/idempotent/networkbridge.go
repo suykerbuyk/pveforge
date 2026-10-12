@@ -148,10 +148,13 @@ func NewNetworkBridgeDestroy(client NetworkBridgeClient, node, iface, mgmtBridge
 
 // NetworkBridgeEnsure is idempotent.Op for creating or destroying one PVE
 // node-level network interface (typically a bridge) via PVE's own
-// stage/commit network-config model — POST or DELETE
-// /nodes/{node}/network[/{iface}] stages a pending change, and a SEPARATE
-// PUT /nodes/{node}/network commits every staged change on the node at
-// once and triggers ifupdown2's live reload.
+// stage/commit network-config model. A create of an ABSENT interface stages a
+// POST /nodes/{node}/network; a create over an EXISTING same-type interface
+// CONVERGES it with a PUT /nodes/{node}/network/{iface} (so a dormant stanza is
+// brought up to the wanted fields rather than rejected by PVE's "interface
+// already exists"); a destroy stages a DELETE /nodes/{node}/network/{iface}. In
+// every case a SEPARATE PUT /nodes/{node}/network commits every staged change
+// on the node at once and triggers ifupdown2's live reload.
 //
 // # Apply must NEVER call go-proxmox's typed Node.NewNetwork or
 // # NodeNetwork.Delete (nodes_network.go) as a "simpler" alternative
@@ -544,7 +547,19 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 
 	// A create of an interface that already exists as another type cannot
 	// be what was asked: refuse it here, before anything is staged, rather
-	// than stage a create PVE (or the step-4 guard) would then reject.
+	// than stage a create PVE (or the step-4 guard) would then reject. An
+	// existing interface of the SAME type is NOT refused: it is CONVERGED (a
+	// PUT in stage, below) instead of POSTed, so a dormant stanza is brought up
+	// rather than drawing PVE's "interface already exists".
+	//
+	// converge is declared at Apply scope and assigned ONLY from THIS create
+	// block's own existence read (never step 1's management-bridge `exists`,
+	// which is always true here — wiring converge off that would make every
+	// create a PUT). stage branches on it; there is exactly ONE existence read
+	// (this one), and stage must never issue a second GET of its own (a second
+	// read is no more atomic and narrows the gate so a test can pass while
+	// converge is ignored).
+	converge := false
 	if op.mode == modeCreate {
 		want := op.effectiveWanted()
 		existing, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
@@ -552,13 +567,22 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 			return fmt.Errorf("network bridge ensure: %s: pre-stage read: %w", op.Iface, err)
 		}
 		if exists {
+			// got is the existing interface's type. The refusal is driven by
+			// the two conditions below — got == "" OR got != the wanted type:
+			// an absent key leaves got == "", and kvjson.Scalar yields "" (not
+			// an error) for an empty or non-scalar value, so got == "" already
+			// covers every "no usable type" case. There is NO "successful
+			// decode" guard to preserve here; converging requires a NON-EMPTY
+			// type equal to the wanted one, so we never PUT type="" at an iface
+			// PVE's update_network would then 400.
 			got := ""
 			if raw, ok := existing["type"]; ok {
 				got, _ = kvjson.Scalar(raw)
 			}
-			if got != want["type"] {
+			if got == "" || got != want["type"] {
 				return fmt.Errorf("network bridge ensure: %s: already exists as type %s, not %s; refusing to create it (nothing staged)", op.Iface, kvjson.QuoteValue(got), kvjson.QuoteValue(want["type"]))
 			}
+			converge = true
 		}
 	}
 
@@ -567,7 +591,7 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	// change on the node, and when our own stage failed, whatever is still
 	// pending most likely belongs to someone else. From here on, every
 	// failure before the commit reverts: our stage is known to exist.
-	if err := op.stage(ctx); err != nil {
+	if err := op.stage(ctx, converge); err != nil {
 		return fmt.Errorf("network bridge ensure: %s: stage: %w", op.Iface, err)
 	}
 
@@ -747,21 +771,37 @@ func activeTruthy(s string) bool {
 	}
 }
 
-// stage is Apply's step 2: for a create, POST /nodes/{node}/network with
-// Wanted's fields plus iface=Iface; for a destroy, DELETE
-// /nodes/{node}/network/{Iface}. Targets ONLY Iface — never
-// ManagementBridge.
-func (op *NetworkBridgeEnsure) stage(ctx context.Context) error {
+// stage is Apply's step 2. For a create it either POSTs a new interface or
+// CONVERGES an existing same-type one, keyed on converge (set by Apply from its
+// single pre-stage existence read — stage never reads again):
+//   - converge == false (absent iface): POST /nodes/{node}/network with
+//     effectiveWanted's fields plus iface=Iface.
+//   - converge == true (existing same-type iface): PUT
+//     /nodes/{node}/network/{Iface} with effectiveWanted's fields and NO iface
+//     param (iface is in the path), so a dormant stanza gains its autostart/
+//     `auto` line and ifupdown2 brings it up on the commit reload. Mirrors
+//     NetworkFieldsEnsure.stage's call shape.
+//
+// For a destroy it DELETEs /nodes/{node}/network/{Iface}. Targets ONLY Iface —
+// never ManagementBridge.
+//
+// UNVERIFIED against a live host (both create arms): that PVE's schema refuses
+// a create without type, and that update_network accepts the converge PUT with
+// type set to the (unchanged) current type alongside the other fields. The
+// nested harness (pveforge-nested-pve-test-harness) step-7 re-run must confirm
+// both; the sibling NetworkFieldsEnsure.stage confirms only the call SHAPE we
+// send, not PVE's acceptance.
+func (op *NetworkBridgeEnsure) stage(ctx context.Context, converge bool) error {
 	if op.mode == modeCreate {
 		want := op.effectiveWanted()
-		// effectiveWanted carries the type=bridge default when the caller
-		// named no type: PVE's schema lists type as required on this
-		// create. UNVERIFIED against a live host: that PVE refuses the
-		// create without type — the nested harness
-		// (pveforge-nested-pve-test-harness) must check it.
 		params := url.Values{}
 		for field, value := range want {
 			params.Set(field, value)
+		}
+		if converge {
+			path := fmt.Sprintf("/nodes/%s/network/%s", url.PathEscape(op.Node), url.PathEscape(op.Iface))
+			_, err := op.Client.RawRequest(ctx, http.MethodPut, path, params)
+			return err
 		}
 		params.Set("iface", op.Iface)
 		path := fmt.Sprintf("/nodes/%s/network", url.PathEscape(op.Node))

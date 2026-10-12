@@ -473,6 +473,7 @@ const (
 	applyLockEvCommit       = "commit"
 	applyLockEvWaitStart    = "waitfortask-start"
 	applyLockEvWaitReturned = "waitfortask-return"
+	applyLockEvLinkState    = "linkstate"
 )
 
 type applyLockEvent struct {
@@ -629,6 +630,12 @@ func (c *recordingNetworkClient) WaitForTask(ctx context.Context, node, upid str
 }
 
 func (c *recordingNetworkClient) LinkState(_ context.Context, iface string) (sshexec.LinkState, error) {
+	// Recorded so a test can prove Apply actually OBSERVED kernel liveness
+	// (step 8) for an iface AFTER its reload completed — the reload stub marks
+	// node.live unconditionally, so node.live alone cannot distinguish "step 8
+	// ran" from "step 8 was skipped". The relative seq of this event vs the
+	// WaitForTask-return event is what pins it.
+	c.rec.add(c.label, applyLockEvLinkState, iface)
 	return c.node.linkState(iface), nil
 }
 
@@ -1010,5 +1017,106 @@ func TestNetworkApplyLock_HarnessFailsWhenTheLockReleasesBeforeTheReloadComplete
 	}
 	if got := run.node.runningPollsServed(windows[0].upid); got != 0 {
 		t.Fatalf("expected the early-releasing op to have polled its commit task 0 times, got %d", got)
+	}
+}
+
+// TestNetworkBridgeEnsure_Converge_MergesAndBringsUp_Stateful is this task's
+// stateful offline proof (fix-plan R4): a field-less create over a pre-existing
+// DORMANT same-type bridge — committed in config, carrying no `active`, absent
+// from the kernel — must CONVERGE it: stage a PUT to the iface path that MERGES
+// the wanted fields onto the existing stanza (never a POST, and never replacing
+// the stanza's other fields), then commit. Driven through a real idempotent.Run
+// against applyLockNode, whose commit faithfully does NOT itself mark the iface
+// live — the async reload does, on WaitForTask. Kernel bring-up against a real
+// host is NOT claimed here (this is a model); the nested step-7 re-run is the
+// sole live bring-up proof.
+func TestNetworkBridgeEnsure_Converge_MergesAndBringsUp_Stateful(t *testing.T) {
+	node := newApplyLockNode(t)
+	// Seed a DORMANT target bridge: committed config exists, carries an
+	// unrelated field, has NO `active`, and is NOT kernel-live. (Distinct from
+	// the constructor's vmbr0/vmbr2, which are live.)
+	const dormant = "vmbr7"
+	node.committed[dormant] = map[string]string{"iface": dormant, "type": "bridge", "bridge_ports": "eth9"}
+	node.order = append(node.order, dormant)
+
+	srv := httptest.NewServer(http.HandlerFunc(node.handle))
+	t.Cleanup(srv.Close)
+	rec := &applyLockRecorder{}
+	client := newRecordingNetworkClient(t, "converge", node, srv, rec)
+
+	op := NewNetworkBridgeCreate(client, node.node, dormant, applyLockMgmtIface, nil) // field-less, like nested.sh
+	res, err := Run(context.Background(), testRosterPath(t), NetworkLockKey(applyLockTargetID, node.node), op, false)
+	if err != nil {
+		t.Fatalf("Run: unexpected error: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected Changed=true converging a dormant stanza")
+	}
+
+	// 1. The stage was a PUT to the iface path, never a POST to the collection.
+	var sawPUT, sawPOST bool
+	for _, e := range rec.snapshot() {
+		if e.kind != applyLockEvRawRequest {
+			continue
+		}
+		if e.detail == "PUT /nodes/"+node.node+"/network/"+dormant {
+			sawPUT = true
+		}
+		if e.detail == "POST /nodes/"+node.node+"/network" {
+			sawPOST = true
+		}
+	}
+	if !sawPUT || sawPOST {
+		t.Fatalf("converge must PUT the iface path and never POST the collection: sawPUT=%v sawPOST=%v\n%s", sawPUT, sawPOST, rec.format())
+	}
+
+	// 2. The PUT MERGED: autostart was set AND the pre-existing unrelated field
+	//    survived (PVE's update_network merges; it does not replace the stanza).
+	got, ok := node.stanzaLocked(dormant)
+	if !ok {
+		t.Fatalf("converged stanza vanished")
+	}
+	if got["autostart"] != "1" {
+		t.Errorf("converged stanza autostart=%q, want \"1\"", got["autostart"])
+	}
+	if got["bridge_ports"] != "eth9" {
+		t.Errorf("converge replaced the stanza (bridge_ports=%q, want \"eth9\" preserved)", got["bridge_ports"])
+	}
+	if got["type"] != "bridge" {
+		t.Errorf("converged stanza type=%q, want \"bridge\"", got["type"])
+	}
+
+	// 3. commit did not itself mark the iface live; the async reload did, so by
+	//    the time Run returns (after WaitForTask) the model shows it up. This is
+	//    the MODEL's bring-up, NOT a live-kernel claim — step-7 is that proof.
+	node.mu.Lock()
+	live := node.live[dormant]
+	node.mu.Unlock()
+	if !live {
+		t.Errorf("expected the dormant bridge to be live after the reload completed")
+	}
+
+	// 4. Apply OBSERVED the converged iface's liveness in step 8 — a LinkState
+	//    call on the iface AFTER the reload's WaitForTask returned. node.live
+	//    alone cannot prove this (completeReloadLocked sets it unconditionally),
+	//    so a mutant that skips step 8 on the converge path (e.g.
+	//    `if converge { return nil }` just before step 8) still leaves node.live
+	//    true — but it never makes this post-reload LinkState(iface) call, so
+	//    THIS assertion goes red. The step-4 guard's LinkState(iface) call does
+	//    not count: it happens BEFORE WaitForTask.
+	events := rec.snapshot()
+	lastWaitReturn := applyLockLastMatch(events, "converge", applyLockEvWaitReturned)
+	if lastWaitReturn == nil {
+		t.Fatalf("expected a WaitForTask-return event; events=\n%s", rec.format())
+	}
+	sawStep8 := false
+	for _, e := range events {
+		if e.kind == applyLockEvLinkState && e.detail == dormant && e.seq > lastWaitReturn.seq {
+			sawStep8 = true
+			break
+		}
+	}
+	if !sawStep8 {
+		t.Fatalf("step 8 never observed the converged iface's kernel liveness after the reload (no post-WaitForTask LinkState(%s)); events=\n%s", dormant, rec.format())
 	}
 }
