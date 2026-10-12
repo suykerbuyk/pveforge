@@ -221,7 +221,7 @@ func TestNetworkBridgeEnsure_Apply_Create_FullStack(t *testing.T) {
 		"GET /api2/json/nodes/qa-pve-01/tasks/" + upid + "/status",
 	}
 	wantWrites := []string{
-		"POST /api2/json/nodes/qa-pve-01/network bridge_ports=eth1&iface=vmbr1&type=bridge",
+		"POST /api2/json/nodes/qa-pve-01/network autostart=1&bridge_ports=eth1&iface=vmbr1&type=bridge",
 		"PUT /api2/json/nodes/qa-pve-01/network",
 	}
 	if got := restScript.Hits(); !equalStringSlices(got, wantREST) {
