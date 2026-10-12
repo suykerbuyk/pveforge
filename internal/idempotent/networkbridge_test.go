@@ -1429,20 +1429,29 @@ func TestNetworkBridgeEnsure_Apply_FieldlessCreateRequestsAutostart(t *testing.T
 
 // TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart pins ruling 4+5: step-8
 // kernel-liveness is keyed off whether autostart was REQUESTED (via
-// effectiveWanted), with the negative (expect-not-live) assertion scoped to
-// Linux type=bridge for the OVS force-auto carve-out. Each subcase builds a
-// fake whose POST-apply LinkState (call index 1 on vmbr99) is the state under
-// test; the guard self-check (call index 0) always shows not-yet-live for a
-// create / live for a destroy.
+// effectiveWanted), and the negative (expect-not-live) assertion is skipped
+// ONLY for the OVS port types PVE force-starts regardless of autostart
+// (OVSPort/OVSIntPort/OVSBond with ovs_bridge set — see
+// negativeLivenessReliable's PVE-source citation). bridge, OVSBridge, bond,
+// vlan, eth all follow the autostart field, so their not-live assertion
+// stands. Each subcase builds a fake whose POST-apply LinkState (call index 1
+// on vmbr99) is the state under test; the guard self-check (call index 0)
+// always shows not-yet-live for a create / live for a destroy.
 //
-// Mutants killed:
-//   - hardcode `wantExists := op.mode == modeCreate` -> the autostart=0
-//     "exists=false -> success" subcase goes red (it would demand live).
-//   - read Wanted instead of effectiveWanted in step-8 -> the default-create
-//     subcase (autostart only in effectiveWanted) would see no request and go
-//     red on the exists=true expectation.
-//   - drop the OVS carve-out (negativeLivenessReliable) -> the OVS
-//     exists=true subcase goes red (it would wrongly demand not-live).
+// Mutants killed (verified by revert-and-watch-red):
+//   - hardcode `wantExists := op.mode == modeCreate` -> the "autostart=0
+//     bridge, kernel down -> ok" row goes red (it would demand live).
+//   - read Wanted instead of effectiveWanted in step-8 -> the "default create,
+//     kernel down -> error" row goes red (autostart lives only in
+//     effectiveWanted, so the mutant would see no request and expect not-live).
+//   - grok's exact under-assertion `negativeLivenessReliable { return
+//     op.mode == modeDestroy }` (skip not-live for ALL creates) -> the
+//     "autostart=0 OVSBridge, kernel up -> error" and "autostart=0 bond,
+//     kernel up -> error" rows go red (the mutant would skip and succeed).
+//   - the opposite over-assertion `negativeLivenessReliable { return true }`
+//     (never skip) -> the "autostart=0 OVSIntPort+ovs_bridge, kernel up -> ok"
+//     row goes red (the mutant would assert not-live and error on a
+//     force-started port).
 func TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -1455,7 +1464,14 @@ func TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart(t *testing.T) {
 		{"default create wants live, kernel up -> ok", modeCreate, nil, true, ""},
 		{"autostart=0 bridge, kernel down -> ok (dormant intended)", modeCreate, map[string]string{"autostart": "0"}, false, ""},
 		{"autostart=0 bridge, kernel up -> error", modeCreate, map[string]string{"autostart": "0"}, true, "expected exists=false"},
-		{"autostart=0 OVS, kernel up -> ok (OVS carve-out)", modeCreate, map[string]string{"autostart": "0", "type": "OVSBridge"}, true, ""},
+		// OVSBridge follows the autostart field (PVE does NOT force-start it),
+		// so a dormant OVSBridge that is somehow live is still a mismatch.
+		{"autostart=0 OVSBridge, kernel up -> error (follows autostart)", modeCreate, map[string]string{"autostart": "0", "type": "OVSBridge"}, true, "expected exists=false"},
+		// An OVS port attached to a bridge IS force-started regardless of
+		// autostart, so the not-live assertion must be skipped (no error).
+		{"autostart=0 OVSIntPort+ovs_bridge, kernel up -> ok (force-started, carve-out skip)", modeCreate, map[string]string{"autostart": "0", "type": "OVSIntPort", "ovs_bridge": "vmbr0"}, true, ""},
+		// bond follows the autostart field too (not force-started).
+		{"autostart=0 bond, kernel up -> error (follows autostart)", modeCreate, map[string]string{"autostart": "0", "type": "bond"}, true, "expected exists=false"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1483,14 +1499,17 @@ func TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart(t *testing.T) {
 
 // TestNetworkBridgeEnsure_Apply_DestroyStep8NilSafe proves ruling 4's destroy
 // nil-safety through Apply (NOT a direct helper call): a destroy's
-// effectiveWanted is nil, autostartRequested(nil) is false, and step-8
-// expects not-live — a removed interface that the kernel reports gone is a
-// success, with no panic on the nil map.
+// effectiveWanted is nil, so step-8 passes that nil map to both
+// autostartRequested and negativeLivenessReliable — this test proves neither
+// panics on the nil map and that a destroy still expects not-live (a removed
+// interface the kernel reports gone is a success).
 //
-// Mutant killed: change step-8 to call autostartRequested(op.Wanted) (Wanted
-// is also nil for a destroy, so this subtlety is covered by the create cases
-// above); the real guard here is "no nil-map panic", which a direct helper
-// unit test would not exercise on the Apply path.
+// What this test pins is the nil-map safety and the destroy expect-not-live
+// path specifically. It does NOT pin the effectiveWanted-vs-Wanted choice
+// (that mutant is killed by the default-create rows in
+// TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart, where autostart lives
+// only in effectiveWanted): Wanted is also nil for a destroy, so the two reads
+// are indistinguishable here.
 func TestNetworkBridgeEnsure_Apply_DestroyStep8NilSafe(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
 	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}

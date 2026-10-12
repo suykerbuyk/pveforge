@@ -473,16 +473,42 @@ func autostartRequested(want map[string]string) bool {
 }
 
 // negativeLivenessReliable reports whether step-8's "expect NOT live"
-// assertion can be trusted for this op — always for a destroy (a removed
-// interface must be gone from the kernel), and for a create only when the
-// target is a Linux type=bridge. See step 8's own comment for the OVS
-// force-auto carve-out (grok C3). want is op.effectiveWanted(); it is only
-// consulted on the create path, where it always carries a "type".
+// assertion can be trusted for this op — i.e. whether an interface PVE did
+// NOT mark autostart is genuinely absent from the kernel. True for a destroy
+// (a removed interface must be gone). On the create path it is true for every
+// type EXCEPT the ones PVE force-starts regardless of the autostart field.
+//
+// Re-derived from PVE source (pve-common, PVE::Network::Interfaces,
+// src/PVE/Network/Interfaces.pm, read 2026-10-12):
+//   - __write_etc_network_interfaces :1120-1127 writes the `auto <iface>`
+//     line (or `allow-ovs` for an OVSBridge under non-ifupdown2) ONLY
+//     `if ($d->{autostart})`. So bridge, OVSBridge, bond, vlan, eth and every
+//     other type follow the autostart field: autostart=0 => no `auto` line =>
+//     not instantiated. The not-live assertion is reliable for all of them.
+//   - __interface_to_string :747-755 prepends an `auto <iface>` (ifupdown2) /
+//     `allow-<bridge> <iface>` line for OVSPort/OVSIntPort/OVSBond WHENEVER
+//     `ovs_bridge` is set — NOT gated on autostart (indeed :714 forces those
+//     ports' autostart to 0). Such a port is brought up by its bridge even
+//     with autostart cleared, so the not-live assertion is UNreliable there
+//     and must be skipped.
+//
+// So the create path skips the not-live assertion exactly for an
+// OVSPort/OVSIntPort/OVSBond that names an ovs_bridge; it asserts not-live for
+// everything else. Adding a not-live assertion is the safe direction, so an
+// unknown/misspelled type keeps the assertion. want is op.effectiveWanted();
+// it is only consulted on the create path, where it always carries a "type".
 func (op *NetworkBridgeEnsure) negativeLivenessReliable(want map[string]string) bool {
 	if op.mode == modeDestroy {
 		return true
 	}
-	return want["type"] == "bridge"
+	switch want["type"] {
+	case "OVSPort", "OVSIntPort", "OVSBond":
+		// Force-started only when attached to a bridge; a bare OVS port with
+		// no ovs_bridge follows autostart like any other interface.
+		return want["ovs_bridge"] == ""
+	default:
+		return true
+	}
 }
 
 // Apply performs the full stage -> guard -> commit -> poll -> verify
@@ -630,13 +656,13 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	//
 	// When we expect the interface live, every type PVE brings up must be
 	// live, so that assertion is unconditional. When we expect it NOT live (a
-	// destroy, or an autostart=0 create), the assertion is reliable only for a
-	// Linux type=bridge: PVE/ifupdown2 force-adds `auto`/`allow-ovs` for OVS
-	// interface types regardless of the autostart field, so a dormant OVS
-	// interface may still be instantiated in the kernel — asserting not-live
-	// there would be a false failure (grok C3). The carve-out is scoped to the
-	// negative check, so it never weakens the positive (bring-up) guarantee;
-	// this command's domain and default is the Linux bridge.
+	// destroy, or an autostart=0 create), the assertion is reliable for every
+	// type EXCEPT the OVS port types PVE force-starts regardless of autostart
+	// (OVSPort/OVSIntPort/OVSBond attached to an ovs_bridge) — see
+	// negativeLivenessReliable, which re-derives the exact force-start set from
+	// PVE source. bridge, OVSBridge, bond, vlan, eth all follow the autostart
+	// field, so their not-live assertion stands. The carve-out is scoped to the
+	// negative check, so it never weakens the positive (bring-up) guarantee.
 	ew := op.effectiveWanted()
 	wantExists := op.mode == modeCreate && autostartRequested(ew)
 	ifaceLink, err := op.Client.LinkState(ctx, op.Iface)
