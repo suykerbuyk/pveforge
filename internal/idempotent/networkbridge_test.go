@@ -329,7 +329,10 @@ func TestNetworkBridgeEnsure_Satisfied(t *testing.T) {
 	// collapses a pair to equal values and is caught here — these assertions
 	// cannot pass vacuously, because create and destroy must disagree on both
 	// an absent and a present interface.
-	const presentMatch = `{"type":"bridge","bridge_ports":"eth0"}`
+	// A fully-live bridge: autostart present (PVE reports it on an interface
+	// with an `auto` line), so a create — whose effectiveWanted now seeds
+	// autostart=1 — is genuinely satisfied by it.
+	const presentMatch = `{"type":"bridge","bridge_ports":"eth0","autostart":1}`
 	mkCreate := func(w map[string]string) *NetworkBridgeEnsure {
 		return NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", w)
 	}
@@ -386,23 +389,29 @@ func TestNetworkBridgeEnsure_Satisfied(t *testing.T) {
 	// The create's type=bridge default is part of what is CHECKED, not only
 	// of what is sent: an existing interface of another type with otherwise
 	// matching fields is not the bridge that was asked for.
+	// autostart=1 present in every `current` below so the assertion under
+	// test (type, or an absent/mismatching NON-autostart field) is what drives
+	// the result — not the autostart seed. Keeps these controls non-vacuous.
 	t.Run("exists as another type, no type named -> create NOT satisfied", func(t *testing.T) {
-		if mkCreate(map[string]string{"mtu": "9000"}).Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
+		if mkCreate(map[string]string{"mtu": "9000"}).Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1","autostart":1}`) {
 			t.Fatal("an OVSBridge must not satisfy a bridge create")
 		}
 	})
 	t.Run("explicit type named and matching -> create satisfied", func(t *testing.T) {
-		if !mkCreate(map[string]string{"mtu": "9000", "type": "OVSBridge"}).Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1"}`) {
+		if !mkCreate(map[string]string{"mtu": "9000", "type": "OVSBridge"}).Satisfied(`{"type":"OVSBridge","mtu":"9000","active":"1","autostart":1}`) {
 			t.Fatal("an explicitly named type that matches must satisfy")
 		}
 	})
 	t.Run("exists with mismatching field -> create NOT satisfied", func(t *testing.T) {
-		if mkCreate(map[string]string{"bridge_ports": "eth0"}).Satisfied(`{"type":"bridge","bridge_ports":"eth1"}`) {
+		if mkCreate(map[string]string{"bridge_ports": "eth0"}).Satisfied(`{"type":"bridge","bridge_ports":"eth1","autostart":1}`) {
 			t.Fatal("a mismatching field must not be satisfied")
 		}
 	})
 	t.Run("missing wanted key -> create NOT satisfied", func(t *testing.T) {
-		if mkCreate(map[string]string{"mtu": "9000"}).Satisfied(`{"type":"bridge"}`) {
+		// mtu absent is the sole reason for the miss (type and autostart both
+		// match), so this exercises the absent==never-matching rule for a
+		// non-autostart field, not the autostart carve-out.
+		if mkCreate(map[string]string{"mtu": "9000"}).Satisfied(`{"type":"bridge","autostart":1}`) {
 			t.Fatal("an absent wanted key must not be satisfied")
 		}
 	})
@@ -442,18 +451,27 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		current string
 		want    bool
 	}{
+		// Every `current` below carries autostart:1, so that the field
+		// actually under test (never autostart itself, except the one
+		// autostart case) is what drives the result — a create's
+		// effectiveWanted now seeds autostart=1, and Satisfied treats it like
+		// any other wanted field, so a current WITHOUT autostart would miss
+		// for the autostart reason and make these controls vacuous. The
+		// dedicated autostart absent==0 semantics live in their own test
+		// (TestNetworkBridgeEnsure_Satisfied_AutostartAware).
+
 		// The headline case: this is what `network bridge create vmbr1
 		// vlan_filtering=true` actually compares once PVE has applied it.
 		{
 			name:    "vlan_filtering: caller typed true, pve answers json number 1",
 			wanted:  map[string]string{"vlan_filtering": "true"},
-			current: `{"type":"bridge","vlan_filtering":1,"active":1}`,
+			current: `{"type":"bridge","vlan_filtering":1,"active":1,"autostart":1}`,
 			want:    true,
 		},
 		{
 			name:    "vlan_filtering: caller typed PVE-CLI 1, pve answers json bool true",
 			wanted:  map[string]string{"vlan_filtering": "1"},
-			current: `{"type":"bridge","vlan_filtering":true}`,
+			current: `{"type":"bridge","vlan_filtering":true,"autostart":1}`,
 			want:    true,
 		},
 		{
@@ -465,7 +483,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "bridge_vlan_aware: caller typed 0, pve answers json bool false",
 			wanted:  map[string]string{"bridge_vlan_aware": "0"},
-			current: `{"type":"bridge","bridge_vlan_aware":false}`,
+			current: `{"type":"bridge","bridge_vlan_aware":false,"autostart":1}`,
 			want:    true,
 		},
 
@@ -473,7 +491,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "vlan_filtering: wanted 0 against a live true stays unsatisfied",
 			wanted:  map[string]string{"vlan_filtering": "0"},
-			current: `{"type":"bridge","vlan_filtering":true}`,
+			current: `{"type":"bridge","vlan_filtering":true,"autostart":1}`,
 			want:    false,
 		},
 		{
@@ -482,7 +500,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 			// boolean-false-shaped. Same case the sibling pins.
 			name:    "empty string is not boolean-false-shaped",
 			wanted:  map[string]string{"vlan_filtering": "false"},
-			current: `{"type":"bridge","vlan_filtering":""}`,
+			current: `{"type":"bridge","vlan_filtering":"","autostart":1}`,
 			want:    false,
 		},
 		{
@@ -490,13 +508,13 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 			// through to an exact compare and correctly does not match.
 			name:    "yes is not boolish, so it does not match 1",
 			wanted:  map[string]string{"vlan_filtering": "yes"},
-			current: `{"type":"bridge","vlan_filtering":1}`,
+			current: `{"type":"bridge","vlan_filtering":1,"autostart":1}`,
 			want:    false,
 		},
 		{
 			name:    "non-boolish mismatch still unsatisfied",
 			wanted:  map[string]string{"bridge_ports": "eth0"},
-			current: `{"type":"bridge","bridge_ports":"eth1"}`,
+			current: `{"type":"bridge","bridge_ports":"eth1","autostart":1}`,
 			want:    false,
 		},
 
@@ -508,11 +526,13 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		// branch before: mutating its `return false` to `continue`
 		// compiles and leaves the whole suite green (measured).
 		// The nearest pre-existing case has the field PRESENT and wrong,
-		// which exercises a different branch entirely.
+		// which exercises a different branch entirely. autostart:1 is
+		// present so the miss is the vlan_filtering/bridge_stp key alone,
+		// NOT the autostart carve-out (which is a different code path).
 		{
 			name:    "absent key is never already-matching",
 			wanted:  map[string]string{"vlan_filtering": "1"},
-			current: `{"type":"bridge","bridge_ports":"eth0"}`,
+			current: `{"type":"bridge","bridge_ports":"eth0","autostart":1}`,
 			want:    false,
 		},
 		{
@@ -520,7 +540,7 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 			// confused with absent, in either direction.
 			name:    "absent key is not already-matching even for a wanted empty string",
 			wanted:  map[string]string{"bridge_stp": ""},
-			current: `{"type":"bridge","bridge_ports":"eth0"}`,
+			current: `{"type":"bridge","bridge_ports":"eth0","autostart":1}`,
 			want:    false,
 		},
 
@@ -528,13 +548,13 @@ func TestNetworkBridgeEnsure_Satisfied_BoolishFieldsConverge(t *testing.T) {
 		{
 			name:    "non-boolish string match unaffected",
 			wanted:  map[string]string{"bridge_ports": "eth0"},
-			current: `{"type":"bridge","bridge_ports":"eth0"}`,
+			current: `{"type":"bridge","bridge_ports":"eth0","autostart":1}`,
 			want:    true,
 		},
 		{
 			name:    "non-boolish numeric match unaffected",
 			wanted:  map[string]string{"mtu": "9000"},
-			current: `{"type":"bridge","mtu":9000}`,
+			current: `{"type":"bridge","mtu":9000,"autostart":1}`,
 			want:    true,
 		},
 	}
@@ -626,9 +646,10 @@ func TestNetworkBridgeEnsure_Apply_CreateSucceeds(t *testing.T) {
 	if client.lastStageParams.Get("bridge_ports") != "eth1" {
 		t.Fatalf("expected stage params to carry bridge_ports=eth1, got %v", client.lastStageParams)
 	}
-	// Exactly: the requested field, the interface, and type=bridge — which
-	// PVE requires on a create, and which the caller did not name.
-	if got, want := client.lastStageParams.Encode(), "bridge_ports=eth1&iface=vmbr99&type=bridge"; got != want {
+	// Exactly: the requested field, the interface, type=bridge (PVE requires
+	// a type on a create and the caller named none), and autostart=1 (the
+	// bring-up default — pveforge-network-bridge-create-no-autostart).
+	if got, want := client.lastStageParams.Encode(), "autostart=1&bridge_ports=eth1&iface=vmbr99&type=bridge"; got != want {
 		t.Fatalf("stage params = %q, want exactly %q", got, want)
 	}
 }
@@ -653,9 +674,9 @@ func TestNetworkBridgeEnsure_Apply_FieldlessCreateCreates(t *testing.T) {
 	if client.commitCalls != 1 || client.revertCalls != 0 {
 		t.Fatalf("field-less create must stage+commit: commits=%d reverts=%d", client.commitCalls, client.revertCalls)
 	}
-	// Exactly the interface and the type=bridge default — a real create, not a
-	// destroy and not a no-op.
-	if got, want := client.lastStageParams.Encode(), "iface=vmbr99&type=bridge"; got != want {
+	// Exactly the interface, the type=bridge default, and the autostart=1
+	// bring-up default — a real create, not a destroy and not a no-op.
+	if got, want := client.lastStageParams.Encode(), "autostart=1&iface=vmbr99&type=bridge"; got != want {
 		t.Fatalf("stage params = %q, want exactly %q", got, want)
 	}
 }
@@ -690,9 +711,10 @@ func TestNetworkBridgeEnsure_Apply_CreateSendsAnExplicitTypeAsGiven(t *testing.T
 	if client.lastStageParams.Get("bridge_ports") != "eth1" {
 		t.Fatalf("expected stage params to carry bridge_ports=eth1, got %v", client.lastStageParams)
 	}
-	// Exactly: the requested field, the interface, and type=bridge — which
-	// PVE requires on a create, and which the caller did not name.
-	if got, want := client.lastStageParams.Encode(), "bridge_ports=eth1&iface=vmbr99&type=OVSBridge"; got != want {
+	// Exactly: the requested field, the interface, the caller's explicit
+	// type (sent as given, not replaced by the default), and autostart=1
+	// (the bring-up default, which the caller did not name).
+	if got, want := client.lastStageParams.Encode(), "autostart=1&bridge_ports=eth1&iface=vmbr99&type=OVSBridge"; got != want {
 		t.Fatalf("stage params = %q, want exactly %q", got, want)
 	}
 }
@@ -1241,5 +1263,247 @@ func TestNetworkLockKey_IsPerNodeNotPerIface(t *testing.T) {
 	}
 	if k.TargetID != "qa-pve-01" {
 		t.Fatalf("expected target id passthrough, got %q", k.TargetID)
+	}
+}
+
+// --- pveforge-network-bridge-create-no-autostart: the autostart fix --------
+
+// TestNetworkBridgeEnsure_effectiveWanted_SeedsAndNormalizesAutostart pins the
+// write-side of the fix: a create seeds autostart=1 when the caller named
+// none, preserves/normalizes a caller value to PVE's 1/0 domain, and a
+// destroy/unset carries nothing.
+//
+// Mutants killed:
+//   - delete the `out["autostart"]="1"` seed line -> the field-less subcase
+//     (autostart absent) goes red.
+//   - make the seed unconditional (clobber a caller value) -> the autostart=0
+//     and autostart=true subcases go red.
+//   - drop normalizeAutostart's true->"1" rewrite -> the "true"->"1" subcase
+//     goes red (PVE would reject a literal "true").
+func TestNetworkBridgeEnsure_effectiveWanted_SeedsAndNormalizesAutostart(t *testing.T) {
+	cases := []struct {
+		name     string
+		wanted   map[string]string
+		wantAuto string // expected effectiveWanted["autostart"]; "" means key absent
+	}{
+		{"field-less create seeds 1", nil, "1"},
+		{"caller 0 preserved", map[string]string{"autostart": "0"}, "0"},
+		{"caller false normalized to 0", map[string]string{"autostart": "false"}, "0"},
+		{"caller 1 kept", map[string]string{"autostart": "1"}, "1"},
+		{"caller true normalized to 1", map[string]string{"autostart": "true"}, "1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ew := NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", c.wanted).effectiveWanted()
+			if ew["type"] != "bridge" {
+				t.Fatalf("effectiveWanted type = %q, want bridge", ew["type"])
+			}
+			if got, ok := ew["autostart"]; !ok || got != c.wantAuto {
+				t.Fatalf("effectiveWanted autostart = %q (present=%v), want %q", got, ok, c.wantAuto)
+			}
+		})
+	}
+
+	// destroy and unset must carry nothing (nil map): autostart is a
+	// create-only concern.
+	if ew := NewNetworkBridgeDestroy(nil, "pve1", "vmbr99", "vmbr0").effectiveWanted(); ew != nil {
+		t.Fatalf("destroy effectiveWanted = %v, want nil", ew)
+	}
+	var unset NetworkBridgeEnsure
+	if ew := unset.effectiveWanted(); ew != nil {
+		t.Fatalf("modeUnset effectiveWanted = %v, want nil", ew)
+	}
+}
+
+// TestNormalizeAutostart and TestAutostartRequested pin the value domain
+// (ruling 3): 1/true and 0/false only; yes/on/other out of domain.
+//
+// Mutant killed: widen parseBoolish to accept "yes"/"on" -> the out-of-domain
+// cases go red; invert the b?"1":"0" mapping -> the true/false cases go red.
+func TestNormalizeAutostart(t *testing.T) {
+	for in, want := range map[string]string{"1": "1", "true": "1", "TRUE": "1", " 1 ": "1", "0": "0", "false": "0", "FALSE": "0"} {
+		if got, ok := normalizeAutostart(in); !ok || got != want {
+			t.Errorf("normalizeAutostart(%q) = (%q,%v), want (%q,true)", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"yes", "on", "2", "", "enabled"} {
+		if got, ok := normalizeAutostart(in); ok {
+			t.Errorf("normalizeAutostart(%q) = (%q,true), want ok=false", in, got)
+		}
+	}
+}
+
+func TestAutostartRequested(t *testing.T) {
+	truthy := []map[string]string{{"autostart": "1"}, {"autostart": "true"}, {"autostart": "TRUE"}}
+	for _, m := range truthy {
+		if !autostartRequested(m) {
+			t.Errorf("autostartRequested(%v) = false, want true", m)
+		}
+	}
+	falsy := []map[string]string{nil, {}, {"autostart": "0"}, {"autostart": "false"}, {"autostart": "yes"}, {"type": "bridge"}}
+	for _, m := range falsy {
+		if autostartRequested(m) {
+			t.Errorf("autostartRequested(%v) = true, want false", m)
+		}
+	}
+}
+
+// TestNetworkBridgeEnsure_Validate_RejectsNonBooleanAutostart pins ruling 3's
+// fail-before-POST: a non-boolean autostart is a clear pveforge error at
+// Validate, while 1/true/0/false are accepted.
+//
+// Mutant killed: drop the autostart branch in Validate -> the "yes" case no
+// longer errors and goes red.
+func TestNetworkBridgeEnsure_Validate_RejectsNonBooleanAutostart(t *testing.T) {
+	bad := NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", map[string]string{"autostart": "yes"})
+	err := bad.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autostart") || !strings.Contains(err.Error(), "not a boolean") {
+		t.Fatalf("Validate(autostart=yes) = %v, want a clear non-boolean autostart error", err)
+	}
+	for _, v := range []string{"1", "true", "0", "false"} {
+		if err := NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", map[string]string{"autostart": v}).Validate(); err != nil {
+			t.Errorf("Validate(autostart=%q) = %v, want nil", v, err)
+		}
+	}
+}
+
+// TestNetworkBridgeEnsure_Satisfied_AutostartAware pins ruling 2: an ABSENT
+// autostart key in the GET equals the 0/off state for the autostart field
+// ONLY, so absent-or-0 matches wanted 0 and does NOT match wanted 1. This is
+// what makes both a dormant (autostart=0) create and a live (autostart=1)
+// create genuinely idempotent — and what converges a pre-existing dormant
+// stanza (absent key) under the default autostart=1.
+//
+// Mutant killed: make Satisfied treat the autostart key like every other key
+// (absent -> return false unconditionally) -> the "absent matches wanted 0"
+// subcase goes red. Remove the absent==0 handling's "0" default -> same.
+func TestNetworkBridgeEnsure_Satisfied_AutostartAware(t *testing.T) {
+	cases := []struct {
+		name    string
+		wanted  map[string]string // caller Wanted (autostart seeded if absent)
+		current string
+		want    bool
+	}{
+		// Default create (seeds autostart=1) over a dormant stanza whose GET
+		// omits autostart: NOT satisfied -> Apply re-drives and brings it up.
+		{"absent key, default wants up -> not satisfied", nil, `{"type":"bridge"}`, false},
+		// Explicit autostart=0 over the same dormant stanza: absent==0 matches
+		// wanted 0 -> satisfied (dormant is genuinely idempotent).
+		{"absent key, wanted down -> satisfied", map[string]string{"autostart": "0"}, `{"type":"bridge"}`, true},
+		// Live bridge (GET reports autostart) under the default: satisfied.
+		{"present 1, default wants up -> satisfied", nil, `{"type":"bridge","autostart":1}`, true},
+		// Live bridge that the caller wants down: not satisfied.
+		{"present 1, wanted down -> not satisfied", map[string]string{"autostart": "0"}, `{"type":"bridge","autostart":1}`, false},
+		// Present 0 under the default: not satisfied (needs bring-up).
+		{"present 0, default wants up -> not satisfied", nil, `{"type":"bridge","autostart":0}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := NewNetworkBridgeCreate(nil, "pve1", "vmbr99", "vmbr0", c.wanted).Satisfied(c.current); got != c.want {
+				t.Fatalf("Satisfied(%s) wanted %v = %v, want %v", c.current, c.wanted, got, c.want)
+			}
+		})
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_FieldlessCreateRequestsAutostart is the
+// end-to-end stage-body proof for the exact invocation the harness uses (a
+// port-less, field-less create): the POST body carries autostart=1.
+//
+// Mutant killed: drop the autostart seed from effectiveWanted (so it never
+// reaches the POST) -> the exact Encode() goes red. This is the Op-level twin
+// of the CLI silent-no-op test.
+func TestNetworkBridgeEnsure_Apply_FieldlessCreateRequestsAutostart(t *testing.T) {
+	client := newHappyPathClient()
+	op := NewNetworkBridgeCreate(client, "pve1", "vmbr99", "vmbr0", nil) // field-less, exactly as the harness runs it
+	if err := op.Apply(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := client.lastStageParams.Encode(), "autostart=1&iface=vmbr99&type=bridge"; got != want {
+		t.Fatalf("stage params = %q, want exactly %q (the field-less harness create must request autostart=1)", got, want)
+	}
+	if client.commitCalls != 1 || client.revertCalls != 0 {
+		t.Fatalf("field-less create must stage+commit once: commits=%d reverts=%d", client.commitCalls, client.revertCalls)
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart pins ruling 4+5: step-8
+// kernel-liveness is keyed off whether autostart was REQUESTED (via
+// effectiveWanted), with the negative (expect-not-live) assertion scoped to
+// Linux type=bridge for the OVS force-auto carve-out. Each subcase builds a
+// fake whose POST-apply LinkState (call index 1 on vmbr99) is the state under
+// test; the guard self-check (call index 0) always shows not-yet-live for a
+// create / live for a destroy.
+//
+// Mutants killed:
+//   - hardcode `wantExists := op.mode == modeCreate` -> the autostart=0
+//     "exists=false -> success" subcase goes red (it would demand live).
+//   - read Wanted instead of effectiveWanted in step-8 -> the default-create
+//     subcase (autostart only in effectiveWanted) would see no request and go
+//     red on the exists=true expectation.
+//   - drop the OVS carve-out (negativeLivenessReliable) -> the OVS
+//     exists=true subcase goes red (it would wrongly demand not-live).
+func TestNetworkBridgeEnsure_Apply_Step8KeysOffAutostart(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       networkBridgeMode
+		wanted     map[string]string
+		postExists bool   // kernel LinkState.Exists after apply (vmbr99)
+		wantErr    string // substring; "" means Apply must succeed
+	}{
+		{"default create wants live, kernel down -> error", modeCreate, nil, false, "expected exists=true"},
+		{"default create wants live, kernel up -> ok", modeCreate, nil, true, ""},
+		{"autostart=0 bridge, kernel down -> ok (dormant intended)", modeCreate, map[string]string{"autostart": "0"}, false, ""},
+		{"autostart=0 bridge, kernel up -> error", modeCreate, map[string]string{"autostart": "0"}, true, "expected exists=false"},
+		{"autostart=0 OVS, kernel up -> ok (OVS carve-out)", modeCreate, map[string]string{"autostart": "0", "type": "OVSBridge"}, true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client := newFakeNetworkBridgeClient("pve1")
+			client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+			client.getResponses["vmbr99"] = []getResponse{{missing: true}} // guard: not yet live
+			client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+			client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: false}, {Exists: c.postExists}}
+			client.commitUPID = "UPID:pve1:1:1:1:1:test:root@pam:"
+
+			op := &NetworkBridgeEnsure{Client: client, Node: "pve1", Iface: "vmbr99", ManagementBridge: "vmbr0", Wanted: c.wanted, mode: c.mode}
+			err := op.Apply(context.Background())
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Apply = %v, want success", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("Apply = %v, want error containing %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestNetworkBridgeEnsure_Apply_DestroyStep8NilSafe proves ruling 4's destroy
+// nil-safety through Apply (NOT a direct helper call): a destroy's
+// effectiveWanted is nil, autostartRequested(nil) is false, and step-8
+// expects not-live — a removed interface that the kernel reports gone is a
+// success, with no panic on the nil map.
+//
+// Mutant killed: change step-8 to call autostartRequested(op.Wanted) (Wanted
+// is also nil for a destroy, so this subtlety is covered by the create cases
+// above); the real guard here is "no nil-map panic", which a direct helper
+// unit test would not exercise on the Apply path.
+func TestNetworkBridgeEnsure_Apply_DestroyStep8NilSafe(t *testing.T) {
+	client := newFakeNetworkBridgeClient("pve1")
+	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
+	client.getResponses["vmbr99"] = []getResponse{{fields: map[string]json.RawMessage{"active": rawField("1")}}}
+	client.linkStates["vmbr0"] = []sshexec.LinkState{{Exists: true, Up: true}}
+	client.linkStates["vmbr99"] = []sshexec.LinkState{{Exists: true}, {Exists: false}} // live at guard, gone after
+	client.commitUPID = "UPID:pve1:1:1:1:1:test:root@pam:"
+
+	op := NewNetworkBridgeDestroy(client, "pve1", "vmbr99", "vmbr0")
+	if err := op.Apply(context.Background()); err != nil {
+		t.Fatalf("destroy Apply = %v, want success (nil effectiveWanted must not panic and must expect not-live)", err)
+	}
+	if client.commitCalls != 1 {
+		t.Fatalf("expected one commit, got %d", client.commitCalls)
 	}
 }

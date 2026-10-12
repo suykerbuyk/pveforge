@@ -86,7 +86,7 @@ func TestNetworkBridgeCreate_Success_ThroughRunRoot(t *testing.T) {
 	// The payload, not just the endpoint: the stage carries exactly the
 	// requested fields and the interface, and the commit carries nothing.
 	wantWrites := []string{
-		"POST /api2/json/nodes/qa-pve-01/network bridge_ports=eth1&iface=vmbr1&type=bridge",
+		"POST /api2/json/nodes/qa-pve-01/network autostart=1&bridge_ports=eth1&iface=vmbr1&type=bridge",
 		"PUT /api2/json/nodes/qa-pve-01/network",
 	}
 	if got := rest.Writes(); !slices.Equal(got, wantWrites) {
@@ -95,6 +95,75 @@ func TestNetworkBridgeCreate_Success_ThroughRunRoot(t *testing.T) {
 	wantSSH := []string{pvefake.LinkShowCmd(mgmt), pvefake.LinkShowCmd(iface), pvefake.LinkShowCmd(mgmt), pvefake.LinkShowCmd(iface)}
 	if got := fs.Commands(); !slices.Equal(got, wantSSH) {
 		t.Errorf("SSH sequence:\n got:  %v\n want: %v", got, wantSSH)
+	}
+}
+
+// TestNetworkBridgeCreate_FieldlessPostBodyHasAutostart_ThroughRunRoot drives
+// the EXACT argv the nested harness runs — a port-less, field-less create
+// (`network bridge create <node> <iface> --management-bridge vmbr0`) — through
+// runRoot and asserts the staged POST body carries autostart=1. This is the
+// silent-no-op guard (grok/ruling 6): the Op-level fix could be perfect while
+// the cmd layer dropped it, and the harness uses precisely this field-less
+// form (so the already-updated success test, which passes type/bridge_ports,
+// would not catch a regression that only affected the field-less path).
+//
+// Mutant killed: break the cmd->Op wiring (or revert the effectiveWanted seed)
+// so no autostart reaches the POST -> the exact write-body assertion goes red.
+func TestNetworkBridgeCreate_FieldlessPostBodyHasAutostart_ThroughRunRoot(t *testing.T) {
+	const node, mgmt, iface = "qa-pve-01", "vmbr0", "vmbr1"
+	upid := pvefake.NetworkUPID(node, iface)
+
+	rest := pvefake.NewBridgeREST(t, node)
+	rest.MgmtFields = `{"iface":"vmbr0","type":"bridge","bridge_ports":"eth0","cidr":"10.0.0.5/24"}`
+	rest.IfaceResponses = []string{
+		pvefake.IfaceAbsent,                                               // Run's Read: not there yet
+		pvefake.IfaceAbsent,                                               // Apply's pre-stage read: still not there
+		`{"iface":"vmbr1","type":"bridge","autostart":1}`,                 // guard self-check: staged, not active
+		`{"iface":"vmbr1","type":"bridge","autostart":1,"active":1}`,      // Run's re-read: live
+	}
+	rest.CommitUPID = upid
+	srv := rest.Server()
+	defer srv.Close()
+
+	fs := pvefake.NewSSHServer(t)
+	var mu sync.Mutex
+	ifaceCalls := 0
+	fs.HandleExec(func(cmd string) (string, string, int) {
+		switch cmd {
+		case pvefake.LinkShowCmd(mgmt):
+			return pvefake.LinkJSON(mgmt, true), "", 0
+		case pvefake.LinkShowCmd(iface):
+			mu.Lock()
+			n := ifaceCalls
+			ifaceCalls++
+			mu.Unlock()
+			if n == 0 { // guard self-check: not yet live
+				return "", fmt.Sprintf(pvefake.LinkMissingStderrFmt, iface), 1
+			}
+			return pvefake.LinkJSON(iface, true), "", 0 // post-apply: live (autostart brought it up)
+		}
+		return "", "unexpected command", 127
+	})
+	rosterPath := newTestRosterWithSSHTarget(t, srv, fs)
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	// No field args — exactly nested.sh's invocation.
+	code, stdout, stderr := runRootArgs("network", "bridge", "create", "--roster", rosterPath,
+		"--management-bridge", mgmt, node, iface)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr %q", code, stderr)
+	}
+	if want := "qa-pve-01: bridge vmbr1 created\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	// The payload: a field-less create must still carry autostart=1 (plus the
+	// interface and the type=bridge default) so PVE emits `auto vmbr1`.
+	wantWrites := []string{
+		"POST /api2/json/nodes/qa-pve-01/network autostart=1&iface=vmbr1&type=bridge",
+		"PUT /api2/json/nodes/qa-pve-01/network",
+	}
+	if got := rest.Writes(); !slices.Equal(got, wantWrites) {
+		t.Errorf("REST writes:\n got:  %q\n want: %q", got, wantWrites)
 	}
 }
 

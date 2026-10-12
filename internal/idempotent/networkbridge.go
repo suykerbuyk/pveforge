@@ -253,6 +253,16 @@ func (op *NetworkBridgeEnsure) Validate() error {
 	if _, ok := op.Wanted["iface"]; ok {
 		return fmt.Errorf("network bridge ensure: iface %s: Wanted must not itself contain an \"iface\" key; Apply always sets it from Iface", op.Iface)
 	}
+	// autostart must be a PVE REST boolean (1/true or 0/false). Reject
+	// anything else here, before any POST, with a clear pveforge error
+	// instead of letting PVE's own schema reject it mid-stage (which would
+	// then have to be reverted). The seeded default ("1", see effectiveWanted)
+	// is always valid, so only a caller-supplied value needs checking.
+	if v, ok := op.Wanted["autostart"]; ok {
+		if _, ok := normalizeAutostart(v); !ok {
+			return fmt.Errorf("network bridge ensure: iface %s: autostart %s is not a boolean; use 1/true or 0/false", op.Iface, kvjson.QuoteValue(v))
+		}
+	}
 	if op.mode != modeCreate && op.mode != modeDestroy {
 		return fmt.Errorf("network bridge ensure: iface %s: mode is unset; construct with NewNetworkBridgeCreate or NewNetworkBridgeDestroy", op.Iface)
 	}
@@ -349,6 +359,28 @@ func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 		}
 		for field, want := range wanted {
 			raw, ok := fields[field]
+			if field == "autostart" {
+				// PVE omits the autostart key entirely for an interface that
+				// has no `auto <iface>` line, so an ABSENT key IS the off/"0"
+				// state — not "unknown". Treat absent as "0" for THIS field
+				// ONLY (every other field keeps the absent==never-matching
+				// rule below): this makes a dormant (autostart=0) create
+				// genuinely idempotent, and makes a default (autostart=1)
+				// create over a pre-existing dormant stanza correctly report
+				// unsatisfied so Apply re-drives it and brings the bridge up.
+				got := "0"
+				if ok {
+					s, err := kvjson.Scalar(raw)
+					if err != nil {
+						return false
+					}
+					got = s
+				}
+				if !fieldsEqual(got, want) {
+					return false
+				}
+				continue
+			}
 			if !ok {
 				return false
 			}
@@ -369,24 +401,88 @@ func (op *NetworkBridgeEnsure) Satisfied(current string) bool {
 }
 
 // effectiveWanted is what a create actually asks for: Wanted, plus
-// type=bridge when the caller named no type — PVE requires a type on a
-// create, and a bridge is what this Op is named after. Satisfied and stage
-// both use it, so the default that is sent is also the default that is
-// checked: an existing interface of another type with otherwise matching
-// fields is not "already up to date". nil for a destroy or an unset mode;
-// never empty for a create (it always carries at least type=bridge).
+// type=bridge when the caller named no type (PVE requires a type on a
+// create, and a bridge is what this Op is named after) and autostart=1 when
+// the caller named no autostart. Satisfied, stage, and step-8 all use it, so
+// the default that is sent is also the default that is checked: an existing
+// interface of another type with otherwise matching fields is not "already
+// up to date". nil for a destroy or an unset mode; never empty for a create
+// (it always carries at least type=bridge and autostart).
+//
+// The autostart=1 default is the fix for the dormant-bridge defect
+// (pveforge-network-bridge-create-no-autostart): without an autostart field,
+// PVE writes a stanza with no `auto <iface>` line and ifupdown2 never
+// instantiates the (port-less) bridge in the kernel — exactly the state this
+// Op's own step-8 post-check then (correctly) fails on. A created bridge must
+// come up by default; a caller who genuinely wants a configured-but-dormant
+// bridge passes autostart=0 explicitly. A caller-supplied value is normalized
+// here to PVE's REST boolean domain ("1"/"0") so the POST, Satisfied, and
+// step-8 all read one canonical form; an out-of-domain value (e.g. "yes") is
+// left untouched for Validate to reject with a clear error before any POST.
 func (op *NetworkBridgeEnsure) effectiveWanted() map[string]string {
 	if op.mode != modeCreate {
 		return nil
 	}
-	out := make(map[string]string, len(op.Wanted)+1)
+	out := make(map[string]string, len(op.Wanted)+2)
 	for k, v := range op.Wanted {
 		out[k] = v
 	}
 	if _, ok := out["type"]; !ok {
 		out["type"] = "bridge"
 	}
+	if v, ok := out["autostart"]; !ok {
+		out["autostart"] = "1"
+	} else if norm, ok := normalizeAutostart(v); ok {
+		out["autostart"] = norm
+	}
 	return out
+}
+
+// normalizeAutostart maps a caller's autostart value onto PVE's REST boolean
+// domain via parseBoolish's own four-token set: "1"/"true" -> "1",
+// "0"/"false" -> "0" (case-insensitive, whitespace-trimmed). ok is false for
+// anything else (e.g. "yes"/"on"), which PVE's own schema would reject —
+// Validate turns that into a clear pveforge error before any POST. PVE
+// accepts ONLY 1/0 for a REST boolean, so a caller's "true" MUST be rewritten
+// to "1" here and never sent as-is (it would pass fieldsEqual but die at
+// PVE's schema check).
+func normalizeAutostart(v string) (string, bool) {
+	b, ok := parseBoolish(v)
+	if !ok {
+		return "", false
+	}
+	if b {
+		return "1", true
+	}
+	return "0", true
+}
+
+// autostartRequested reports whether want asks for the interface to be
+// brought up — the single signal step-8 keys its kernel-liveness expectation
+// off. nil-safe: a destroy's effectiveWanted is nil, which reads as not
+// requested. Truthy ONLY for the 1/true domain (normalizeAutostart -> "1");
+// an absent key, "0"/"false", or any out-of-domain value is not a request to
+// bring the interface up.
+func autostartRequested(want map[string]string) bool {
+	v, ok := want["autostart"]
+	if !ok {
+		return false
+	}
+	norm, ok := normalizeAutostart(v)
+	return ok && norm == "1"
+}
+
+// negativeLivenessReliable reports whether step-8's "expect NOT live"
+// assertion can be trusted for this op — always for a destroy (a removed
+// interface must be gone from the kernel), and for a create only when the
+// target is a Linux type=bridge. See step 8's own comment for the OVS
+// force-auto carve-out (grok C3). want is op.effectiveWanted(); it is only
+// consulted on the create path, where it always carries a "type".
+func (op *NetworkBridgeEnsure) negativeLivenessReliable(want map[string]string) bool {
+	if op.mode == modeDestroy {
+		return true
+	}
+	return want["type"] == "bridge"
 }
 
 // Apply performs the full stage -> guard -> commit -> poll -> verify
@@ -523,14 +619,34 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	}
 
 	// --- Step 8: only after step 7 passes, check Iface's own new kernel
-	// state matches what create/destroy intended.
+	// state matches what create/destroy intended. Kernel-liveness is keyed
+	// off whether autostart was REQUESTED — read from effectiveWanted (where
+	// the seeded default lives), NOT Wanted — never off mode alone: a create
+	// that asked for autostart must be live; a create that explicitly asked
+	// autostart=0 is a configured-but-dormant bridge and must NOT be live, or
+	// Apply would reject a config it was correctly told to write (the inverse
+	// of the dormant-bridge bug this fixes). A destroy's effectiveWanted is
+	// nil -> not requested -> expect not live, as before.
+	//
+	// When we expect the interface live, every type PVE brings up must be
+	// live, so that assertion is unconditional. When we expect it NOT live (a
+	// destroy, or an autostart=0 create), the assertion is reliable only for a
+	// Linux type=bridge: PVE/ifupdown2 force-adds `auto`/`allow-ovs` for OVS
+	// interface types regardless of the autostart field, so a dormant OVS
+	// interface may still be instantiated in the kernel — asserting not-live
+	// there would be a false failure (grok C3). The carve-out is scoped to the
+	// negative check, so it never weakens the positive (bring-up) guarantee;
+	// this command's domain and default is the Linux bridge.
+	ew := op.effectiveWanted()
+	wantExists := op.mode == modeCreate && autostartRequested(ew)
 	ifaceLink, err := op.Client.LinkState(ctx, op.Iface)
 	if err != nil {
 		return fmt.Errorf("network bridge ensure: %s: post-apply kernel check: %w", op.Iface, err)
 	}
-	wantExists := op.mode == modeCreate
-	if ifaceLink.Exists != wantExists {
-		return fmt.Errorf("network bridge ensure: %s: post-apply kernel state mismatch: expected exists=%v, kernel reports exists=%v", op.Iface, wantExists, ifaceLink.Exists)
+	if wantExists || op.negativeLivenessReliable(ew) {
+		if ifaceLink.Exists != wantExists {
+			return fmt.Errorf("network bridge ensure: %s: post-apply kernel state mismatch: expected exists=%v, kernel reports exists=%v", op.Iface, wantExists, ifaceLink.Exists)
+		}
 	}
 
 	return nil

@@ -365,8 +365,12 @@ func TestNewNetworkBridgeCreateCmd_AlreadySatisfied_ReportsNoOpAndDoesNotStage(t
 		w.Header().Set("Content-Type", "application/json")
 		// The bridge already exists with exactly the wanted fields, and
 		// PVE answers vlan_filtering in its own encoding (a JSON number),
-		// not the caller's ("true").
-		_, _ = w.Write([]byte(`{"data":{"type":"bridge","bridge_ports":"eth0","vlan_filtering":1,"active":1}}`))
+		// not the caller's ("true"). autostart:1 is present because a
+		// create now seeds autostart=1 and Satisfied checks it: a fully
+		// up-to-date bridge is a LIVE one (with its `auto` line), so the
+		// no-op path requires autostart in the answer — a dormant bridge
+		// (no autostart) is deliberately NOT already-satisfied.
+		_, _ = w.Write([]byte(`{"data":{"type":"bridge","bridge_ports":"eth0","vlan_filtering":1,"active":1,"autostart":1}}`))
 	}))
 	defer srv.Close()
 

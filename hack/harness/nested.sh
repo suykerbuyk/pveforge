@@ -324,6 +324,20 @@ pass "acceptance: the nested cluster is whole"
 for node in "${NODES[@]}"; do
 	PVEFORGE_ROSTER_PASSPHRASE=$pass "$PVEFORGE_BIN" network bridge create "$node" "$BRIDGE" --management-bridge "$MGMT_BRIDGE" --roster "$NESTED" \
 		</dev/null >"$EVID/bridge-$node.out" 2>&1 || red "bridge $BRIDGE on $node: see bridge-$node.out"
-	pass "bridge $BRIDGE on $node (management bridge $MGMT_BRIDGE)"
+	# A 0 exit from `network bridge create` is NOT the acceptance criterion:
+	# the whole point of pveforge-network-bridge-create-no-autostart is a
+	# bridge that is committed to config but never instantiated in the kernel.
+	# Independently confirm the kernel brought it up — over a pinned SSH login
+	# (the same U4 pin the bootstrap step trusts), asserting the device exists.
+	# `ip -br link show dev <iface>` exits non-zero when the device is absent,
+	# so a non-zero exit here is the configured-but-not-live defect.
+	ip=${NODE_IP[$node]}
+	known=$EVID/known_hosts-$node
+	(umask 077 && printf '%s\n' "${PIN_LINE[$node]}" >"$known") || red "cannot write $known"
+	"$HB_TOOL_SSH" -F /dev/null -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+		-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null \
+		-o ConnectTimeout=15 "root@$ip" "ip -br link show dev $BRIDGE" </dev/null >"$EVID/bridge-live-$node.out" 2>&1 ||
+		red "bridge $BRIDGE on $node: create reported success but the interface is NOT live in the kernel (ip link show dev $BRIDGE failed): see bridge-live-$node.out"
+	pass "bridge $BRIDGE on $node is live in the kernel (management bridge $MGMT_BRIDGE)"
 done
 harness_evidence_finish

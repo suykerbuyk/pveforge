@@ -51,6 +51,29 @@ func serveECDSA(t *testing.T, home, dest, body string) {
 	writeFile(t, filepath.Join(filepath.Dir(home), "fake", "ssh", "host", fakeKey(dest), "resp", fakeKey(keyscanCmd)), body, 0o600)
 }
 
+// linkLiveCmd is nested.sh's post-create kernel-liveness probe, and
+// linkLiveKey is the fake-ssh answer-file key it maps to (bytes outside
+// [A-Za-z0-9._-] turned into "_").
+const linkLiveCmd = "ip -br link show dev pvhbr1"
+
+var linkLiveKey = fakeKey(linkLiveCmd)
+
+// serveLinkLive makes the fake ssh answer the liveness probe with rc 0 (the
+// interface exists in the kernel) for every host.
+func serveLinkLive(t *testing.T, home string) {
+	t.Helper()
+	writeFile(t, filepath.Join(filepath.Dir(home), "fake", "ssh", "resp", linkLiveKey), "pvhbr1 UP\n", 0o600)
+}
+
+// serveLinkDownFor makes the fake ssh answer the liveness probe with a
+// non-zero rc for one host (dest, e.g. "root@192.0.2.90") — the
+// configured-but-not-live defect the acceptance check must catch.
+func serveLinkDownFor(t *testing.T, home, dest string) {
+	t.Helper()
+	writeFile(t, filepath.Join(filepath.Dir(home), "fake", "ssh", "host", fakeKey(dest), "rc", linkLiveKey), "1", 0o600)
+	writeFile(t, filepath.Join(filepath.Dir(home), "fake", "ssh", "host", fakeKey(dest), "err", linkLiveKey), `Device "pvhbr1" does not exist.`+"\n", 0o600)
+}
+
 func bootstrapJSON(fp string) string {
 	return `{"target":"x","token_id":"root@pam!pveforge","host_key_fingerprint":"` + fp + `","token_outcome":"minted","validation":"verified"}`
 }
@@ -120,6 +143,11 @@ func nestedWorld(t *testing.T, mode string) probeSpec {
 		s.setup = func(t *testing.T, home string) {
 			prev(t, home)
 			writeFile(t, filepath.Join(home, ".config/pveforge/harness-nested.toml"), "# the nested roster\n", 0o600)
+			// The post-create kernel-liveness probe (nested.sh's `ip -br link
+			// show dev pvhbr1` over the pinned login): a global resp with the
+			// default rc 0 means "the interface is live" for both nodes. A
+			// test that wants the dormant-bridge defect sets rc for a node.
+			serveLinkLive(t, home)
 		}
 	}
 	return s
@@ -587,7 +615,11 @@ func TestNested_Bridge(t *testing.T) {
 	if r.code != 0 {
 		t.Fatalf("exit %d:\n%s\n%s", r.code, r.stdout, r.stderr)
 	}
-	equalCalls(t, "calls", nestedCalls(r), append(append([]string{}, preflightPins...), "accept -deadline 5m", bridgeCall("pvh-n1"), bridgeCall("pvh-n2")))
+	// Each node: the create, then the pinned-login kernel-liveness probe.
+	equalCalls(t, "calls", nestedCalls(r), append(append([]string{}, preflightPins...),
+		"accept -deadline 5m",
+		bridgeCall("pvh-n1"), "ssh root@192.0.2.90",
+		bridgeCall("pvh-n2"), "ssh root@192.0.2.91"))
 	noPasswordLeaked(t, r, "bridge")
 	env := fakeLog(r, "accept.env")
 	for _, want := range []string{
@@ -599,7 +631,7 @@ func TestNested_Bridge(t *testing.T) {
 		}
 	}
 	res := nestedEvidence(t, r, "bridge", "result.txt")
-	for _, want := range []string{"PASS acceptance", "PASS bridge pvhbr1 on pvh-n1 (management bridge vmbr0)", "PASS bridge pvhbr1 on pvh-n2", "RESULT phase=nested-bridge fail=0"} {
+	for _, want := range []string{"PASS acceptance", "PASS bridge pvhbr1 on pvh-n1 is live in the kernel (management bridge vmbr0)", "PASS bridge pvhbr1 on pvh-n2 is live in the kernel", "RESULT phase=nested-bridge fail=0"} {
 		if !strings.Contains(res, want) {
 			t.Errorf("result.txt lacks %q:\n%s", want, res)
 		}
@@ -629,6 +661,22 @@ func TestNested_BridgeStopsWhereItFails(t *testing.T) {
 			t.Fatalf("exit %d, want 1:\n%s", r.code, r.stdout)
 		}
 		equalCalls(t, "calls", nestedCalls(r), append(append([]string{}, preflightPins...), "accept -deadline 5m", bridgeCall("pvh-n1")))
+	})
+	// The acceptance criterion is kernel liveness, NOT a 0 exit from create:
+	// create succeeds but `ip link show` reports the interface absent (the
+	// dormant-bridge defect), so the step must go RED and stop before pvh-n2.
+	// Proves the liveness check is not vacuous.
+	t.Run("pvh-n1's bridge is created but not live in the kernel", func(t *testing.T) {
+		s := withSetup(nestedWorld(t, "bridge"), func(t *testing.T, home string) {
+			serveLinkDownFor(t, home, "root@192.0.2.90")
+		})
+		r := runProbe(t, s)
+		if r.code != 1 || !strings.Contains(r.stdout, "RED bridge pvhbr1 on pvh-n1") || !strings.Contains(r.stdout, "NOT live in the kernel") {
+			t.Fatalf("exit %d, want 1 with a not-live RED:\n%s", r.code, r.stdout)
+		}
+		// create pvh-n1 ran and succeeded, the liveness probe ran and failed,
+		// and the run stopped before pvh-n2.
+		equalCalls(t, "calls", nestedCalls(r), append(append([]string{}, preflightPins...), "accept -deadline 5m", bridgeCall("pvh-n1"), "ssh root@192.0.2.90"))
 	})
 }
 

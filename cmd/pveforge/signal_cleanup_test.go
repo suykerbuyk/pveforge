@@ -170,7 +170,7 @@ func TestInterrupt_NetworkRevertRunsAfterTheFirstSignal(t *testing.T) {
 		t.Fatalf("exit %d, want 130; stdout %q; stderr %q", code, stdout, stderr)
 	}
 	wantWrites := []string{
-		"POST /api2/json/nodes/qa-pve-01/network bridge_ports=eth1&iface=vmbr1&type=bridge", // the stage
+		"POST /api2/json/nodes/qa-pve-01/network autostart=1&bridge_ports=eth1&iface=vmbr1&type=bridge", // the stage
 		"DELETE /api2/json/nodes/qa-pve-01/network",                                         // the revert, after the interrupt
 	}
 	if got := rest.Writes(); !slices.Equal(got, wantWrites) {
