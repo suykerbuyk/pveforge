@@ -453,8 +453,9 @@ different threat model from one sequential script.
 The engine also has Ops no command reaches yet: `idempotent.VMTagEnsure`,
 `idempotent.VMClone`, `idempotent.VMShutdown` (ACPI only; a source guard
 proves no hard-stop path is reachable from it), `idempotent.VMDestroy` and
-`idempotent.BridgeIsolationEnsure`. Destroy's behaviour after a failed stop is
-undecided (§6 item 8) and must be settled before it reaches the CLI.
+`idempotent.BridgeIsolationEnsure`. Destroy gates on the VM's status and fails
+closed after a failed stop (§6 item 8, resolved); it is not yet reachable from
+the CLI.
 
 **The standing example that motivated this mechanism:** Linux bridge port
 isolation (`bridge link set dev <tap> isolated on`) does not survive a VM
@@ -1028,9 +1029,13 @@ is no VM migration support. The only PVE version exercised is 9.2.11.
    future direction): which packages leave `internal/`, under what stability
    promise, and whether an MCP server or OpenTofu/Pulumi provider lives in
    this repository.
-8. **VM destroy after a failed stop** (`pveforge-vm-destroy-stop-failure-gate`):
+8. ~~**VM destroy after a failed stop** (`pveforge-vm-destroy-stop-failure-gate`):
    keep the best-effort stop, or gate destroy on the VM's status and fail
-   closed. Must be settled before a destroy command reaches the CLI.
+   closed. Must be settled before a destroy command reaches the CLI.~~
+   **Resolved** (operator, 2026-10-15): gate destroy on the VM's status and fail
+   closed (Position B). `VMDestroy.Apply` reads status before any mutation and
+   reaches the hard destroy only stop-confirmed; a failed, unverifiable, or
+   outcome-unknown stop aborts. Landed `03d187d`; not yet CLI-wired.
 9. **Bridge port isolation on the CLI:** §3.4's canonical example exists only
    as library code. Ship a command for it, or keep it library-only and say
    why.
@@ -1233,7 +1238,8 @@ worktree with no commits yet: its branch still points at an older `main`.
   (`pveforge-keyless-target-host-key-pin`): every `--no-ssh-key` run needs
   the fingerprint again, or trusts the host key on first use (only with
   `--ssh-tofu` where the run captures a TLS pin).
-- **Destroy after a failed stop** (§6 item 8): awaiting a ruling.
+- **Destroy after a failed stop** (§6 item 8): resolved — status-gated,
+  fail-closed (`03d187d`).
 - **The nested harness** (`pveforge-nested-pve-test-harness`): the build and
   golden-snapshot/reset code is merged; the first live build, cluster
   formation and golden run are owed, then the Go port of the outer scripts.
