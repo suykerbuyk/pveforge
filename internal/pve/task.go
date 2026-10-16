@@ -420,9 +420,9 @@ func isTransientPollError(err error) bool {
 //
 // A timeout is one case of IsTaskOutcomeUnknown: the task's actual outcome
 // is unknown, so a caller whose WaitForTask call is guarding a
-// destructive, non-retryable operation (VMDestroy's hard destroy step is
-// the motivating case — see its own doc comment) must not blindly retry
-// it. It is NOT the only such case, and a caller deciding whether a retry
+// destructive, non-retryable operation (VMDestroy's gated stop step and its
+// hard destroy step are both motivating cases — see its own doc comment)
+// must not blindly retry it. It is NOT the only such case, and a caller deciding whether a retry
 // is safe should ask IsTaskOutcomeUnknown instead: every WaitForTask error
 // that is not a *TaskFailedError is outcome-unknown, and a
 // TaskFailedError is the only class that describes what the task did.

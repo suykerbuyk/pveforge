@@ -263,9 +263,17 @@ func TestVMDestroy_NullResourcesIsTagRecheckError(t *testing.T) {
 	stopU, delU := uvUPID("qmstop", uvVMID), uvUPID("qmdestroy", uvVMID)
 	cfgPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", uvNode, uvVMID)
 	s := newUVServer(t)
+	// The status gate (Apply step 1) promotes (*pve.Client).GetVM, which GETs
+	// status/current AND config. A "running" status keeps the stop-POST and
+	// DELETE routes exercised. The config GET route now takes THREE hits:
+	// Read's existence check, GetVM's own config GET (vms.go:30), then the
+	// reverify. So its reply sequence gains a second valid config.
+	s.on("GET", fmt.Sprintf("/nodes/%s/qemu/%d/status/current", uvNode, uvVMID),
+		uvReply{200, `{"data":{"status":"running"}}`})
 	s.on("GET", cfgPath,
-		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`},
-		uvReply{500, fmt.Sprintf(`Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist`, uvNode, uvVMID)})
+		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`}, // Read's existence check
+		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`}, // GetVM's config GET
+		uvReply{500, fmt.Sprintf(`Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist`, uvNode, uvVMID)}) // reverify: gone
 	s.on("POST", fmt.Sprintf("/nodes/%s/qemu/%d/status/stop", uvNode, uvVMID), uvReply{200, fmt.Sprintf(`{"data":%q}`, stopU)})
 	s.on("DELETE", fmt.Sprintf("/nodes/%s/qemu/%d", uvNode, uvVMID), uvReply{200, fmt.Sprintf(`{"data":%q}`, delU)})
 	uvTaskOK(s, stopU)
@@ -277,6 +285,42 @@ func TestVMDestroy_NullResourcesIsTagRecheckError(t *testing.T) {
 	}
 	if !errors.Is(op.TagRecheckErr, pve.ErrUnverifiableRead) {
 		t.Fatalf("expected TagRecheckErr to wrap ErrUnverifiableRead, got %v", op.TagRecheckErr)
+	}
+}
+
+// TestVMDestroy_Apply_StopOutcomeUnknown_IsTaskOutcomeUnknown (G5 / plan §3)
+// proves P2 propagation for real, through the REAL promoted
+// (*pve.Client).WaitForTask — the fake cannot, since the outcome-unknown
+// marker is only ever constructed inside pve.WaitForTask (task.go:241-242).
+// A running VM's stop returns a well-formed UPID, then the task-status poll
+// answers HTTP 500 — which WaitForTask classifies as outcome-unknown via the
+// poll switch default (task.go:303-304), since a 500 is non-transient
+// (task.go:401-407). Apply must RETURN that (not swallow it), must NOT
+// destroy, and pve.IsTaskOutcomeUnknown must hold on the returned error.
+func TestVMDestroy_Apply_StopOutcomeUnknown_IsTaskOutcomeUnknown(t *testing.T) {
+	stopU := uvUPID("qmstop", uvVMID)
+	delPath := fmt.Sprintf("/nodes/%s/qemu/%d", uvNode, uvVMID)
+	s := newUVServer(t)
+	s.on("GET", fmt.Sprintf("/nodes/%s/qemu/%d/status/current", uvNode, uvVMID),
+		uvReply{200, `{"data":{"status":"running"}}`})
+	s.on("GET", fmt.Sprintf("/nodes/%s/qemu/%d/config", uvNode, uvVMID),
+		uvReply{200, `{"data":{"digest":"d"}}`})
+	s.on("POST", fmt.Sprintf("/nodes/%s/qemu/%d/status/stop", uvNode, uvVMID), uvReply{200, fmt.Sprintf(`{"data":%q}`, stopU)})
+	// The stop task's status poll fails outcome-unknown. DELETE is deliberately
+	// NOT routed: if Apply reached the destroy, the unrouted request would fail
+	// the test.
+	s.on("GET", "/nodes/"+uvNode+"/tasks/*", uvReply{500, "boom"})
+
+	op := &VMDestroy{Client: &uvDestroyAdapter{Client: s.client(), node: uvNode}, VMID: uvVMID}
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to return the outcome-unknown stop-wait failure")
+	}
+	if !pve.IsTaskOutcomeUnknown(err) {
+		t.Fatalf("expected pve.IsTaskOutcomeUnknown(applyErr) to hold, got: %v", err)
+	}
+	if n := s.count("DELETE", delPath); n != 0 {
+		t.Errorf("expected NO destroy after an outcome-unknown stop, got %d DELETE call(s)", n)
 	}
 }
 

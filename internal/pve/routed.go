@@ -238,10 +238,12 @@ func (c *RoutedClient) CreateVM(ctx context.Context, vmid int, params url.Values
 	return c.rest.CreateVM(ctx, c.target.Node, vmid, params)
 }
 
-// StopVM issues a best-effort stop for vmid on this target's node — see
-// Client.StopVM's own doc comment. A thin pass-through like the typed
-// getters above; VM stop can never hit a root-only field, so there is
-// nothing for RoutedClient to route.
+// StopVM issues a hard stop for vmid on this target's node — see
+// Client.StopVM's own doc comment, and VMDestroy.Apply
+// (internal/idempotent/vmdestroy.go) for the status-gated, fail-closed way
+// its one caller uses it. A thin pass-through like the typed getters above;
+// VM stop can never hit a root-only field, so there is nothing for
+// RoutedClient to route.
 func (c *RoutedClient) StopVM(ctx context.Context, vmid int) (string, error) {
 	return c.rest.StopVM(ctx, c.target.Node, vmid)
 }

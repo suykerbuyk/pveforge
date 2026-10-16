@@ -13,12 +13,13 @@ import (
 // StopVM issues PVE's stop-VM call — POST /nodes/{node}/qemu/{vmid}/status/stop
 // — a hard, immediate stop (distinct from a graceful shutdown, which this
 // project has no separate command for yet — see pveforge-vm-lifecycle-ops's
-// own per-child breakdown). VMDestroy's Apply calls this as a best-effort
-// step before the hard destroy below: PVE refuses to destroy a running VM,
-// so a caller destroying a VM that happens to already be stopped, or that
-// PVE won't stop for some transient reason, must not be blocked by that —
-// see VMDestroy's own doc comment (internal/idempotent/vmdestroy.go) on why
-// the stop step never fails Apply.
+// own per-child breakdown). VMDestroy's Apply calls this as a status-gated,
+// fail-closed step before the hard destroy below: Apply first reads the VM's
+// run status and skips the stop only when it is positively "stopped"; for
+// any other state it sends this stop and RETURNS on a stop or stop-task
+// failure rather than destroying anyway — see VMDestroy's own doc comment
+// (internal/idempotent/vmdestroy.go) on why "already stopped" is tolerated by
+// the gate, not by swallowing the error.
 //
 // Goes through RawRequest, like CreateVM, so PVE's own diagnostic text on
 // a rejection reaches the caller verbatim: go-proxmox's error for a

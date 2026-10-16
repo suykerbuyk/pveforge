@@ -7,23 +7,32 @@ import (
 	"net/http"
 	"net/url"
 
+	proxmox "github.com/suykerbuyk/go-proxmox"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 // VMDestroyClient is the subset of *pve.RoutedClient a VM-destroy Op needs:
-// the raw REST passthrough (VMDestroy uses this for its existence check —
-// see fetchVMConfig's own doc comment on why it reads the raw config
-// rather than the typed GetVM getter), Node, the stop/destroy calls themselves, WaitForTask,
-// and the post-destroy tag recheck. *pve.RoutedClient satisfies this
-// interface structurally (see compat_test.go).
+// the typed GetVM getter (the status gate, Apply step 1), the raw REST
+// passthrough (VMDestroy uses this for its existence check — see
+// fetchVMConfig's own doc comment on why it reads the raw config there,
+// while the status gate uses the typed GetVM), Node, the stop/destroy calls
+// themselves, WaitForTask, and the post-destroy tag recheck.
+// *pve.RoutedClient satisfies this interface structurally (see compat_test.go).
 type VMDestroyClient interface {
 	// Node returns the PVE node name this client is scoped to.
 	Node() string
+	// GetVM fetches vmid's current status (and config) on node. VMDestroy
+	// uses the typed .Status field as its fail-closed stop gate (Apply step
+	// 1); since P1 a Status=="" (or null-config) payload comes back as
+	// ErrUnverifiableRead.
+	GetVM(ctx context.Context, node string, vmid int) (*proxmox.VirtualMachine, error)
 	// RawRequest issues a raw PVE REST call — see pve.RoutedClient.RawRequest's
-	// own doc comment. VMDestroy uses this exclusively for its existence
-	// check (fetchVMConfig), never the typed GetVM getter.
+	// own doc comment. VMDestroy uses this for its existence check
+	// (fetchVMConfig); the status gate uses the typed GetVM getter.
 	RawRequest(ctx context.Context, method, path string, params url.Values) (json.RawMessage, error)
-	// StopVM issues a best-effort stop for vmid.
+	// StopVM issues a hard stop for vmid. VMDestroy.Apply calls it only when
+	// the status gate reads a state that is not positively "stopped", and
+	// RETURNS on its error (never swallowing it) — see VMDestroy.Apply.
 	StopVM(ctx context.Context, vmid int) (string, error)
 	// DestroyVM issues the hard destroy for vmid.
 	DestroyVM(ctx context.Context, vmid int, purge bool) (string, error)
@@ -35,10 +44,16 @@ type VMDestroyClient interface {
 }
 
 // VMDestroy is idempotent-mutation-engine's Op for `vm destroy`
-// (pveforge-vm-lifecycle-ops item 2c): stop VMID (best-effort), destroy it
-// (hard-fail), reverify against this client's own node that it's actually
-// gone, and optionally recheck a tag it was resolved by for other VMs
-// still claiming it.
+// (pveforge-vm-lifecycle-ops item 2c): read VMID's run status as a
+// fail-closed gate, stop it unless it is already positively-parsed
+// "stopped" (returning on any stop or stop-task failure, never swallowing
+// it), destroy it (hard-fail) only once the stop is confirmed, reverify
+// against this client's own node that it's actually gone, and optionally
+// recheck a tag it was resolved by for other VMs still claiming it. An
+// unverifiable status read (empty, null-config, or transport-failed)
+// aborts before any mutation — "already stopped" is tolerated by the gate,
+// not by swallowing errors, so teardown still never deadlocks on a stop
+// that does not matter.
 //
 // KNOWN HAZARD, not resolved by this Op: WaitForTask's own timeout
 // (10 minutes — internal/pve/task.go's defaultTaskWaitTimeout) can expire
@@ -58,6 +73,10 @@ type VMDestroyClient interface {
 // Callers should use pve.IsTaskOutcomeUnknown (true for the timeout too)
 // to recognize these on the destroy step's WaitForTask call and avoid
 // blindly retrying, rather than treating them like any other Apply error.
+// The gated stop step is now the same class of non-retryable failure: Apply
+// RETURNS (wrapped with %w, so pve.IsTaskOutcomeUnknown still matches) on a
+// stop-task WaitForTask failure and never issues the destroy, so a caller
+// must not blindly retry an outcome-unknown stop either.
 //
 // Not a PostApplier: Apply already verifies its own effect (step 3: the VM
 // is confirmed gone) before it returns.
@@ -68,9 +87,6 @@ type VMDestroy struct {
 	// post-destroy stale-cache-tolerant recheck (Apply's step 4).
 	Tag string
 
-	// StopWarning is set by Apply if the best-effort stop (step 1) failed.
-	// Never propagated as a hard error — see this type's own doc comment.
-	StopWarning error
 	// TagStillClaimedWarning is set by Apply if the post-destroy tag
 	// recheck (step 4) found another VM still carrying Tag. Informational
 	// only — never a hard Apply error, since the destroy itself already
@@ -176,20 +192,48 @@ func (op *VMDestroy) Satisfied(current string) bool {
 	return current == ""
 }
 
-// Apply runs the four-step destroy sequence: (1) best-effort stop,
-// (2) hard destroy, (3) node-local reverify, (4) stale-cache-tolerant tag
-// recheck. See this type's own doc comment for the stop/destroy asymmetry
-// and the WaitForTask-timeout hazard neither step guards against.
+// Apply runs the destroy sequence: (1) read the run status as a fail-closed
+// gate, (2) stop unless already "stopped" (returning on any stop failure),
+// (3) hard destroy, (4) node-local reverify, (5) stale-cache-tolerant tag
+// recheck. See this type's own doc comment for why the stop is now gated and
+// fail-closed, and for the destroy-step WaitForTask-timeout hazard it does
+// not resolve.
 func (op *VMDestroy) Apply(ctx context.Context) error {
-	// Step 1: stop, best-effort. Any failure here is recorded on
-	// StopWarning and never blocks the hard destroy below.
-	if upid, err := op.Client.StopVM(ctx, op.VMID); err != nil {
-		op.StopWarning = fmt.Errorf("vm destroy: vm %d: stop: %w", op.VMID, err)
-	} else if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
-		op.StopWarning = fmt.Errorf("vm destroy: vm %d: stop: wait for task: %w", op.VMID, err)
+	// Step 1: status gate. Read node-local run state before any mutation.
+	// GetVM does a status GET and a config GET; since P1 an empty status, a
+	// config-read failure, or a transport failure all return an error, which
+	// ABORTS here (0 stop, 0 destroy). An unverifiable read is never treated
+	// as "stopped".
+	vm, err := op.Client.GetVM(ctx, op.Client.Node(), op.VMID)
+	if err != nil {
+		return fmt.Errorf("vm destroy: vm %d: status gate: %w", op.VMID, err)
+	}
+	// Local refusal mirroring VMShutdown.Read (vmshutdown.go:125-134): GetVM's
+	// own contract never returns (nil, nil) or an empty status, but this
+	// interface can, and an unverifiable read must never fall through as "not
+	// stopped" and trigger a stop+destroy. Fail closed with ErrUnverifiableRead.
+	if vm == nil || vm.Status == "" {
+		return fmt.Errorf("vm destroy: vm %d: status gate: %w", op.VMID, pve.ErrUnverifiableRead)
 	}
 
-	// Step 2: destroy, hard-fail.
+	// Step 2: stop, gated and fail-closed. Skip the stop ONLY on a
+	// positively-parsed "stopped" (a hibernated VM also reports "stopped" and
+	// is correctly skipped). Every other state — including a paused VM, which
+	// PVE reports as Status "running" — sends the hard stop and RETURNS on any
+	// stop or stop-task failure (including an outcome-unknown one; %w keeps
+	// pve.IsTaskOutcomeUnknown true for the caller), so the destroy below is
+	// reached only once the stop is confirmed.
+	if vm.Status != proxmox.StatusVirtualMachineStopped {
+		upid, err := op.Client.StopVM(ctx, op.VMID)
+		if err != nil {
+			return fmt.Errorf("vm destroy: vm %d: stop: %w", op.VMID, err)
+		}
+		if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
+			return fmt.Errorf("vm destroy: vm %d: stop: wait for task: %w", op.VMID, err)
+		}
+	}
+
+	// Step 3: destroy, hard-fail.
 	upid, err := op.Client.DestroyVM(ctx, op.VMID, true)
 	if err != nil {
 		return fmt.Errorf("vm destroy: vm %d: %w", op.VMID, err)
@@ -198,7 +242,7 @@ func (op *VMDestroy) Apply(ctx context.Context) error {
 		return fmt.Errorf("vm destroy: vm %d: %w", op.VMID, err)
 	}
 
-	// Step 3: node-local reverify. A nil error (VM still answers) is the
+	// Step 4: node-local reverify. A nil error (VM still answers) is the
 	// failure here, not a non-nil one: WaitForTask succeeding above only
 	// proves the DELETE task's own exit status was OK, not that this
 	// node's own live state actually reflects the VM's removal. An
@@ -212,7 +256,7 @@ func (op *VMDestroy) Apply(ctx context.Context) error {
 		return fmt.Errorf("vm destroy: vm %d: destroy reported success but vm still exists", op.VMID)
 	}
 
-	// Step 4: stale-cache-tolerant tag recheck — informational only, never
+	// Step 5: stale-cache-tolerant tag recheck — informational only, never
 	// fails Apply (the destroy itself already succeeded by this point).
 	// A TagStillClaimed error is recorded on TagRecheckErr, distinct from
 	// TagStillClaimedWarning, so a caller can tell "recheck ran, found

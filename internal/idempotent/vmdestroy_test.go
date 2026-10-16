@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"testing"
 
+	proxmox "github.com/suykerbuyk/go-proxmox"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 // rawRequestStep scripts one fetchVMConfig-relevant RawRequest call.
@@ -24,6 +27,15 @@ type rawRequestStep struct {
 // package's existing "one fake per interface shape" discipline.
 type fakeVMDestroyClient struct {
 	node string
+
+	// getVMStatus is the .Status the scripted GetVM reports (the stop gate
+	// reads it); getVMErr, if set, is returned instead. Kept orthogonal to
+	// rawRequestSteps (which drive fetchVMConfig) so the stop/destroy
+	// counters still fire.
+	getVMStatus string
+	getVMErr    error
+	getVMNil    bool // when set, GetVM returns (nil, nil) — the out-of-contract case the local nil guard refuses
+	getVMCalls  int
 
 	rawRequestSteps []rawRequestStep
 	rawRequestCalls int
@@ -54,6 +66,21 @@ type fakeVMDestroyClient struct {
 }
 
 func (f *fakeVMDestroyClient) Node() string { return f.node }
+
+func (f *fakeVMDestroyClient) GetVM(_ context.Context, _ string, _ int) (*proxmox.VirtualMachine, error) {
+	f.getVMCalls++
+	if f.getVMNil {
+		// (nil, nil): out of GetVM's real contract, but the interface can
+		// return it — pins the vm==nil half of Apply's local refusal.
+		return nil, nil
+	}
+	// A non-nil VM is returned alongside any getVMErr so a test can target
+	// the gate's error-return branch (status known, read errored) distinctly
+	// from the local nil/empty refusal. The real GetVM returns (nil, err) on
+	// failure; the nil half of the local guard is defensive, mirroring
+	// VMShutdown.Read.
+	return &proxmox.VirtualMachine{Status: f.getVMStatus}, f.getVMErr
+}
 
 func (f *fakeVMDestroyClient) RawRequest(_ context.Context, method, path string, _ url.Values) (json.RawMessage, error) {
 	f.lastRawMethod = method
@@ -249,6 +276,7 @@ func TestVMDestroy_Read_VMExists_ReportsNonEmpty(t *testing.T) {
 func baseDestroyClient() *fakeVMDestroyClient {
 	return &fakeVMDestroyClient{
 		node:          "qa-pve-01",
+		getVMStatus:   "running", // non-"stopped" → the gate sends the stop
 		stopVMUPID:    "UPID:qa-pve-01:1:1:1:qmstop:100:root@pam:",
 		destroyVMUPID: "UPID:qa-pve-01:2:2:2:qmdestroy:100:root@pam:",
 		rawRequestSteps: []rawRequestStep{
@@ -264,8 +292,8 @@ func TestVMDestroy_Apply_HappyPath(t *testing.T) {
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if op.StopWarning != nil {
-		t.Errorf("expected no StopWarning, got: %v", op.StopWarning)
+	if client.getVMCalls != 1 {
+		t.Errorf("expected exactly one GetVM status-gate call, got %d", client.getVMCalls)
 	}
 	if client.stopVMCalls != 1 || client.destroyVMCalls != 1 {
 		t.Errorf("expected exactly one StopVM and one DestroyVM call, got stop=%d destroy=%d", client.stopVMCalls, client.destroyVMCalls)
@@ -284,46 +312,209 @@ func TestVMDestroy_Apply_HappyPath(t *testing.T) {
 	}
 }
 
-// TestVMDestroy_Apply_StopFailure_RecordedAsWarning_DestroyStillRuns proves
-// the stop/destroy asymmetry: a failing stop never blocks the hard destroy.
-func TestVMDestroy_Apply_StopFailure_RecordedAsWarning_DestroyStillRuns(t *testing.T) {
-	client := baseDestroyClient()
-	client.stopVMErr = errors.New("vm 100 is locked")
+// TestVMDestroy_Apply_Running_StopFails_NoDestroy (row 4) is the inversion
+// of the old best-effort behavior: a running VM whose stop FAILS must abort
+// before the hard destroy, not swallow the error and destroy anyway.
+func TestVMDestroy_Apply_Running_StopFails_NoDestroy(t *testing.T) {
+	client := baseDestroyClient() // getVMStatus "running" → the gate sends the stop
+	stopErr := errors.New("vm 100 is locked")
+	client.stopVMErr = stopErr
 	op := &VMDestroy{Client: client, VMID: 100}
 
-	if err := op.Apply(context.Background()); err != nil {
-		t.Fatalf("Apply: %v", err)
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to return the stop failure, not swallow it")
 	}
-	if op.StopWarning == nil {
-		t.Error("expected StopWarning to be set")
+	if !errors.Is(err, stopErr) {
+		t.Errorf("expected Apply error to wrap the stop error (%%w, not %%v), got: %v", err)
 	}
-	if client.destroyVMCalls != 1 {
-		t.Error("expected DestroyVM to still run despite the stop failure")
+	if client.stopVMCalls != 1 {
+		t.Errorf("expected the stop to be attempted, got stopVMCalls=%d", client.stopVMCalls)
+	}
+	if client.destroyVMCalls != 0 {
+		t.Errorf("expected NO destroy after a failed stop, got destroyVMCalls=%d", client.destroyVMCalls)
 	}
 	if client.lastStopVMID != op.VMID {
 		t.Errorf("StopVM called with vmid=%d, want %d", client.lastStopVMID, op.VMID)
 	}
-	if client.lastDestroyVMID != op.VMID {
-		t.Errorf("DestroyVM called with vmid=%d, want %d", client.lastDestroyVMID, op.VMID)
+}
+
+// TestVMDestroy_Apply_Running_StopTaskFails_NoDestroy (row 5) covers the
+// other stop-step failure point — StopVM succeeds but its WaitForTask fails
+// — and is strengthened (G4): it pins that the stop wait actually ran and
+// that the returned error is the wait error, killing a "stop, don't wait,
+// return a made-up error, don't destroy" mutant.
+func TestVMDestroy_Apply_Running_StopTaskFails_NoDestroy(t *testing.T) {
+	client := baseDestroyClient()
+	waitErr := errors.New("stop task failed")
+	client.waitForTaskErrs = []error{waitErr}
+	op := &VMDestroy{Client: client, VMID: 100}
+
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to return the stop-task wait failure, not swallow it")
+	}
+	if !errors.Is(err, waitErr) {
+		t.Errorf("expected Apply error to wrap the scripted stop-wait error, got: %v", err)
+	}
+	if client.stopVMCalls != 1 {
+		t.Errorf("expected the stop to be attempted, got stopVMCalls=%d", client.stopVMCalls)
+	}
+	if client.waitForTaskCalls != 1 {
+		t.Errorf("expected exactly one WaitForTask (the stop wait), got %d", client.waitForTaskCalls)
+	}
+	if client.lastWaitNode != client.node {
+		t.Errorf("stop wait used node=%q, want this client's node %q", client.lastWaitNode, client.node)
+	}
+	if len(client.lastWaitUPIDs) != 1 || client.lastWaitUPIDs[0] != client.stopVMUPID {
+		t.Errorf("stop wait used UPID %v, want the stop UPID %q", client.lastWaitUPIDs, client.stopVMUPID)
+	}
+	if client.destroyVMCalls != 0 {
+		t.Errorf("expected NO destroy after a failed stop wait, got destroyVMCalls=%d", client.destroyVMCalls)
 	}
 }
 
-// TestVMDestroy_Apply_StopWaitForTaskFailure_RecordedAsWarning covers the
-// other stop-step failure point: StopVM itself succeeds but its
-// WaitForTask fails.
-func TestVMDestroy_Apply_StopWaitForTaskFailure_RecordedAsWarning(t *testing.T) {
+// TestVMDestroy_Apply_GateReadError_Aborts (row 1): a failed status-gate
+// read aborts before any mutation — 0 stop, 0 destroy.
+func TestVMDestroy_Apply_GateReadError_Aborts(t *testing.T) {
 	client := baseDestroyClient()
-	client.waitForTaskErrs = []error{errors.New("stop task failed")}
+	// Status reads fine ("running") but the read itself errored — this
+	// targets the gate's error-return branch specifically (so it also kills a
+	// "swallow the gate read error" mutant, which the nil/empty refusal would
+	// otherwise mask).
+	client.getVMStatus = "running"
+	client.getVMErr = errors.New("dial tcp: connection refused")
+	op := &VMDestroy{Client: client, VMID: 100}
+
+	if err := op.Apply(context.Background()); err == nil {
+		t.Fatal("expected Apply to abort on a failed status-gate read")
+	}
+	if client.getVMCalls != 1 {
+		t.Errorf("expected exactly one GetVM gate call, got %d", client.getVMCalls)
+	}
+	if client.stopVMCalls != 0 || client.destroyVMCalls != 0 {
+		t.Errorf("expected 0 stop and 0 destroy on a failed gate read, got stop=%d destroy=%d", client.stopVMCalls, client.destroyVMCalls)
+	}
+}
+
+// TestVMDestroy_Apply_GateEmptyStatus_Aborts (row 2) pins the LOCAL
+// nil/empty refusal: GetVM's contract never returns an empty status, but
+// the interface can, and an unverifiable read must never fall through as
+// "not stopped" and trigger a stop+destroy. It must abort with
+// ErrUnverifiableRead, 0 stop, 0 destroy.
+func TestVMDestroy_Apply_GateEmptyStatus_Aborts(t *testing.T) {
+	client := baseDestroyClient()
+	client.getVMStatus = "" // fake returns &proxmox.VirtualMachine{Status:""}, nil
+	op := &VMDestroy{Client: client, VMID: 100}
+
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to refuse an empty status, not treat it as not-stopped")
+	}
+	if !errors.Is(err, pve.ErrUnverifiableRead) {
+		t.Errorf("expected the empty-status abort to wrap ErrUnverifiableRead, got: %v", err)
+	}
+	if client.stopVMCalls != 0 || client.destroyVMCalls != 0 {
+		t.Errorf("expected 0 stop and 0 destroy on an empty status, got stop=%d destroy=%d", client.stopVMCalls, client.destroyVMCalls)
+	}
+}
+
+// TestVMDestroy_Apply_GatePreWrappedUnverifiable_Aborts (row 2b): an
+// unverifiable-read ERROR from the gate (distinct from the empty-payload
+// path in row 2) is never treated as stopped — it aborts, 0 stop, 0 destroy.
+func TestVMDestroy_Apply_GatePreWrappedUnverifiable_Aborts(t *testing.T) {
+	client := baseDestroyClient()
+	client.getVMStatus = ""
+	client.getVMErr = fmt.Errorf("get vm 100 status: %w: payload carries no run status", pve.ErrUnverifiableRead)
+	op := &VMDestroy{Client: client, VMID: 100}
+
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to abort on an unverifiable gate read")
+	}
+	if !errors.Is(err, pve.ErrUnverifiableRead) {
+		t.Errorf("expected the abort to wrap ErrUnverifiableRead, got: %v", err)
+	}
+	if client.stopVMCalls != 0 || client.destroyVMCalls != 0 {
+		t.Errorf("expected 0 stop and 0 destroy, got stop=%d destroy=%d", client.stopVMCalls, client.destroyVMCalls)
+	}
+}
+
+// TestVMDestroy_Apply_GateNilVM_Aborts (C3) pins the vm==nil half of the
+// local refusal: GetVM's contract never returns (nil, nil), but the
+// interface can, and that out-of-contract read must abort — not panic, and
+// not fall through as "not stopped" — with ErrUnverifiableRead, 0 stop, 0
+// destroy.
+func TestVMDestroy_Apply_GateNilVM_Aborts(t *testing.T) {
+	client := baseDestroyClient()
+	client.getVMNil = true // GetVM returns (nil, nil)
+	op := &VMDestroy{Client: client, VMID: 100}
+
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to refuse a (nil, nil) status read, not fall through")
+	}
+	if !errors.Is(err, pve.ErrUnverifiableRead) {
+		t.Errorf("expected the nil-vm abort to wrap ErrUnverifiableRead, got: %v", err)
+	}
+	if client.stopVMCalls != 0 || client.destroyVMCalls != 0 {
+		t.Errorf("expected 0 stop and 0 destroy on a nil-vm read, got stop=%d destroy=%d", client.stopVMCalls, client.destroyVMCalls)
+	}
+}
+
+// TestVMDestroy_Apply_Stopped_SkipsStop_Destroys (row 3): a positively
+// parsed "stopped" skips the stop entirely and goes straight to the destroy.
+func TestVMDestroy_Apply_Stopped_SkipsStop_Destroys(t *testing.T) {
+	client := baseDestroyClient()
+	client.getVMStatus = "stopped"
 	op := &VMDestroy{Client: client, VMID: 100}
 
 	if err := op.Apply(context.Background()); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if op.StopWarning == nil {
-		t.Error("expected StopWarning to be set when the stop's own WaitForTask fails")
+	if client.stopVMCalls != 0 {
+		t.Errorf("expected NO stop for an already-stopped VM, got stopVMCalls=%d", client.stopVMCalls)
 	}
 	if client.destroyVMCalls != 1 {
-		t.Error("expected DestroyVM to still run despite the stop-wait failure")
+		t.Errorf("expected exactly one destroy, got destroyVMCalls=%d", client.destroyVMCalls)
+	}
+	if client.waitForTaskCalls != 1 {
+		t.Errorf("expected exactly one WaitForTask (the destroy only, no stop wait), got %d", client.waitForTaskCalls)
+	}
+	// The single wait on the skip path is the DESTROY wait — pin its node and
+	// UPID so a swapped/mis-targeted wait is caught at the fake level.
+	if client.lastWaitNode != client.node {
+		t.Errorf("destroy wait used node=%q, want this client's node %q", client.lastWaitNode, client.node)
+	}
+	if len(client.lastWaitUPIDs) != 1 || client.lastWaitUPIDs[0] != client.destroyVMUPID {
+		t.Errorf("destroy wait used UPID %v, want the destroy UPID %q", client.lastWaitUPIDs, client.destroyVMUPID)
+	}
+}
+
+// TestVMDestroy_Apply_SyntheticNonStopped_StopFails_NoDestroy (row 6) is the
+// M5 kill. "suspended" is SYNTHETIC — PVE never emits it as a .Status value
+// (a hibernated VM reports .Status "stopped"); it is used only to
+// discriminate the decision-text gate (skip only on positively-parsed
+// "stopped") from a `== "running"` mutant. Scripting a stop FAILURE makes
+// the assertion (destroy does not run) red today (swallow → destroy runs),
+// red vs the `== "running"` mutant (it skips the stop, destroy runs), and
+// green only for Position B.
+func TestVMDestroy_Apply_SyntheticNonStopped_StopFails_NoDestroy(t *testing.T) {
+	client := baseDestroyClient()
+	client.getVMStatus = "suspended" // synthetic: not a value PVE emits as .Status
+	stopErr := errors.New("cannot stop a suspended guest")
+	client.stopVMErr = stopErr
+	op := &VMDestroy{Client: client, VMID: 100}
+
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected Apply to send the stop for a non-stopped status and abort on its failure")
+	}
+	if !errors.Is(err, stopErr) {
+		t.Errorf("expected Apply error to wrap the stop error (%%w, not %%v), got: %v", err)
+	}
+	if client.destroyVMCalls != 0 {
+		t.Errorf("expected NO destroy for a non-stopped status whose stop failed, got destroyVMCalls=%d", client.destroyVMCalls)
 	}
 }
 
@@ -494,6 +685,7 @@ func TestVMDestroy_ViaRun_UnrelatedReadError_FailsRun(t *testing.T) {
 func TestVMDestroy_ViaRun_FullCycle_AppliesAndConfirmsGone(t *testing.T) {
 	client := &fakeVMDestroyClient{
 		node:          "qa-pve-01",
+		getVMStatus:   "running", // gate sends the stop
 		stopVMUPID:    "UPID:qa-pve-01:1:1:1:qmstop:100:root@pam:",
 		destroyVMUPID: "UPID:qa-pve-01:2:2:2:qmdestroy:100:root@pam:",
 		rawRequestSteps: []rawRequestStep{
