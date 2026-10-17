@@ -1,0 +1,28 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-harness - Outer test-harness VM lifecycle (operator-driven)
+
+
+.SH SYNOPSIS
+\fBpveforge harness [flags]\fP
+
+
+.SH DESCRIPTION
+The outer test-harness VM lifecycle, a Go port of hack/harness/lib.sh.
+
+.PP
+Every verb acts only on a VM in the harness range 690-699 that is a tagged
+qemu member of the harness pool on the harness node, and every state decision
+is made on PVE's JSON, never on its error text. The destructive tier is
+confined to these verbs; the public vm command surface is unchanged.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for harness
+
+
+.SH SEE ALSO
+\fBpveforge(1)\fP, \fBpveforge-harness-vm(1)\fP

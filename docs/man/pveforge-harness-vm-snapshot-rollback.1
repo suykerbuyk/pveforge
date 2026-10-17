@@ -1,0 +1,50 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-harness-vm-snapshot-rollback - Roll a harness VM back to its newest snapshot
+
+
+.SH SYNOPSIS
+\fBpveforge harness vm snapshot rollback <target-id> <vmid> <name> [flags]\fP
+
+
+.SH DESCRIPTION
+Roll a harness VM back to a snapshot. Only the newest snapshot can be rolled
+back to: if newer ones exist, pveforge refuses before anything is sent, and
+this prints a JSON object with rollback=refused and reason=not-newest (plus
+newer and cascade_order). Consumers classify on the reason field, not the
+exit code (which stays 1 for any refusal).
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for rollback
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--pool\fP="pveforge-harness"
+	harness pool a VM must be a member of
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--tag\fP="pveforge-harness"
+	harness tag a VM must carry
+
+.PP
+\fB--witness\fP[=false]
+	prove the guest is running after the rollback via the guest agent
+
+
+.SH SEE ALSO
+\fBpveforge-harness-vm-snapshot(1)\fP

@@ -198,7 +198,18 @@ func (op *VMDestroy) Satisfied(current string) bool {
 // recheck. See this type's own doc comment for why the stop is now gated and
 // fail-closed, and for the destroy-step WaitForTask-timeout hazard it does
 // not resolve.
-func (op *VMDestroy) Apply(ctx context.Context) error {
+// StatusGatedStop performs VMDestroy's fail-closed status gate (step 1) and
+// the gated, fail-closed conditional stop (step 2) as ONE callable seam.
+// Apply calls it as its first step; a second caller — the outer-harness
+// `pveforge harness vm destroy` leaf, which must issue its own final DELETE
+// carrying PVE's destroy-unreferenced-disks parameter that this Op's
+// DestroyVM cannot express — calls the SAME method, so the proven
+// status-gated stop-before-destroy posture lives in exactly one place
+// rather than being duplicated. Behaviour is identical to the inline steps
+// it replaced (same reads, same fail-closed refusal, same %w wrapping), so
+// pve.IsTaskOutcomeUnknown / pve.ErrUnverifiableRead still match for callers
+// and every existing error-text assertion holds.
+func (op *VMDestroy) StatusGatedStop(ctx context.Context) error {
 	// Step 1: status gate. Read node-local run state before any mutation.
 	// GetVM does a status GET and a config GET; since P1 an empty status, a
 	// config-read failure, or a transport failure all return an error, which
@@ -231,6 +242,16 @@ func (op *VMDestroy) Apply(ctx context.Context) error {
 		if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
 			return fmt.Errorf("vm destroy: vm %d: stop: wait for task: %w", op.VMID, err)
 		}
+	}
+	return nil
+}
+
+func (op *VMDestroy) Apply(ctx context.Context) error {
+	// Steps 1–2: the fail-closed status gate and the gated conditional stop,
+	// single-sourced in StatusGatedStop so the outer-harness destroy leaf
+	// reuses the exact same posture (N1).
+	if err := op.StatusGatedStop(ctx); err != nil {
+		return err
 	}
 
 	// Step 3: destroy, hard-fail.

@@ -1,0 +1,53 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-harness-vm-shutdown - Gracefully shut down a harness VM
+
+
+.SH SYNOPSIS
+\fBpveforge harness vm shutdown <target-id> <vmid> [flags]\fP
+
+
+.SH DESCRIPTION
+Gracefully shut down a harness VM. With neither --timeout nor --force-stop
+this drives pveforge's idempotent VMShutdown (a no-op if already stopped,
+refuses a paused guest). With either flag it issues PVE's status/shutdown
+directly, since the idempotent op cannot express them.
+
+
+.SH OPTIONS
+\fB--force-stop\fP[=false]
+	let PVE hard-stop the VM if the graceful shutdown times out
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for shutdown
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--pool\fP="pveforge-harness"
+	harness pool a VM must be a member of
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--tag\fP="pveforge-harness"
+	harness tag a VM must carry
+
+.PP
+\fB--timeout\fP=0
+	seconds PVE waits for the guest before giving up (0 = PVE default)
+
+
+.SH SEE ALSO
+\fBpveforge-harness-vm(1)\fP

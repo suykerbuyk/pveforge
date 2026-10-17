@@ -30,6 +30,7 @@ func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 	}
 	want := map[string]int{
 		"cmd/pveforge/api.go":                  1,
+		"cmd/pveforge/harness_vm.go":           1,
 		"internal/idempotent/networkbridge.go": 1,
 		"internal/idempotent/networkfields.go": 1,
 		"internal/idempotent/vmclone.go":       1,

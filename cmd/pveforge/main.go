@@ -147,6 +147,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newRosterCmd())
 	root.AddCommand(newBootstrapCmd())
 	root.AddCommand(newVMCmd())
+	root.AddCommand(newHarnessCmd())
 	root.AddCommand(newNodeCmd())
 	root.AddCommand(newStorageCmd())
 	root.AddCommand(newNetworkCmd())
