@@ -927,14 +927,14 @@ are, and both are generated from the command tree and held to it by tests.
 | `access inventory`, `user ensure`, `group ensure`, `acl grant` | PVE principals and ACLs | Root over SSH (`pveum`), never the token | The token must never hold `User.Modify` or `Permissions.Modify`. A grant to the roster's own token, its owner or a group it is in is refused; escalating roles need `--allow-escalating-role`; membership is only ever added; every write is read back as root |
 | `api` (`get`, `post`, `put`, `delete`) | Any PVE REST path with no command yet | Token over REST | §3.1. Locks a modelled object, else needs `--unsafe-no-lock`; waits on a returned task; `/access` refused |
 | `discover`, `schema` | Describe PVE's schema and pveforge's own | Nothing | §3.5 |
-| `harness` (`stop`, `shutdown`, `destroy`, `gone`, `snapshot …`) | Outer test-harness VM lifecycle (operator-driven) | Token over REST | U-CORE Go port of hack/harness/lib.sh. Acts only on VMs 690-699 that are tagged qemu members of the harness pool; reuses the snapshot ops and the fail-closed status-gated VMDestroy posture. Every state decision is on PVE's JSON, never its error text; the destructive tier is confined to these verbs |
+| `harness` (`stop`, `shutdown`, `destroy`, `gone`, `snapshot …`, `probe`) | Outer test-harness VM lifecycle and the storage-capability probe (operator-driven) | Token over REST | U-CORE/U-PROBE Go port of hack/harness/lib.sh and probe.sh. Acts only on VMs 690-699 that are tagged qemu members of the harness pool; reuses the snapshot ops and the fail-closed status-gated VMDestroy posture. `probe` creates and destroys VM 690 to measure a storage's rollback rule. Every state decision is on PVE's JSON, never its error text (except the probe's own storage-level rollback classification); the destructive tier is confined to these verbs |
 
 The mutation tiers as shipped (§3.5 Layer 3; `cmd/pveforge/readme_test.go`
 holds this table to every runnable command's annotation, both ways):
 
 | Tier | Commands |
 |---|---|
-| destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `vm snapshot delete`, `vm snapshot rollback`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback` |
+| destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `vm snapshot delete`, `vm snapshot rollback`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe` |
 | mutating | `roster pin-tls`, `vm create`, `vm set`, `vm snapshot create`, `network set`, `network bridge create`, `user ensure`, `group ensure`, `harness vm snapshot create` |
 | safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
 
@@ -1113,6 +1113,7 @@ both ways, plane included.
 | `internal/harnesssecrets` | harness library | The age-sealed harness environment (§4.1) |
 | `internal/harness` | test-support | The nested-harness guard (`harness.Open`) and acceptance checks (§7.7) |
 | `internal/harness/outer` | production | U-CORE: the outer test-harness guard, created-VM ledger and positive-JSON gone-proof the harness vm verbs drive (a Go port of hack/harness/lib.sh) |
+| `internal/harness/probe` | production | U-PROBE: the storage-capability probe driver (the `harness probe` verb), a Go port of hack/harness/probe.sh that consumes the U-CORE primitives |
 | `internal/harness/suites` | harness suite | The `-tags harness` suites, which get clients only from `harness.Open` |
 | `internal/lock/lockguard` | test-support | §3.4.2's static lock and task-wait context rules |
 | `internal/netguard` | test-support | Loopback-only dial trip-wire for unit tests |

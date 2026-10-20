@@ -31,6 +31,7 @@ is made on PVE's JSON, never on its error text. The destructive tier is
 confined to these verbs; the public vm command surface is unchanged.`,
 	}
 	cmd.AddCommand(newHarnessVMCmd())
+	cmd.AddCommand(newHarnessProbeCmd())
 	return cmd
 }
 

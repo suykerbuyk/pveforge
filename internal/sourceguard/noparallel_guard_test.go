@@ -47,6 +47,7 @@ var noParallel = []struct{ pkg, why string }{
 	{"internal/harnesssecrets", "the execve, isTerminal and readSecret seams; t.Setenv"},
 	{"cmd/pveforge-harness-secrets", "t.Setenv, and child processes whose HOME and TMPDIR each test points at its own directory"},
 	{"cmd/pveforge-harness-accept", "the process's signal handlers: a test sends itself SIGTERM, which run catches"},
+	{"internal/harness/outer", "the storage_test leftover-timing seam (SetLeftoverTimingsForTests) sets package-global bound/poll; kept serial so the override cannot race another test"},
 }
 
 // parallelAllowed lists the packages whose tests touch no process-global
@@ -61,7 +62,7 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"internal/lock/lockguard", "a static source guard"},
 	{"internal/nodump", "its test calls Set in a child process, never in the test process"},
 	{"internal/sourceguard", "static walks and read-only go commands; the harness scripts' tests each run in their own directory, sharing only a pins binary built once (sync.OnceValues) and only run after"},
-	{"internal/harness/outer", "unit tests over an in-package fake Reader; the Ledger tests use per-test t.TempDir paths, so they touch no process-global or shared-path state (a future ledger test sharing a path would break that and must move to noParallel)"},
+	{"internal/harness/probe", "pure-helper tests (classifyRollback, screenProbeCreate) over their inputs; no process-global or shared-path state"},
 }
 
 // TestTestFacts_Calibration: the walker finds what it must — a t.Parallel
