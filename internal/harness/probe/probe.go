@@ -50,6 +50,11 @@ type Params struct {
 	RosterPath string
 	Home       string // $HOME, for the evidence and rule-state dirs
 	Stdout     io.Writer
+	// LeftoverBound/LeftoverPoll bound the post-destroy storage-leftover wait
+	// (B2: the per-call bound replaces outer's removed package-global seam). The
+	// command sets 180s/5s in production; a test injects a short bound.
+	LeftoverBound time.Duration
+	LeftoverPoll  time.Duration
 }
 
 // Driver runs the probe against one routed client. The command holds the VM
@@ -142,7 +147,7 @@ func (d *Driver) Run(ctx context.Context) error {
 	}
 
 	// Leftover detector (bounded; unreadable = not detected).
-	if leftover, reason := outer.StorageLeftover(ctx, d.client, d.cfg.Node, d.p.Storage, baseline, []int{vmid}); leftover {
+	if leftover, reason := outer.StorageLeftover(ctx, d.client, d.cfg.Node, d.p.Storage, baseline, []int{vmid}, d.p.LeftoverBound, d.p.LeftoverPoll); leftover {
 		return d.fail("VM " + strconv.Itoa(vmid) + " is destroyed, but the storage shows a leftover: " + reason)
 	}
 

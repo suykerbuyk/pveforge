@@ -115,21 +115,27 @@ func (f *storageFake) RawRequest(_ context.Context, _, path string, _ url.Values
 }
 
 func TestStorageLeftover(t *testing.T) {
-	defer SetLeftoverTimingsForTests(30*time.Millisecond, 5*time.Millisecond)()
+	// B2: the bound/poll are per-call now (no package-global seam). Short bounds
+	// keep the "never clears" cases fast.
+	const b, p = 30 * time.Millisecond, 5 * time.Millisecond
 	// Back at baseline, nothing listed → not a leftover.
-	if lo, _ := StorageLeftover(context.Background(), &storageFake{used: "0"}, "n", "s", 0, []int{690}); lo {
+	if lo, _ := StorageLeftover(context.Background(), &storageFake{used: "0"}, "n", "s", 0, []int{690}, b, p); lo {
 		t.Error("clean storage reported a leftover")
 	}
 	// used stays above baseline+slack → leftover detected after the bound.
-	if lo, reason := StorageLeftover(context.Background(), &storageFake{used: "999999999"}, "n", "s", 0, []int{690}); !lo || !strings.Contains(reason, "not back within") {
+	if lo, reason := StorageLeftover(context.Background(), &storageFake{used: "999999999"}, "n", "s", 0, []int{690}, b, p); !lo || !strings.Contains(reason, "not back within") {
 		t.Errorf("high-used not detected: lo=%v reason=%q", lo, reason)
 	}
 	// A volume still listed → leftover detected.
-	if lo, reason := StorageLeftover(context.Background(), &storageFake{used: "0", contentHits: 100}, "n", "s", 0, []int{690}); !lo || !strings.Contains(reason, "still lists volumes") {
+	if lo, reason := StorageLeftover(context.Background(), &storageFake{used: "0", contentHits: 100}, "n", "s", 0, []int{690}, b, p); !lo || !strings.Contains(reason, "still lists volumes") {
 		t.Errorf("listed volume not detected: lo=%v reason=%q", lo, reason)
 	}
 	// Unreadable status detects NOTHING (never a failure) — PollIsBounded.
-	if lo, _ := StorageLeftover(context.Background(), &storageFake{used: ""}, "n", "s", 0, []int{690}); lo {
+	if lo, _ := StorageLeftover(context.Background(), &storageFake{used: ""}, "n", "s", 0, []int{690}, b, p); lo {
 		t.Error("unreadable status reported a leftover")
+	}
+	// bound=0 → one read, no wait (the build's secs=0 case).
+	if lo, reason := StorageLeftover(context.Background(), &storageFake{used: "0", contentHits: 100}, "n", "s", 0, []int{690}, 0, p); !lo || !strings.Contains(reason, "still lists volumes") {
+		t.Errorf("bound=0 one-read leftover not detected: lo=%v reason=%q", lo, reason)
 	}
 }

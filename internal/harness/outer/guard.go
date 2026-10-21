@@ -22,6 +22,10 @@ const (
 	// ModeDestroy additionally requires the VM to have been created by this
 	// run (lib.sh:484).
 	ModeDestroy
+	// ModeTag is the shell's "tag" mode (lib.sh:487-490): declared + a qemu
+	// member of the pool on this node, but the tag check is SKIPPED — used only
+	// to tag a VM just created (which does not carry the tag yet, D5).
+	ModeTag
 )
 
 // poolObj is PVE's /pools?poolid=… answer, decoded exactly enough to make
@@ -122,6 +126,9 @@ func Guard(ctx context.Context, r Reader, cfg Config, led *Ledger, vmid int, mod
 	}
 	if node != cfg.Node {
 		return fmt.Errorf("VM %d is on node %s, not %s", vmid, node, cfg.Node)
+	}
+	if mode == ModeTag {
+		return nil // lib.sh:487-490: the tag mode returns before the tag check
 	}
 	if mode == ModeDestroy {
 		if led == nil {

@@ -5,10 +5,21 @@ import (
 	"os"
 	"strconv"
 
+	"time"
+
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/harness/probe"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+)
+
+// probeLeftoverBound/Poll bound the probe's post-destroy storage-leftover wait.
+// Production is 180s/5s (probe.sh:328); a test shortens them (the seam lives
+// here, in package main — already serial — not in outer, so outer stays
+// parallel-safe; B2/D1).
+var (
+	probeLeftoverBound = 180 * time.Second
+	probeLeftoverPoll  = 5 * time.Second
 )
 
 // pveforge-harness-capability-probe (U-PROBE): `pveforge harness probe
@@ -73,13 +84,15 @@ does not read it).`,
 		defer func() { _ = unlock() }()
 
 		d := probe.New(client, cfg, harnessLedger(cmd), probe.Params{
-			TargetID:   args[0],
-			Storage:    storage,
-			StaticOnly: staticOnly,
-			MinFreeGiB: min,
-			RosterPath: rosterPath,
-			Home:       home,
-			Stdout:     cmd.OutOrStdout(),
+			TargetID:      args[0],
+			Storage:       storage,
+			StaticOnly:    staticOnly,
+			MinFreeGiB:    min,
+			RosterPath:    rosterPath,
+			Home:          home,
+			Stdout:        cmd.OutOrStdout(),
+			LeftoverBound: probeLeftoverBound,
+			LeftoverPoll:  probeLeftoverPoll,
 		})
 		return d.Run(cmd.Context())
 	}

@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/suykerbuyk/pveforge/internal/harness/outer"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 )
 
@@ -464,7 +463,11 @@ func TestProbe_Mut_RuleFileSymlinkRefused(t *testing.T) {
 
 // --- leftover bound: a storage that never clears must FAIL after the bound -
 func TestProbe_Mut_LeftoverBound(t *testing.T) {
-	defer outer.SetLeftoverTimingsForTests(30*time.Millisecond, 5*time.Millisecond)()
+	// D1: the outer seam is gone; shorten the bound via package main's seam so
+	// the "never clears" leftover is detected after a short bound, not 180s.
+	savedB, savedP := probeLeftoverBound, probeLeftoverPoll
+	probeLeftoverBound, probeLeftoverPoll = 30*time.Millisecond, 5*time.Millisecond
+	defer func() { probeLeftoverBound, probeLeftoverPoll = savedB, savedP }()
 	rosterPath, home := newProbeTest(t, &pfake{leftoverVol: true})
 	code, stdout, _ := runRootArgs("harness", "probe", "--roster", rosterPath, "--created-file", harnessLedgerFile(t), "--storage", "pveforge-harness", "h")
 	if code == 0 || !strings.Contains(stdout, "leftover") {

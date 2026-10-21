@@ -202,37 +202,23 @@ func ReadStorageStatus(ctx context.Context, r Reader, node, storage string) (Sto
 	return st, raw, nil
 }
 
-// leftoverTimings is the StorageLeftover bound and poll interval, a test seam
-// (SetLeftoverTimingsForTests) so a "never clears" test need not wait 180 s.
-var (
-	leftoverBound = 180 * time.Second
-	leftoverPoll  = 5 * time.Second
-)
-
-// SetLeftoverTimingsForTests overrides the leftover wait bound and poll
-// interval, returning a restore func. Test-only.
-func SetLeftoverTimingsForTests(bound, poll time.Duration) func() {
-	ob, op := leftoverBound, leftoverPoll
-	leftoverBound, leftoverPoll = bound, poll
-	return func() { leftoverBound, leftoverPoll = ob, op }
-}
-
-// StorageLeftover is a DETECTOR (harness_storage_leftover, lib.sh:734): it
-// waits up to leftoverBound for `used` to be back within StorageSlack of
-// baseline with no volume of any vmid listed (ZFS frees asynchronously). It
-// returns (true, reason) only when it DETECTS a leftover — a volume still
-// listed, or `used` still above baseline when the wait ends. A status it
-// cannot read detects NOTHING (returns false, ""), never a failure
-// (PollIsBounded). bound=0 means one read, no wait.
-func StorageLeftover(ctx context.Context, r Reader, node, storage string, baseline int64, vmids []int) (bool, string) {
-	deadline := time.Now().Add(leftoverBound)
+// StorageLeftover is a DETECTOR (harness_storage_leftover, lib.sh:726-737): it
+// waits up to bound for `used` to be back within StorageSlack of baseline with
+// no volume of any vmid listed (ZFS frees asynchronously). It returns (true,
+// reason) only when it DETECTS a leftover — a volume still listed, or `used`
+// still above baseline when the wait ends. A status it cannot read detects
+// NOTHING (returns false, ""), never a failure (PollIsBounded). bound=0 means
+// one read, no wait. The bound/poll are PER CALL (B2): the probe passes 180s,
+// the build 600s (three large zvols) or 0 when a VM is not yet proven gone.
+func StorageLeftover(ctx context.Context, r Reader, node, storage string, baseline int64, vmids []int, bound, poll time.Duration) (bool, string) {
+	deadline := time.Now().Add(bound)
 	for {
 		used, usedOK := readUsed(ctx, r, node, storage)
 		listed := listedVMIDs(ctx, r, node, storage, vmids)
 		if usedOK && used <= baseline+StorageSlack && len(listed) == 0 {
 			return false, "" // back to baseline, nothing listed: not a leftover
 		}
-		if leftoverBound == 0 || !time.Now().Before(deadline) {
+		if bound == 0 || !time.Now().Before(deadline) {
 			// Wait is over, however it ends.
 			if len(listed) > 0 {
 				return true, fmt.Sprintf("storage %s still lists volumes of VM(s) %v", storage, listed)
@@ -245,7 +231,7 @@ func StorageLeftover(ctx context.Context, r Reader, node, storage string, baseli
 		select {
 		case <-ctx.Done():
 			return false, ""
-		case <-time.After(leftoverPoll):
+		case <-time.After(poll):
 		}
 	}
 }

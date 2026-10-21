@@ -47,7 +47,6 @@ var noParallel = []struct{ pkg, why string }{
 	{"internal/harnesssecrets", "the execve, isTerminal and readSecret seams; t.Setenv"},
 	{"cmd/pveforge-harness-secrets", "t.Setenv, and child processes whose HOME and TMPDIR each test points at its own directory"},
 	{"cmd/pveforge-harness-accept", "the process's signal handlers: a test sends itself SIGTERM, which run catches"},
-	{"internal/harness/outer", "the storage_test leftover-timing seam (SetLeftoverTimingsForTests) sets package-global bound/poll; kept serial so the override cannot race another test"},
 }
 
 // parallelAllowed lists the packages whose tests touch no process-global
@@ -63,7 +62,9 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"internal/nodump", "its test calls Set in a child process, never in the test process"},
 	{"internal/sourceguard", "static walks and read-only go commands; the harness scripts' tests each run in their own directory, sharing only a pins binary built once (sync.OnceValues) and only run after"},
 	{"internal/harness/probe", "pure-helper tests (classifyRollback, screenProbeCreate) over their inputs; no process-global or shared-path state"},
+	{"internal/harness/outer", "pure screen/guard/storage functions over their inputs; the leftover bound is now a per-call parameter (no package-global seam)"},
 	{"internal/harness/reset", "driver tests over a scripted fake PVE and an injected clock/accept; each uses its own per-test HOME; no process-global or shared-path state"},
+	{"internal/harness/build", "driver + screen tests over a scripted fake PVE and injected clock/keyscan/dial/getent seams; each uses its own per-test HOME; no process-global or shared-path state"},
 }
 
 // TestTestFacts_Calibration: the walker finds what it must — a t.Parallel
