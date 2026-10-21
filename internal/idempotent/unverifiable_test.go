@@ -271,8 +271,8 @@ func TestVMDestroy_NullResourcesIsTagRecheckError(t *testing.T) {
 	s.on("GET", fmt.Sprintf("/nodes/%s/qemu/%d/status/current", uvNode, uvVMID),
 		uvReply{200, `{"data":{"status":"running"}}`})
 	s.on("GET", cfgPath,
-		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`}, // Read's existence check
-		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`}, // GetVM's config GET
+		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`},                                                          // Read's existence check
+		uvReply{200, `{"data":{"digest":"d","tags":"web"}}`},                                                          // GetVM's config GET
 		uvReply{500, fmt.Sprintf(`Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist`, uvNode, uvVMID)}) // reverify: gone
 	s.on("POST", fmt.Sprintf("/nodes/%s/qemu/%d/status/stop", uvNode, uvVMID), uvReply{200, fmt.Sprintf(`{"data":%q}`, stopU)})
 	s.on("DELETE", fmt.Sprintf("/nodes/%s/qemu/%d", uvNode, uvVMID), uvReply{200, fmt.Sprintf(`{"data":%q}`, delU)})

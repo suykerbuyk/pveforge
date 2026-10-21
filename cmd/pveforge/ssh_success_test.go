@@ -116,10 +116,10 @@ func TestNetworkBridgeCreate_FieldlessPostBodyHasAutostart_ThroughRunRoot(t *tes
 	rest := pvefake.NewBridgeREST(t, node)
 	rest.MgmtFields = `{"iface":"vmbr0","type":"bridge","bridge_ports":"eth0","cidr":"10.0.0.5/24"}`
 	rest.IfaceResponses = []string{
-		pvefake.IfaceAbsent,                                               // Run's Read: not there yet
-		pvefake.IfaceAbsent,                                               // Apply's pre-stage read: still not there
-		`{"iface":"vmbr1","type":"bridge","autostart":1}`,                 // guard self-check: staged, not active
-		`{"iface":"vmbr1","type":"bridge","autostart":1,"active":1}`,      // Run's re-read: live
+		pvefake.IfaceAbsent, // Run's Read: not there yet
+		pvefake.IfaceAbsent, // Apply's pre-stage read: still not there
+		`{"iface":"vmbr1","type":"bridge","autostart":1}`,            // guard self-check: staged, not active
+		`{"iface":"vmbr1","type":"bridge","autostart":1,"active":1}`, // Run's re-read: live
 	}
 	rest.CommitUPID = upid
 	srv := rest.Server()

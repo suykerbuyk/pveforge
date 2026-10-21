@@ -46,20 +46,20 @@ type pfake struct {
 	usedNow    string // `used` the status reports now (default "0")
 
 	// pre-create world knobs.
-	pre690        bool   // 690 already in the pool before create (690MustNotExist)
-	poolX         bool   // an extra member makes the pool non-empty
+	pre690        bool // 690 already in the pool before create (690MustNotExist)
+	poolX         bool // an extra member makes the pool non-empty
 	nextid        string
 	contentPre    string // content before create (non-empty → leftover refusal)
 	poolMemberRaw string // a raw pre-create pool member object (e.g. a string vmid) — CR3
 
 	// behaviour knobs.
-	rollbackAny      bool   // the STORAGE allows a non-latest rollback (rollback task OK)
-	rollbackOtherErr bool   // the rollback task fails with an unrelated (non-"most recent") error
-	rollbackBusy     bool   // the rollback fails with text CONTAINING "snapshot" but not the refusal (CR2)
-	destroyExit      string // the destroy task's exitstatus (WARNINGS → gone-proof fails)
-	snapFail         bool   // the s1 create POST answers 500 (force a failure after create)
-	leftoverVol      bool   // storage content still lists a 690 volume after destroy
-	cleanupReDestroyEmpty bool // a SECOND destroy DELETE answers an empty body (CR5 main-UPID fallback)
+	rollbackAny           bool   // the STORAGE allows a non-latest rollback (rollback task OK)
+	rollbackOtherErr      bool   // the rollback task fails with an unrelated (non-"most recent") error
+	rollbackBusy          bool   // the rollback fails with text CONTAINING "snapshot" but not the refusal (CR2)
+	destroyExit           string // the destroy task's exitstatus (WARNINGS → gone-proof fails)
+	snapFail              bool   // the s1 create POST answers 500 (force a failure after create)
+	leftoverVol           bool   // storage content still lists a 690 volume after destroy
+	cleanupReDestroyEmpty bool   // a SECOND destroy DELETE answers an empty body (CR5 main-UPID fallback)
 
 	// rollbackResult is decided at each rollback POST and read back by the
 	// task-status route (the raw rollback classifier is what the probe now
@@ -67,14 +67,14 @@ type pfake struct {
 	rollbackResult string
 
 	// state.
-	created      bool
-	createPooled bool   // 690 joined the pool (the create POST carried pool=<pool>) — CR1
-	createPool   string // the pool= value the create POST carried — CR1
-	destroyed    bool
-	snaps        map[string]int64
-	snapCtr      int64
-	tags         string
-	destroyCalls int
+	created       bool
+	createPooled  bool   // 690 joined the pool (the create POST carried pool=<pool>) — CR1
+	createPool    string // the pool= value the create POST carried — CR1
+	destroyed     bool
+	snaps         map[string]int64
+	snapCtr       int64
+	tags          string
+	destroyCalls  int
 	postQemuCalls int    // POSTs/DELETEs to any /qemu path (CR4: lock must cover these)
 	rollbackPath  string // the path of the last raw rollback POST (CR4: must be /qemu/690/…)
 
@@ -95,7 +95,10 @@ func (f *pfake) handler(w http.ResponseWriter, r *http.Request) {
 	if f.snaps == nil {
 		f.snaps = map[string]int64{}
 	}
-	data := func(raw string) { w.Header().Set("Content-Type", "application/json"); fmt.Fprintf(w, `{"data":%s}`, raw) }
+	data := func(raw string) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":%s}`, raw)
+	}
 	fail500 := func() { w.WriteHeader(http.StatusInternalServerError); fmt.Fprint(w, `{"data":null}`) }
 	p, m := r.URL.Path, r.Method
 

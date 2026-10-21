@@ -683,7 +683,7 @@ func TestNetworkBridgeEnsure_Run_AbsentCreatesViaPOST(t *testing.T) {
 func TestNetworkBridgeEnsure_Run_ConvergeDormantViaPUT(t *testing.T) {
 	client := newFakeNetworkBridgeClient("pve1")
 	client.getResponses["vmbr0"] = []getResponse{{fields: mgmtFields("eth0")}}
-	dormant := map[string]json.RawMessage{"type": rawField("bridge")}             // no autostart, no active
+	dormant := map[string]json.RawMessage{"type": rawField("bridge")} // no autostart, no active
 	converged := map[string]json.RawMessage{"type": rawField("bridge"), "autostart": json.RawMessage("1")}
 	// Run.Read (dormant, Satisfied false) -> Apply create-block (dormant, same
 	// type -> converge) -> guard GET (still no active -> not-live, passes) ->
@@ -777,8 +777,8 @@ func TestNetworkBridgeEnsure_Run_ConvergeCarriesCallerFields(t *testing.T) {
 func TestNetworkBridgeEnsure_Apply_EmptyOrNonScalarTypeRefused(t *testing.T) {
 	for name, existing := range map[string]map[string]json.RawMessage{
 		"existing type is empty string": {"type": rawField("")},
-		"existing has no type key":       {"mtu": rawField("9000")},
-		"existing type is non-scalar":    {"type": json.RawMessage(`[1,2]`)},
+		"existing has no type key":      {"mtu": rawField("9000")},
+		"existing type is non-scalar":   {"type": json.RawMessage(`[1,2]`)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			client := newFakeNetworkBridgeClient("pve1")

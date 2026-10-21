@@ -64,7 +64,10 @@ func (f *hfake) or(v, def string) string {
 func (f *hfake) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	data := func(raw string) { w.Header().Set("Content-Type", "application/json"); fmt.Fprintf(w, `{"data":%s}`, raw) }
+	data := func(raw string) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":%s}`, raw)
+	}
 	p := r.URL.Path
 
 	switch {
