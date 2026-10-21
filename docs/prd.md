@@ -934,7 +934,7 @@ holds this table to every runnable command's annotation, both ways):
 
 | Tier | Commands |
 |---|---|
-| destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `vm snapshot delete`, `vm snapshot rollback`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe` |
+| destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `vm snapshot delete`, `vm snapshot rollback`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe`, `harness golden`, `harness reset` |
 | mutating | `roster pin-tls`, `vm create`, `vm set`, `vm snapshot create`, `network set`, `network bridge create`, `user ensure`, `group ensure`, `harness vm snapshot create` |
 | safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
 
@@ -1111,9 +1111,10 @@ both ways, plane included.
 | `internal/kvjson` | production | §3.6's kv and JSON contract |
 | `internal/nodump` | production | Makes the process non-dumpable before it holds a decrypted secret (`exec`) |
 | `internal/harnesssecrets` | harness library | The age-sealed harness environment (§4.1) |
-| `internal/harness` | test-support | The nested-harness guard (`harness.Open`) and acceptance checks (§7.7) |
+| `internal/harness` | production | The nested-harness guard (`harness.Open`) and acceptance checks (§7.7); the `harness golden`/`harness reset` verbs reuse its in-process acceptance (`harness.Await`/`AcceptOnce`) |
 | `internal/harness/outer` | production | U-CORE: the outer test-harness guard, created-VM ledger and positive-JSON gone-proof the harness vm verbs drive (a Go port of hack/harness/lib.sh) |
 | `internal/harness/probe` | production | U-PROBE: the storage-capability probe driver (the `harness probe` verb), a Go port of hack/harness/probe.sh that consumes the U-CORE primitives |
+| `internal/harness/reset` | production | U-GOLDEN/RESET: the golden-point capture and rollback-to-golden driver (the `harness golden` and `harness reset` verbs), a Go port of hack/harness/golden.sh + reset.sh that consumes U-CORE and the U-PROBE static storage layer |
 | `internal/harness/suites` | harness suite | The `-tags harness` suites, which get clients only from `harness.Open` |
 | `internal/lock/lockguard` | test-support | §3.4.2's static lock and task-wait context rules |
 | `internal/netguard` | test-support | Loopback-only dial trip-wire for unit tests |

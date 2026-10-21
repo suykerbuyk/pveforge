@@ -32,6 +32,8 @@ confined to these verbs; the public vm command surface is unchanged.`,
 	}
 	cmd.AddCommand(newHarnessVMCmd())
 	cmd.AddCommand(newHarnessProbeCmd())
+	cmd.AddCommand(newHarnessGoldenCmd())
+	cmd.AddCommand(newHarnessResetCmd())
 	return cmd
 }
 

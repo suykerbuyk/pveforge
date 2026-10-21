@@ -63,6 +63,7 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"internal/nodump", "its test calls Set in a child process, never in the test process"},
 	{"internal/sourceguard", "static walks and read-only go commands; the harness scripts' tests each run in their own directory, sharing only a pins binary built once (sync.OnceValues) and only run after"},
 	{"internal/harness/probe", "pure-helper tests (classifyRollback, screenProbeCreate) over their inputs; no process-global or shared-path state"},
+	{"internal/harness/reset", "driver tests over a scripted fake PVE and an injected clock/accept; each uses its own per-test HOME; no process-global or shared-path state"},
 }
 
 // TestTestFacts_Calibration: the walker finds what it must — a t.Parallel

@@ -545,7 +545,8 @@ func (d *Driver) note(name, content string) {
 // writeRule writes the rollback rule to its state file atomically: a temp in
 // the same dir, 0600, renamed over the target, then the target is proven a
 // REGULAR file (not a symlink — O_NOFOLLOW/Lstat) holding exactly the rule.
-// Path/format byte-identical to probe.sh (reset reads it).
+// Path/format byte-identical to probe.sh (a probe output; reset does NOT read
+// it — reset.sh cascades newest-first then rolls back unconditionally).
 func (d *Driver) writeRule(rule string) error {
 	state := filepath.Join(d.p.Home, ".config/pveforge/harness-state")
 	if err := os.MkdirAll(state, 0o700); err != nil {

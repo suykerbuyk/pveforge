@@ -16,7 +16,8 @@ holds images and has room; the empirical layer creates a 1 GiB disk VM,
 snapshots it, classifies the storage's rollback rule (rollback-latest-only vs
 rollback-any), then destroys 690 and proves it gone. --static-only runs the
 static layer alone. The rollback rule is written to
-~/.config/pveforge/harness-state/rollback-rule.<id> (the reset reads it).
+~/.config/pveforge/harness-state/rollback-rule.<id> (a probe output; reset
+does not read it).
 
 
 .SH OPTIONS

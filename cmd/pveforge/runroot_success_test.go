@@ -290,7 +290,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 		"discover", "discover/device", "discover/network", "discover/node", "discover/storage", "discover/vm",
 		"exec",
 		"group", "group/ensure",
-		"harness", "harness/probe", "harness/vm",
+		"harness", "harness/golden", "harness/probe", "harness/reset", "harness/vm",
 		"harness/vm/destroy", "harness/vm/gone", "harness/vm/shutdown",
 		"harness/vm/snapshot", "harness/vm/snapshot/create", "harness/vm/snapshot/delete",
 		"harness/vm/snapshot/list", "harness/vm/snapshot/rollback",

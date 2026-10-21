@@ -37,8 +37,10 @@ type Config struct {
 	Tag  string
 }
 
-// Reader is the subset of *pve.RoutedClient the guard and gone-proof need:
-// the raw REST passthrough, used for reads only (GET), never a mutation.
+// Reader is the subset of *pve.RoutedClient the guard, gone-proof and storage
+// layer need: the raw REST passthrough. The guard/gone-proof/storage callers
+// use it GET-only; RawUPID issues task-returning writes (POST/DELETE) through
+// it too, so the method is the contract, not a GET-only restriction.
 // *pve.RoutedClient satisfies it structurally, and the package's own tests
 // use an in-package fake, so the core never needs pve's network/TLS harness.
 type Reader interface {

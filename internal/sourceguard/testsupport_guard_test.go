@@ -17,7 +17,6 @@ const modulePath = "github.com/suykerbuyk/pveforge/"
 // None may ever be linked into pveforge. A new one belongs here — the
 // completeness check below fails until it is added.
 var testSupport = []string{
-	"internal/harness",
 	"internal/lock/lockguard",
 	"internal/netguard",
 	"internal/pvefake",
@@ -25,13 +24,15 @@ var testSupport = []string{
 }
 
 // harnessToolMains are the nested harness's own tool binaries, never pveforge
-// itself, each allowed to link the one test-support package it exists to
-// run. cmd/pveforge-harness-accept runs internal/harness's guard (Open) and
-// its acceptance against the nested cluster for hack/harness/golden.sh and
-// reset.sh. Every other main, cmd/pveforge above all, is still held to
-// exclude every testSupport package from its closure; and each entry must be
-// a main that really imports its package, so the exception names something
-// real.
+// itself, each allowed to link a package it exists to run even when nothing
+// else outside the table does. cmd/pveforge-harness-accept runs
+// internal/harness's guard (Open) and its acceptance against the nested
+// cluster for hack/harness/golden.sh and reset.sh. (internal/harness is now a
+// production package too — the `harness golden`/`harness reset` verbs reuse its
+// in-process acceptance — so it is no longer on testSupport; this exception
+// remains a valid, real import.) Every other main is still held to exclude
+// every testSupport package from its closure; and each entry must be a main
+// that really imports its package, so the exception names something real.
 var harnessToolMains = map[string]string{
 	"cmd/pveforge-harness-accept": "internal/harness",
 }
