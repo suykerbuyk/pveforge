@@ -1,6 +1,6 @@
 module github.com/suykerbuyk/pveforge
 
-go 1.27.1
+go 1.27.3
 
 require (
 	filippo.io/age v1.3.2
