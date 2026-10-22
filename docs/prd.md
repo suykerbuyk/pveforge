@@ -1097,6 +1097,7 @@ both ways, plane included.
 |---|---|---|
 | `cmd/pveforge` | binary | The CLI: one cobra command per §4.2 row; flags, output and exit status (§3.6) |
 | `cmd/pveforge-harness-accept` | harness tool | §7.2 |
+| `cmd/pveforge-harness-capture` | harness tool | §7.2 |
 | `cmd/pveforge-harness-pins` | harness tool | §7.2 |
 | `cmd/pveforge-harness-secrets` | harness tool | §7.2 |
 | `internal/bootstrap` | production | §3.2's flow; `pveum` as root (`bootstrap.RootAccess`) for every access write; TLS pin capture; token rotation. Talks to the network only through its own `SSHTransport`/`APIValidator` interfaces |
