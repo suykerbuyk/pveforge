@@ -36,6 +36,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/suykerbuyk/pveforge/internal/harness"
@@ -62,6 +63,21 @@ type captureReport struct {
 	RawStatus    string                   `json:"raw_status"`
 	RawSHA256    string                   `json:"raw_sha256"`
 	RawBody      string                   `json:"raw_body"`
+
+	// Item 67 (read-swallow shapes): absence answers and field presence.
+	Item67Absences []pve.AbsenceCapture `json:"item67_absences,omitempty"`
+	Item67Fields   []pve.FieldPresence  `json:"item67_fields,omitempty"`
+
+	// Item 66 corroborator: /cluster/resources?type=vm, classified from RAW
+	// bytes (N2) — not a findbytag guard decode.
+	CorroboratorPath   string        `json:"corroborator_path,omitempty"`
+	CorroboratorShape  pve.ListShape `json:"corroborator_shape,omitempty"`
+	CorroboratorSHA256 string        `json:"corroborator_sha256,omitempty"`
+	CorroboratorBody   string        `json:"corroborator_body,omitempty"`
+	CorroboratorNote   string        `json:"corroborator_note,omitempty"`
+
+	// Errors records a per-leg failure without aborting the whole capture.
+	Errors []string `json:"errors,omitempty"`
 }
 
 func main() {
@@ -74,6 +90,14 @@ func run() int {
 	path := flag.String("path", "", "raw-GET path for the item-66/68 capture (default /nodes/<first node>/qemu)")
 	var nodes nodeList
 	flag.Var(&nodes, "node", "nested node whose qemu list must be empty at golden (repeatable; default pvh-n1, pvh-n2)")
+	// Item 67 + corroborator probe targets (each optional; 0/empty = skip).
+	probeNode := flag.String("probe-node", "", "node for item-67 probes (default first -node)")
+	absentVMID := flag.Int("absent-vmid", 0, "a VMID known NOT to exist: item-67 missing-VM-config probe (0=skip)")
+	absentIface := flag.String("absent-iface", "", "an interface known NOT to exist: item-67 missing-iface probe (empty=skip)")
+	absentStorage := flag.String("absent-storage", "", "a storage known NOT to exist: item-67 missing-storage probe (empty=skip)")
+	absentUPID := flag.String("absent-upid", "", "an unknown UPID: item-67 raw probe, no subject (empty=skip)")
+	fieldVMID := flag.Int("field-vmid", 0, "an existing VMID: item-67 field presence (status + digest; 0=skip)")
+	fieldStorage := flag.String("field-storage", "", "an existing storage: item-67 field presence (type; empty=skip)")
 	flag.Parse()
 
 	if *target == "" {
@@ -117,6 +141,10 @@ func run() int {
 	}
 
 	report := captureReport{Target: *target, RawPath: *path}
+	probeNodeName := *probeNode
+	if probeNodeName == "" {
+		probeNodeName = nodes[0]
+	}
 
 	shapes, gateErr := c.GoldenGateEmpty(ctx, []string(nodes))
 	report.NodeShapes = shapes
@@ -128,6 +156,64 @@ func run() int {
 		report.RawStatus = raw.Status
 		report.RawSHA256 = raw.SHA256
 		report.RawBody = string(raw.Body)
+	}
+
+	// Item 67 absence legs (each optional). A leg's own failure is recorded,
+	// not fatal, so one missing probe target does not lose the others.
+	type absenceLeg struct {
+		on    bool
+		probe pve.AbsenceProbe
+	}
+	for _, leg := range []absenceLeg{
+		{*absentVMID != 0, pve.AbsenceProbe{Name: "vm-config-missing", Path: fmt.Sprintf("/nodes/%s/qemu/%d/config", probeNodeName, *absentVMID), Subject: pve.VMConfigMissingSubject(*absentVMID)}},
+		{*absentIface != "", pve.AbsenceProbe{Name: "iface-missing", Path: fmt.Sprintf("/nodes/%s/network/%s", probeNodeName, *absentIface), Subject: pve.IfaceMissingSubject(*absentIface)}},
+		{*absentStorage != "", pve.AbsenceProbe{Name: "storage-missing", Path: fmt.Sprintf("/nodes/%s/storage/%s/status", probeNodeName, *absentStorage), Subject: pve.StorageMissingSubject(*absentStorage)}},
+		{*absentUPID != "", pve.AbsenceProbe{Name: "upid-unknown", Path: fmt.Sprintf("/nodes/%s/tasks/%s/status", probeNodeName, url.PathEscape(*absentUPID)), Subject: pve.Subject{}}},
+	} {
+		if !leg.on {
+			continue
+		}
+		if cap, err := c.CaptureAbsence(ctx, leg.probe); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.Item67Absences = append(report.Item67Absences, *cap)
+		}
+	}
+
+	// Item 67 field-presence legs (each optional).
+	if *fieldStorage != "" {
+		if fp, err := c.CaptureStorageType(ctx, probeNodeName, *fieldStorage); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.Item67Fields = append(report.Item67Fields, *fp)
+		}
+	}
+	if *fieldVMID != 0 {
+		if fp, err := c.CaptureVMStatusField(ctx, probeNodeName, *fieldVMID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.Item67Fields = append(report.Item67Fields, *fp)
+		}
+		if fp, err := c.CaptureVMConfigDigest(ctx, probeNodeName, *fieldVMID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.Item67Fields = append(report.Item67Fields, *fp)
+		}
+	}
+
+	// Item 66 corroborator: raw bytes of the cluster-wide VM list.
+	report.CorroboratorPath = "/cluster/resources?type=vm"
+	report.CorroboratorNote = "raw bytes + deterministic Go null->nil / []->empty (N2); NOT a findbytag guard decode"
+	if corr, err := c.CaptureRawGET(ctx, report.CorroboratorPath); err != nil {
+		report.Errors = append(report.Errors, err.Error())
+	} else {
+		report.CorroboratorSHA256 = corr.SHA256
+		report.CorroboratorBody = string(corr.Body)
+		if shape, serr := pve.ClassifyRawListEnvelope(corr.Body); serr != nil {
+			report.Errors = append(report.Errors, serr.Error())
+		} else {
+			report.CorroboratorShape = shape
+		}
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -144,6 +230,10 @@ func run() int {
 	}
 	if rawErr != nil {
 		fmt.Fprintf(os.Stderr, "pveforge-harness-capture: raw capture: %v\n", rawErr)
+		return 1
+	}
+	if len(report.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "pveforge-harness-capture: %d capture leg(s) failed (see JSON errors)\n", len(report.Errors))
 		return 1
 	}
 	return 0
