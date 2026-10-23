@@ -24,6 +24,8 @@ func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*proxmox.Vir
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", escapedNode, vmid), vm); err != nil {
 		return nil, fmt.Errorf("get vm %d status: %w", vmid, err)
 	}
+	// Verified live: a running guest's status/current carries status (nested
+	// pvh 2026-10-23, evidence ~/.config/pveforge/harness-evidence/batch-a/).
 	if vm.Status == "" {
 		return nil, fmt.Errorf("get vm %d status: %w: payload carries no run status", vmid, ErrUnverifiableRead)
 	}
@@ -31,7 +33,9 @@ func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*proxmox.Vir
 		return nil, fmt.Errorf("get vm %d config: %w", vmid, err)
 	}
 	// A VM's config always carries at least its digest, so a nil config is
-	// a {"data":null} payload, not a VM with nothing configured.
+	// a {"data":null} payload, not a VM with nothing configured. Verified
+	// live on a running guest: config carries digest (nested pvh 2026-10-23,
+	// evidence ~/.config/pveforge/harness-evidence/batch-a/).
 	if vm.VirtualMachineConfig == nil {
 		return nil, fmt.Errorf("get vm %d config: %w: config payload was null", vmid, ErrUnverifiableRead)
 	}
@@ -50,6 +54,9 @@ func (c *Client) GetVMs(ctx context.Context, node string) (proxmox.VirtualMachin
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/qemu", url.PathEscape(node)), &vms); err != nil {
 		return nil, fmt.Errorf("get vms on %q: %w", node, err)
 	}
+	// Verified live: a healthy PVE 9.2 sends [] (never null) for an empty
+	// qemu list, so this guard never refuses a healthy cluster (nested pvh
+	// 2026-10-23, evidence ~/.config/pveforge/harness-evidence/batch-a/).
 	if vms == nil {
 		return nil, fmt.Errorf("get vms on %q: %w: list payload was null", node, ErrUnverifiableRead)
 	}

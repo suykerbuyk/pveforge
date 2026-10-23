@@ -56,10 +56,15 @@ type Subject struct {
 // text: its status line and its body, as "<Status>: <body>" — the exact
 // tail of the error's own message. PVE puts a die() message in the HTTP
 // reason phrase, where the body may be only {"data":null}, so the status
-// line cannot be left out. UNVERIFIED against a live host: where PVE 9.2
-// puts each message, and whether this client's HTTP/2 drops the reason
-// phrase. If it does, and the body does not repeat the message, the match
-// fails closed.
+// line cannot be left out. Verified live against nested pvh 2026-10-23
+// (evidence ~/.config/pveforge/harness-evidence/batch-a/): PVE 9.2 answers
+// a missing VM config with 500, a missing interface with 400, a missing
+// storage with 400 "No such storage." (in errors.storage), and an unknown
+// UPID with 400 "no such task" (in errors.upid); matching the subject-named
+// text (not the status code) is correct. The host served HTTP/1.1, so the
+// reason phrase was present on the wire (see IsAgentUnavailableError). The
+// storage-missing wording is the follow-on
+// pveforge-notfound-matcher-has-no-storage-subject's concern.
 func NotFound(err error, s Subject) bool {
 	answer, ok := pveAnswer(err)
 	if !ok {

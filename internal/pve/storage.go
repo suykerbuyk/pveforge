@@ -25,7 +25,9 @@ func (c *Client) GetStorage(ctx context.Context, node, name string) (*proxmox.St
 	// PVE's status payload always names the storage's type; a payload
 	// without one is a zero value decoded from {"data":null}, and reading
 	// it as real would report Shared == 0 for a storage never confirmed
-	// unshared (the orphan scan's refusal keys on exactly that).
+	// unshared (the orphan scan's refusal keys on exactly that). Verified
+	// live: an nfs storage's status carries type (nested pvh 2026-10-23,
+	// evidence ~/.config/pveforge/harness-evidence/batch-a/).
 	if storage.Type == "" {
 		return nil, fmt.Errorf("get storage %q on %q: %w: status payload carries no storage type", name, node, ErrUnverifiableRead)
 	}

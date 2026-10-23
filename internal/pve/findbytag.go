@@ -57,6 +57,9 @@ func (c *Client) FindByTag(ctx context.Context, tag string) (*proxmox.ClusterRes
 	if err != nil {
 		return nil, fmt.Errorf("find by tag %q: %w", tag, err)
 	}
+	// Verified live: PVE 9.2's /cluster/resources?type=vm sends [] (never
+	// null) for an empty result (nested pvh 2026-10-23, evidence
+	// ~/.config/pveforge/harness-evidence/batch-a/).
 	if resources == nil {
 		return nil, fmt.Errorf("find by tag %q: %w: resource list payload was null", tag, ErrUnverifiableRead)
 	}

@@ -150,7 +150,9 @@ type StatusError struct {
 	// Status is the status line as net/http reports it, e.g.
 	// "500 Internal Server Error". Its reason phrase is PVE's own over
 	// HTTP/1.1 but net/http's canonical text over HTTP/2, which carries
-	// none: never branch on it.
+	// none: never branch on it. (Live: PVE 9.2 served HTTP/1.1, so the
+	// reason phrase was present — nested pvh 2026-10-23, evidence
+	// ~/.config/pveforge/harness-evidence/batch-a/.)
 	Status string
 	// Body is the response body exactly as received, untrimmed.
 	Body []byte

@@ -88,10 +88,11 @@ var ErrNoMACInNetConfig = errors.New("net config value contains no mac address")
 // uses when the VM's config carries agent: 0, which that matcher misses
 // entirely.
 //
-// NOT independently verified against a live host, same empirical gap
-// flagged throughout this project (digestConflictErrorSubstring,
-// rootOnlyErrorSubstring). See IsAgentUnavailableError for why nothing
-// in this package's correctness depends on these matching.
+// Confirmed live against nested pvh 2026-10-23 (evidence
+// ~/.config/pveforge/harness-evidence/batch-a/): an agent-off guest returns
+// 500 "QEMU guest agent is not running", matching the first substring. (The
+// agent: 0 wording stays source-derived.) See IsAgentUnavailableError for
+// why nothing in this package's correctness depends on these matching.
 var agentUnavailableSubstrings = []string{
 	"qemu guest agent is not running",
 	"no qemu guest agent configured",
@@ -109,11 +110,20 @@ var agentUnavailableSubstrings = []string{
 //
 //   - The text it matches is one PVE puts in the HTTP status line's
 //     REASON PHRASE. HTTP/2 carries no reason phrase, and Go synthesises
-//     Response.Status from the status code alone in that case — and this
-//     package's client reaches HTTP/2, since it uses
-//     http.DefaultTransport (client.go), which sets ForceAttemptHTTP2.
-//     Against a host that negotiates h2 the text is gone before pveforge
-//     ever sees the error.
+//     Response.Status from the status code alone in that case; this
+//     package's client OFFERS h2, since it uses http.DefaultTransport
+//     (client.go), which sets ForceAttemptHTTP2. CORRECTION, verified live
+//     against nested pvh 2026-10-23 (evidence
+//     ~/.config/pveforge/harness-evidence/batch-a/): PVE 9.2's pveproxy
+//     negotiated HTTP/1.1, NOT h2, so the reason phrase WAS present on the
+//     wire — the "gone before pveforge sees it" premise did not hold. The
+//     match reads err.Error() = the status LINE (which carries PVE's reason
+//     phrase over HTTP/1.1) PLUS the body (notfound.go:92,:160); so over
+//     HTTP/1.1 the phrase is present in the status line, and had h2 been
+//     negotiated the phrase would be absent and the match would fall to the
+//     body repeating the text — which PVE's body DID here, so this capture
+//     matched regardless (consistent with notfound.go:57-59: the status
+//     line cannot be left out).
 //   - PVE uses at least two different messages for the same underlying
 //     condition, and they share no substring.
 //

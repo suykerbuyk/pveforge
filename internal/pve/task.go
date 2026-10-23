@@ -123,8 +123,11 @@ var taskExitWarnings = regexp.MustCompile(`^WARNINGS: \d+$`)
 // but logged warnings — PVE's worker exits 0 for both. Anything else is the
 // task's error message. It is the one place pveforge judges an exit status.
 //
-// Derived from pve-common's source; not yet verified against a live host
-// (see pveforge-nested-pve-test-harness's live-check list).
+// Derived from pve-common's source. The "OK" case is verified live (nested
+// pvh 2026-10-23, evidence ~/.config/pveforge/harness-evidence/batch-a/); a
+// live "WARNINGS: <n>" exitstatus was NOT inducible there (vzdump OK,
+// qmdestroy OK), so the ^WARNINGS: \d+$ branch stays unit-proven but
+// live-unconfirmed — see pveforge-task-warnings-exitstatus-not-verified-live.
 func taskExitSucceeded(exitStatus string) bool {
 	return exitStatus == taskExitOK || taskExitWarnings.MatchString(exitStatus)
 }
@@ -337,8 +340,12 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 // would otherwise reach proxmox.NewTask, a poll URL, and the stderr lines
 // that print it.
 //
-// Derived from pve-common's source; not yet verified against a live host
-// (see pveforge-nested-pve-test-harness's live-check list).
+// Derived from pve-common's source and verified live against real PVE 9.2
+// UPIDs (nested pvh 2026-10-23, evidence
+// ~/.config/pveforge/harness-evidence/batch-a/): qmcreate/qmstart and a
+// single-guest vzdump carry id=<vmid>, a multi-guest vzdump carries an EMPTY
+// id, and the user field appears as bare user@realm and as a token
+// user@realm!token; validateUPIDShape accepts every observed form.
 func validateUPIDShape(upid string) error {
 	m := upidGrammar.FindStringSubmatch(upid)
 	if m == nil {
