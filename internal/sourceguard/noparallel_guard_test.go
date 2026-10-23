@@ -65,6 +65,7 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"internal/harness/outer", "pure screen/guard/storage functions over their inputs; the leftover bound is now a per-call parameter (no package-global seam)"},
 	{"internal/harness/reset", "driver tests over a scripted fake PVE and an injected clock/accept; each uses its own per-test HOME; no process-global or shared-path state"},
 	{"internal/harness/build", "driver + screen tests over a scripted fake PVE and injected clock/keyscan/dial/getent seams; each uses its own per-test HOME; no process-global or shared-path state"},
+	{"cmd/pveforge-harness-capture", "pure helper tests (amutRequested and the UPID-spelling checks) over their string inputs; no process-global or shared-path state"},
 }
 
 // TestTestFacts_Calibration: the walker finds what it must — a t.Parallel

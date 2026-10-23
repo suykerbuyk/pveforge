@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/suykerbuyk/pveforge/internal/harness"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -76,8 +77,60 @@ type captureReport struct {
 	CorroboratorBody   string        `json:"corroborator_body,omitempty"`
 	CorroboratorNote   string        `json:"corroborator_note,omitempty"`
 
+	// A-MUT captures (items 68-agent, 69, 70a/70b).
+	AgentRejection   *pve.AgentRejection  `json:"agent_rejection,omitempty"`
+	UPIDSpellings    []pve.UPIDSpelling   `json:"upid_spellings,omitempty"`
+	TaskExitStatuses []pve.TaskExitStatus `json:"task_exit_statuses,omitempty"`
+
 	// Errors records a per-leg failure without aborting the whole capture.
 	Errors []string `json:"errors,omitempty"`
+}
+
+// amutRequested reports whether any A-MUT capture flag is set. When true the
+// golden gate (which requires zero guests) is skipped: A-MUT needs a live guest.
+func amutRequested(agentVMID, qmcreateVMID int, upids []string, vzdumpUPID, userUPID, exitstatusUPID string) bool {
+	return agentVMID != 0 || qmcreateVMID != 0 || len(upids) > 0 || vzdumpUPID != "" || userUPID != "" || exitstatusUPID != ""
+}
+
+// qmcreateSpellingErrors asserts a recovered qmcreate UPID's spelling: type
+// `qmcreate`, id the VMID, and a valid shape.
+func qmcreateSpellingErrors(sp *pve.UPIDSpelling, vmid int) []string {
+	var errs []string
+	qt, vmidStr := "qmcreate", strconv.Itoa(vmid)
+	if err := sp.Check(pve.ExpectUPID{Type: &qt, ID: &vmidStr}); err != nil {
+		errs = append(errs, "item-70a: "+err.Error())
+	}
+	if !sp.Valid {
+		errs = append(errs, fmt.Sprintf("item-70a: qmcreate UPID %q failed validateUPIDShape: %s", sp.UPID, sp.ValidErr))
+	}
+	return errs
+}
+
+// vzdumpSpellingErrors asserts a vzdump-all UPID: type `vzdump`, an EMPTY id,
+// and a valid shape — so a non-vzdump UPID is caught even if its id is empty.
+func vzdumpSpellingErrors(sp *pve.UPIDSpelling) []string {
+	var errs []string
+	vt, empty := "vzdump", ""
+	if err := sp.Check(pve.ExpectUPID{Type: &vt, ID: &empty}); err != nil {
+		errs = append(errs, "item-70a: "+err.Error())
+	}
+	if !sp.Valid {
+		errs = append(errs, fmt.Sprintf("item-70a: vzdump UPID %q failed validateUPIDShape: %s", sp.UPID, sp.ValidErr))
+	}
+	return errs
+}
+
+// userSpellingErrors asserts a 70(b) UPID's user field equals expectUser (never
+// empty here — the caller enforces that) and that its shape is valid.
+func userSpellingErrors(sp *pve.UPIDSpelling, expectUser string) []string {
+	var errs []string
+	if err := sp.Check(pve.ExpectUPID{User: &expectUser}); err != nil {
+		errs = append(errs, "item-70b: "+err.Error())
+	}
+	if !sp.Valid {
+		errs = append(errs, fmt.Sprintf("item-70b: UPID %q failed validateUPIDShape: %s", sp.UPID, sp.ValidErr))
+	}
+	return errs
 }
 
 func main() {
@@ -98,6 +151,16 @@ func run() int {
 	absentUPID := flag.String("absent-upid", "", "an unknown UPID: item-67 raw probe, no subject (empty=skip)")
 	fieldVMID := flag.Int("field-vmid", 0, "an existing VMID: item-67 field presence (status + digest; 0=skip)")
 	fieldStorage := flag.String("field-storage", "", "an existing storage: item-67 field presence (type; empty=skip)")
+	// A-MUT probes (each optional; 0/empty = skip). The assertion is the gate.
+	agentVMID := flag.Int("agent-vmid", 0, "item-68: a running agent-off VMID; captures + asserts the agent-off rejection (0=skip)")
+	qmcreateVMID := flag.Int("qmcreate-vmid", 0, "item-70a: recover+record the qmcreate UPID spelling for this VMID from the task list (0=skip)")
+	qmcreateSince := flag.Int64("qmcreate-since", 0, "item-70a: the create dispatch time (unix seconds); REQUIRED with -qmcreate-vmid so a stale/reused-id qmcreate is not picked")
+	var upids nodeList
+	flag.Var(&upids, "upid", "item-70: a UPID to parse+validate (repeatable)")
+	vzdumpUPID := flag.String("vzdump-upid", "", "item-70a: a vzdump UPID; asserts its id field is EMPTY (all-guests) (empty=skip)")
+	userUPID := flag.String("user-upid", "", "item-70b: a UPID to assert the user field of (empty=skip)")
+	expectUser := flag.String("expect-user", "", "item-70b: the user field -user-upid must carry")
+	exitstatusUPID := flag.String("exitstatus-upid", "", "item-69: a UPID; reads PVE's own task status and asserts exitstatus ^WARNINGS: n$ (empty=skip)")
 	flag.Parse()
 
 	if *target == "" {
@@ -146,9 +209,20 @@ func run() int {
 		probeNodeName = nodes[0]
 	}
 
-	shapes, gateErr := c.GoldenGateEmpty(ctx, []string(nodes))
-	report.NodeShapes = shapes
-	report.GoldenAtRest = gateErr == nil
+	// F5: the golden gate REQUIRES zero guests; the A-MUT captures REQUIRE a
+	// live guest — they cannot both hold in one process. So the golden gate
+	// runs ONLY in A-RO mode (no A-MUT flag). The golden precondition for an
+	// A-MUT run is a SEPARATE prior A-RO invocation, before the guest is
+	// created. In A-MUT mode gateErr stays nil, so the exit reflects the A-MUT
+	// assertions alone, never a golden refusal.
+	amutMode := amutRequested(*agentVMID, *qmcreateVMID, upids, *vzdumpUPID, *userUPID, *exitstatusUPID)
+	var gateErr error
+	if !amutMode {
+		shapes, err := c.GoldenGateEmpty(ctx, []string(nodes))
+		report.NodeShapes = shapes
+		report.GoldenAtRest = err == nil
+		gateErr = err
+	}
 
 	raw, rawErr := c.CaptureRawGET(ctx, *path)
 	if rawErr == nil {
@@ -213,6 +287,86 @@ func run() int {
 			report.Errors = append(report.Errors, serr.Error())
 		} else {
 			report.CorroboratorShape = shape
+		}
+	}
+
+	// ---- A-MUT captures (items 68-agent, 69, 70a/70b) ----
+	// item 68: the agent-off rejection on a running agent-declared-but-absent
+	// guest. A rejection that is NOT agent-off (a not-found 500, a 595/596, an
+	// auth error) fails the assertion.
+	if *agentVMID != 0 {
+		if rej, err := c.CaptureAgentRejection(ctx, probeNodeName, *agentVMID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.AgentRejection = rej
+			if !rej.AgentOff {
+				report.Errors = append(report.Errors, fmt.Sprintf("item-68: vm %d rejection is not agent-off (code=%d, text=%q)", *agentVMID, rej.Code, rej.RejectionText))
+			}
+		}
+	}
+
+	// item 70a: recover the qmcreate UPID by type AND id within the create
+	// window (since), then assert its spelling (type+id) and validity.
+	if *qmcreateVMID != 0 {
+		if *qmcreateSince == 0 {
+			report.Errors = append(report.Errors, "item-70a: -qmcreate-since (create dispatch time, unix seconds) is required with -qmcreate-vmid")
+		} else {
+			vmidStr := strconv.Itoa(*qmcreateVMID)
+			if upid, err := c.FindTaskUPID(ctx, probeNodeName, "qmcreate", vmidStr, *qmcreateSince); err != nil {
+				report.Errors = append(report.Errors, err.Error())
+			} else if sp, err := pve.ParseUPIDSpelling(upid); err != nil {
+				report.Errors = append(report.Errors, err.Error())
+			} else {
+				report.UPIDSpellings = append(report.UPIDSpellings, *sp)
+				report.Errors = append(report.Errors, qmcreateSpellingErrors(sp, *qmcreateVMID)...)
+			}
+		}
+	}
+
+	// item 70: parse+validate each supplied UPID; a malformed one fails.
+	for _, u := range upids {
+		if sp, err := pve.ParseUPIDSpelling(u); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.UPIDSpellings = append(report.UPIDSpellings, *sp)
+			if !sp.Valid {
+				report.Errors = append(report.Errors, fmt.Sprintf("item-70: UPID %q failed validateUPIDShape: %s", u, sp.ValidErr))
+			}
+		}
+	}
+
+	// item 70a: the vzdump-all UPID must be a VALID vzdump task with an EMPTY id.
+	if *vzdumpUPID != "" {
+		if sp, err := pve.ParseUPIDSpelling(*vzdumpUPID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.UPIDSpellings = append(report.UPIDSpellings, *sp)
+			report.Errors = append(report.Errors, vzdumpSpellingErrors(sp)...)
+		}
+	}
+
+	// item 70b: the user/token UPID must carry the expected principal; the
+	// expectation is MANDATORY — a UPID with no principal assertion is refused.
+	if *userUPID != "" {
+		if *expectUser == "" {
+			report.Errors = append(report.Errors, "item-70b: -expect-user is required with -user-upid (refusing to record a UPID with no principal assertion)")
+		} else if sp, err := pve.ParseUPIDSpelling(*userUPID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.UPIDSpellings = append(report.UPIDSpellings, *sp)
+			report.Errors = append(report.Errors, userSpellingErrors(sp, *expectUser)...)
+		}
+	}
+
+	// item 69: PVE's own task exitstatus must be exactly WARNINGS: n.
+	if *exitstatusUPID != "" {
+		if es, err := c.CaptureTaskExitStatus(ctx, probeNodeName, *exitstatusUPID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.TaskExitStatuses = append(report.TaskExitStatuses, *es)
+			if !es.IsWarnings {
+				report.Errors = append(report.Errors, fmt.Sprintf("item-69: task %q exitstatus %q is not WARNINGS: n (vacuous — re-induce)", *exitstatusUPID, es.ExitStatus))
+			}
 		}
 	}
 
