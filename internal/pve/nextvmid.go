@@ -124,6 +124,13 @@ func (c *Client) vmidFree(ctx context.Context, vmid int) (bool, error) {
 // bare "already exists" substring, so an unrelated PVE error that happens
 // to mention some other resource "already exists" is never misclassified
 // as this vmid being taken.
+//
+// Live-verified (nested pvh 2026-10-23, Batch C item 77): a create at a VMID
+// taken on ANOTHER node is rejected at the POST with HTTP 500, body
+// "unable to create VM <id> - VM <id> already exists on node '<node>'" — the
+// substring "VM <id> already exists" is present, so isVMIDTakenError matches,
+// and vmidFree reports a cross-node-taken id as taken and a free id as free
+// (both directions confirmed). No duplicate VM was created on the create node.
 func isVMIDTakenError(err error, vmid int) bool {
 	if err == nil {
 		return false

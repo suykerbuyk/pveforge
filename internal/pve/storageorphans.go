@@ -66,6 +66,15 @@ func (c *Client) storageContentWithType(ctx context.Context, node, storage strin
 // simply absent from the returned set; this function does no PVE-side
 // existence checking of its own.
 //
+// Live (nested pvh 2026-10-23, Batch C item 75): this current-config-only
+// surface is confirmed to MISS a running VM's snapshot RAM-state volume. A
+// vmstate=1 snapshot creates local-lvm:vm-<vmid>-state-<snap> (PVE naming
+// confirmed), referenced ONLY from the snapshot section — absent here,
+// present in /content, and matching the vm-<vmid>- destroy-time prefix — so
+// today's destroy-time free (OrphanVolumesForVMID) would select and delete a
+// live VM's snapshot state. The claimed set must also include snapshot-section
+// volids before the free is trusted for any VM that has snapshots.
+//
 // Locking: the caller must hold lock.Read or lock.Mutation on this
 // storage's ObjectKey for the duration of this call; ClaimedVolumes does
 // not lock anything itself.
@@ -76,17 +85,27 @@ func (c *Client) storageContentWithType(ctx context.Context, node, storage strin
 // signal that anything was scoped down — PVE returns a plain 200 with a
 // shorter list, and nothing in this function (or its caller) can detect
 // that after the fact. The target's token needs full node-scoped audit
-// rights (VM.Audit at minimum) for the result to be trustworthy.
+// rights (VM.Audit at minimum) for the result to be trustworthy. This
+// permission-scoped short-list hazard is NOT yet live-verified — Batch C's
+// C3 (item 76, token-short-list) is still owed, its OQ-3 view-restricted
+// token not provisioned — so treat this precondition as
+// unverified-against-a-live-host.
 //
-// Unverified against a real host: whether a linked clone's own disk-slot
-// volid, taken verbatim from qm config, is byte-identical to the Volid
-// PVE's /content listing reports for the same underlying storage object,
-// on every storage backend PVE supports — proxmox.StorageContent.Parent
-// exists specifically to carry a linked clone's base-volume relationship,
-// and this function does not consult it at all. See vault task
-// pveforge-storage-orphan-scan's "Unverified assumptions" section before
-// trusting this for destroy-time reconciliation in any environment using
-// linked clones.
+// Linked-clone volid identity — live on nested lvmthin (pvh 2026-10-23,
+// Batch C item 74); UNVERIFIED on ZFS (deferred item 79). Live-verified facts:
+// (a) a `qm clone --full 0` disk is a plain local-lvm:vm-<clone>-disk-0 whose
+// qm-config volid is BYTE-IDENTICAL to the Volid /content reports (so a clone's
+// OWN disk is self-claimed by its own config); (b) /content exposes NO
+// linked-clone parent (proxmox.StorageContent.Parent came back empty), so the
+// clone→base link is invisible to /content; (c) the template base appears as a
+// separate local-lvm:base-<tpl>-disk-N, which is OUTSIDE the vm-<vmid>- destroy-time
+// selector. The safety conclusion — the base-reads-unclaimed/freed hazard does NOT
+// reproduce on lvmthin — rests on (c) alone. (That the base is also in the
+// template's own config is true BY CONSTRUCTION, not a fact C1 measured: the
+// capture bailed at fact (b)'s empty parent and never evaluated base-claimed-by-
+// template.) On other backends (the operator's production ZFS) this is still
+// unverified — see vault task pveforge-storage-orphan-scan's "Unverified
+// assumptions" section before trusting destroy-time reconciliation there.
 func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map[string]bool, error) {
 	if node == "" {
 		return nil, fmt.Errorf("claimed volumes for vmid %d: node is required", vmid)
@@ -116,18 +135,16 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 		// path for physical passthrough (e.g. "/dev/sdb") has no colon and
 		// is not a storage-resident volume this scan tracks.
 		//
-		// UNVERIFIED against a real host: whether a linked clone's own
-		// disk-slot volid, taken verbatim from qm config, is byte-identical
-		// to the Volid PVE's /content listing reports for that same
-		// underlying storage object, on every storage backend PVE
-		// supports — proxmox.StorageContent.Parent exists specifically to
-		// carry a linked clone's base-volume relationship, and this parser
-		// does not consult it at all. See vault task
+		// Linked-clone volid identity — live on nested lvmthin (pvh
+		// 2026-10-23, Batch C item 74); UNVERIFIED on ZFS (item 79). On
+		// lvmthin the clone's own disk-slot volid is byte-identical to its
+		// /content Volid, so this verbatim parse is correct for the clone's
+		// OWN disk, and /content exposes no linked-clone parent. This parser
+		// still does not consult proxmox.StorageContent.Parent; it does not
+		// need to on lvmthin (the base is base-<tpl>-disk-N, outside the
+		// vm-<vmid>- selector). Recheck on a real ZFS host before trusting
+		// destroy-time reconciliation there. See vault task
 		// pveforge-storage-orphan-scan's "Unverified assumptions" section.
-		// Must be checked against a real PVE host running an actual linked
-		// qm clone before this function's output is trusted for
-		// destroy-time reconciliation in any environment using linked
-		// clones.
 		if !strings.Contains(volid, ":") {
 			return
 		}
@@ -207,10 +224,12 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 // attempted in this function — it needs RoutedClient to route across
 // nodes, which is a routing change, not a few lines here.
 //
-// Unverified against a real host: this function's diff quality inherits
-// ClaimedVolumes' linked-clone caveat unchanged — see that function's own
-// doc comment and vault task pveforge-storage-orphan-scan's "Unverified
-// assumptions" section.
+// Linked-clone caveat — live on nested lvmthin (pvh 2026-10-23, Batch C
+// item 74); UNVERIFIED on ZFS (item 79). Inherits ClaimedVolumes' result
+// unchanged: on lvmthin the clone's own disk is self-claimed and the base
+// (base-<tpl>-disk-N) is outside the vm-<vmid>- selector, and /content
+// exposes no parent link. See that function's own doc comment and vault
+// task pveforge-storage-orphan-scan's "Unverified assumptions" section.
 func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*proxmox.StorageContent, error) {
 	if node == "" || storage == "" {
 		return nil, fmt.Errorf("orphan volumes: node and storage are required")
@@ -280,15 +299,18 @@ func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*pr
 // active use. See vault task pveforge-storage-orphan-scan's "Unverified
 // assumptions" section.
 //
-// Unverified against a real host, and the MORE DANGEROUS direction of
-// the two flagged on this file: this function also inherits
-// ClaimedVolumes' unverified linked-clone volid-identity assumption. If a
-// linked clone's own disk-slot volid does not match the Volid its base
-// image reports on some storage backend, a base image still backing a
-// live clone could be misread as unclaimed and handed to
-// VolumeFreeOrphans for deletion. Do not trust this function's output for
-// destroy-time reconciliation in any environment using linked clones
-// until that assumption is checked against a real PVE host.
+// Linked-clone caveat — live on nested lvmthin (pvh 2026-10-23, Batch C
+// item 74); UNVERIFIED on ZFS (the operator's production backend — item
+// 79). On lvmthin a `--full 0` clone's own disk volid is byte-identical to
+// its /content Volid, and the template base is local-lvm:base-<tpl>-disk-N —
+// OUTSIDE this function's "<storage>:vm-<vmid>-" prefix — so the base is
+// never selected for deletion here and the base-reads-unclaimed/freed hazard
+// does NOT reproduce on lvmthin. /content exposes no linked-clone parent, so
+// the clone→base link is invisible to /content (an LVM-level check would be
+// needed if a future free ever had to reason about it — not required for
+// today's prefix-based free). On ZFS this is still unverified: do not trust
+// destroy-time reconciliation for linked clones there until item 79 checks
+// it on a real ZFS host.
 func (c *Client) OrphanVolumesForVMID(ctx context.Context, node, storage string, vmid int) ([]*proxmox.StorageContent, error) {
 	orphans, err := c.OrphanVolumes(ctx, node, storage)
 	if err != nil {

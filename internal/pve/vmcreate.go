@@ -34,6 +34,13 @@ import (
 // out-of-space storage target), whose text is supposed to reach the
 // caller unparsed and verbatim; and go-proxmox JSON-encodes the create
 // parameters, where RawRequest form-encodes them.
+//
+// Live-verified (nested pvh 2026-10-23, Batch C item 77): a cross-node vmid
+// collision came back exactly this way — a pve.StatusError, code 500, body
+// "unable to create VM <id> - VM <id> already exists on node '<node>'".
+// CreateVM itself does NOT classify collisions; it returns that StatusError
+// verbatim (prefixed "create vm <id>:") and the caller — or isVMIDTakenError
+// (nextvmid.go) on the /cluster/nextid path — decides.
 func (c *Client) CreateVM(ctx context.Context, node string, vmid int, params url.Values) (string, error) {
 	if node == "" {
 		return "", fmt.Errorf("create vm %d: node is required", vmid)
