@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
 
+	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 )
@@ -14,10 +16,124 @@ import (
 func newStorageCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "storage",
-		Short: "Inspect storage backends",
+		Short: "Inspect and create storage backends",
 	}
 	cmd.AddCommand(newStorageGetCmd())
 	cmd.AddCommand(newStorageOrphansCmd())
+	cmd.AddCommand(newStorageCreateCmd())
+	return cmd
+}
+
+// newStorageCreateCmd wires pveforge-storage-create-command's
+// idempotent.StorageCreate Op: create a cluster-wide storage definition (POST
+// /storage), idempotently. Absent -> create; already present and matching ->
+// no-op; present with a DIFFERING definition -> refused with a desired-vs-
+// actual diff and no POST (a future `storage set` is the deliberate converge).
+//
+// Type-agnostic: --type <type> plus raw --data key=value passthrough (PVE
+// validates, its errors propagate verbatim), mirroring `vm create`'s
+// raw/schema-free surface — with one small data-driven per-type required-keys
+// guard (v1: a zfspool with no pool= is refused client-side before any POST).
+func newStorageCreateCmd() *cobra.Command {
+	var storageType string
+	var dataPairs []string
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "create <target-id> <name> --type <type> [--data key=value ...]",
+		Short: "Create a storage definition, idempotently, refusing a differing one",
+		Long: `Create a cluster-wide PVE storage definition (POST /storage), idempotently.
+
+The definition is type-agnostic: --type names the storage type and every
+other parameter is a raw --data key=value, passed to PVE unchanged (PVE
+validates them and its error text propagates verbatim), exactly like
+` + "`vm create`" + `'s raw create fields. One small guard runs client-side
+before any POST: a type with a known required key missing is refused early
+(v1: --type zfspool needs --data pool=<zpool>, or the storage comes up
+inactive).
+
+A storage definition is CLUSTER-WIDE, not node-scoped: it is written to the
+cluster's storage.cfg whichever node's API is addressed. Creating one needs
+Datastore.Allocate at /storage (datacenter) — a storage pool token with only
+Datastore.AllocateSpace cannot create a definition, only allocate volumes
+within one.
+
+Idempotent:
+  - absent            -> created;
+  - present, matching -> no-op (nothing changed);
+  - present, differing-> REFUSED, with a desired-vs-actual diff and NO write;
+    a future ` + "`storage set`" + ` is the way to converge one deliberately.
+--force re-POSTs a present+matching storage instead of no-opping (PVE then
+refuses the duplicate), but STILL refuses a differing definition.`,
+		Args: cobra.ExactArgs(2),
+	}
+	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
+	cmd.Flags().StringVar(&storageType, "type", "", "the PVE storage type to create (zfspool, dir, lvmthin, nfs, ...); required")
+	cmd.Flags().StringArrayVar(&dataPairs, "data", nil, "a raw PVE create parameter, key=value (repeatable): pool=..., content=..., nodes=...")
+	cmd.Flags().BoolVar(&force, "force", false, "re-POST even if the storage already matches (PVE refuses the duplicate); still refuses a differing definition")
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if storageType == "" {
+			return errors.New("storage create: --type is required")
+		}
+
+		params, err := parseDataParams(dataPairs)
+		if err != nil {
+			return err
+		}
+		// --type is the authoritative type; a stray --data type= is refused
+		// rather than silently fighting the flag.
+		if params.Get("type") != "" {
+			return errors.New("storage create: set the type with --type, not --data type=")
+		}
+		params.Set("type", storageType)
+
+		client, err := resolveRoutedClient(cmd, args[0])
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+
+		op := &idempotent.StorageCreate{Client: client, Name: args[1], Params: params}
+
+		// Explicit, ahead of Run, for the same reason `vm create` calls
+		// VMCreate.Validate ahead of Run: idempotent.Run skips Apply (and so
+		// Apply's own internal Validate) entirely on the already-satisfied
+		// path, so the required-keys guard would not run for a storage that
+		// already exists. Running it here means a zfspool with no pool= is
+		// refused whether or not the storage is already there.
+		if err := op.Validate(); err != nil {
+			return err
+		}
+
+		// The lock key — the same {TargetID, "storage", <name>} key `storage
+		// get` and `storage orphans` already use, so a create serializes
+		// against reads and other creates of the same storage on this target.
+		key := lock.ObjectKey{TargetID: args[0], Kind: "storage", ID: args[1]}
+
+		res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, force)
+		if err != nil {
+			return err
+		}
+
+		if !res.Changed {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: storage %s already exists with the requested definition; nothing to do\n", args[0], args[1])
+			return nil
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: storage %s created\n", args[0], args[1])
+		// Advisory, exit 0: the create succeeded but the re-read of the new
+		// config could not be made.
+		warnNotReread(cmd.ErrOrStderr(), args[0], "storage", args[1], res.AfterErr)
+		return nil
+	}
+	markDestructive(cmd)
 	return cmd
 }
 
