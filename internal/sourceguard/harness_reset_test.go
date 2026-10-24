@@ -21,9 +21,9 @@ import (
 // arguments and exits as told.
 
 const (
-	grStatus = "get /nodes/qa-pve-02/storage/pveforge-harness/status"
+	grStatus = "get /nodes/qa-pve-07/storage/pveforge-harness/status"
 	grPool   = "get /pools poolid=pveforge-harness"
-	grMember = `{"type":"qemu","vmid":%d,"node":"qa-pve-02"}`
+	grMember = `{"type":"qemu","vmid":%d,"node":"qa-pve-07"}`
 	// grStamp is the run stamp every run here reads from its fixed clock;
 	// grOld is an earlier golden.sh run's.
 	grStamp = "20260924T120000Z"
@@ -37,7 +37,7 @@ func grGolden(snaptime int, stamp string, extra string) string {
 }
 
 func grKey(verb string, vmid int, sub string) string {
-	k := fmt.Sprintf("%s /nodes/qa-pve-02/qemu/%d", verb, vmid)
+	k := fmt.Sprintf("%s /nodes/qa-pve-07/qemu/%d", verb, vmid)
 	if sub != "" {
 		k += "/" + sub
 	}
@@ -77,7 +77,7 @@ func (r grResult) writes() []string {
 	return w
 }
 
-// grWorld: 690-692 built, tagged, pool members on qa-pve-02, each running
+// grWorld: 690-692 built, tagged, pool members on qa-pve-07, each running
 // and stopping when told, each with pvh-golden (t=1000, all three stamped
 // grOld), an older snapshot (t=500) and two later ones (t=2000, t=3000).
 func grWorld() grSpec {
@@ -249,11 +249,11 @@ exec `+realDate+` "$@"
 }
 
 func vmWrite(verb string, vmid int, sub string, fields ...string) string {
-	c := fmt.Sprintf("api %s /nodes/qa-pve-02/qemu/%d", verb, vmid)
+	c := fmt.Sprintf("api %s /nodes/qa-pve-07/qemu/%d", verb, vmid)
 	if sub != "" {
 		c += "/" + sub
 	}
-	c += " qa-pve-02-harness --roster R -o json"
+	c += " qa-pve-07-harness --roster R -o json"
 	for _, f := range fields {
 		c += " --data " + f
 	}
@@ -282,7 +282,7 @@ func grExpect(t *testing.T, r grResult, code int, writes []string, accepts []str
 		t.Errorf("output does not contain %q:\n%s", errText, r.stderr)
 	}
 	for _, w := range r.writes() {
-		if regexp.MustCompile(`^api delete /nodes/qa-pve-02/qemu/\d+ `).MatchString(w) {
+		if regexp.MustCompile(`^api delete /nodes/qa-pve-07/qemu/\d+ `).MatchString(w) {
 			t.Errorf("a VM was destroyed: %s", w)
 		}
 	}
@@ -326,7 +326,7 @@ func TestReset_TheFullReset(t *testing.T) {
 	}
 	// The probe's static layer ran first, as its own process: the storage
 	// status is the very first read.
-	if len(r.calls) == 0 || r.calls[0] != "api get /nodes/qa-pve-02/storage/pveforge-harness/status qa-pve-02-harness --roster "+regexp.MustCompile(`--roster (\S+)`).FindStringSubmatch(r.calls[0])[1]+" -o json" {
+	if len(r.calls) == 0 || r.calls[0] != "api get /nodes/qa-pve-07/storage/pveforge-harness/status qa-pve-07-harness --roster "+regexp.MustCompile(`--roster (\S+)`).FindStringSubmatch(r.calls[0])[1]+" -o json" {
 		t.Errorf("first call %q, want the probe's storage status read", r.calls)
 	}
 }

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # hack/harness/d5/verify-root.sh: D5's ROOT-side checks, read-only. Each PVE
-# read is one `ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com '<pveum or
+# read is one `ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com '<pveum or
 # pvesh read>'`; jq runs on the workstation. Nothing here writes to any host.
 #
 # Usage: HARNESS_EVIDENCE=<new dir> verify-root.sh <phase>
 #   p0       step 0: non-interactive root ssh works (checked FIRST; steps 1-10
 #            need it), nothing named for the harness exists yet, the storage
 #            is active, the datacenter lets the token set the harness tag,
-#            and qa-pve-02's pinned host key (from D5_PIN_ROSTER's
-#            qa-pve-02 target) is one of the keys the host serves. When all
+#            and qa-pve-07's pinned host key (from D5_PIN_ROSTER's
+#            qa-pve-07 target) is one of the keys the host serves. When all
 #            pass, the P0 baseline (ACL list, roles, users, groups, pools) is
 #            written once to ~/.config/pveforge/harness-outer.p0, never
 #            overwritten.
@@ -25,8 +25,8 @@
 source "$(dirname "$0")/../lib.sh"
 source "$(dirname "$0")/evidence.sh"
 
-readonly D5_HOST=root@qa-pve-02.lab.quantum.com
-readonly D5_HOSTNAME=qa-pve-02.lab.quantum.com
+readonly D5_HOST=root@qa-pve-07.lab.quantum.com
+readonly D5_HOSTNAME=qa-pve-07.lab.quantum.com
 # ACL paths the harness owns. The shared /storage/local and the vmbr0 SDN
 # path are deliberately not here: others may hold rows there.
 readonly D5_HARNESS_PATHS='^/(pool/pveforge-harness|storage/pveforge-harness|vms/69[0-9])($|/)'
@@ -38,7 +38,7 @@ p0 | roles | owner | granted | token | pre | post | reverted) ;;
 esac
 if [ "$phase" = p0 ]; then
 	[ ! -e "$D5_P0" ] || _harness_die 2 "the P0 baseline $D5_P0 already exists; it is written once and never overwritten"
-	[ -r "${D5_PIN_ROSTER:-}" ] || _harness_die 2 "p0 needs D5_PIN_ROSTER: the roster whose qa-pve-02 target pins the host key"
+	[ -r "${D5_PIN_ROSTER:-}" ] || _harness_die 2 "p0 needs D5_PIN_ROSTER: the roster whose qa-pve-07 target pins the host key"
 else
 	[ -d "$D5_P0" ] || _harness_die 2 "the P0 baseline $D5_P0 does not exist; run phase p0 first"
 fi
@@ -61,7 +61,7 @@ ev() { # name: an answer's path in the evidence
 }
 
 # pinned_fingerprint prints the host_key_fingerprint in the [targets.ssh]
-# table of a roster's qa-pve-02 target.
+# table of a roster's qa-pve-07 target.
 pinned_fingerprint() { # roster
 	awk -v want="$D5_NODE" '
 		/^[[:space:]]*\[\[targets\]\][[:space:]]*$/ { sec = "target"; id = ""; next }
@@ -172,7 +172,7 @@ p0)
 	d5_check "P5 storage $D5_STORAGE active on $D5_NODE" storage_active
 	d5_check "P6 the token may set tag pveforge-harness (datacenter user-tag-access)" tag_allowed
 	d5_check "fetch keyscan" keyscan
-	d5_check "K1 the pinned host key is one qa-pve-02 serves" k1
+	d5_check "K1 the pinned host key is one qa-pve-07 serves" k1
 	# G4 passes this exact value to bootstrap --host-key-fingerprint, so the
 	# password never goes to a host K1 did not verify. Printed only once K1
 	# has verified it.

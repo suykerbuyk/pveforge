@@ -6,7 +6,7 @@ in `/etc/pve/priv/token.cfg`. Each command is run by hand, one at a time; stop
 at the first failure. Each remote command is one single-quoted argument: an
 interactive bash or zsh expands `!` (history expansion) even inside double
 quotes, so `"…!build…"` fails there with "event not found", while inside
-single quotes nothing is expanded. On qa-pve-02 the command runs under a
+single quotes nothing is expanded. On qa-pve-07 the command runs under a
 non-interactive `sh -c`, which does no history expansion, so the token id can
 sit in double quotes inside it.
 
@@ -35,19 +35,19 @@ Then R-V in every case but G0.
 At D5 time no harness VM exists, so R0 does nothing. Later, lib.sh destroys
 only a VM created by the same run (operator ruling 2026-09-24 (3)): tearing
 down VMs from an earlier run is a fresh operator ask, or root's hand
-(`qm destroy <vmid>` on qa-pve-02, run by the operator).
+(`qm destroy <vmid>` on qa-pve-07, run by the operator).
 
 ## R1-R2: the eight ACL rows
 
 ```
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --tokens "pveforge-harness@pve!build" --roles ForgeHarness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --tokens "pveforge-harness@pve!build" --roles ForgeHarnessSpace'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --tokens "pveforge-harness@pve!build" --roles ForgeHarnessIso'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --tokens "pveforge-harness@pve!build" --roles ForgeHarnessNet'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --users pveforge-harness@pve --roles ForgeHarness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --users pveforge-harness@pve --roles ForgeHarnessSpace'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /storage/local --users pveforge-harness@pve --roles ForgeHarnessIso'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles ForgeHarnessNet'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --tokens "pveforge-harness@pve!build" --roles ForgeHarness'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --tokens "pveforge-harness@pve!build" --roles ForgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /storage/local --tokens "pveforge-harness@pve!build" --roles ForgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --tokens "pveforge-harness@pve!build" --roles ForgeHarnessNet'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /pool/pveforge-harness --users pveforge-harness@pve --roles ForgeHarness'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /storage/pveforge-harness --users pveforge-harness@pve --roles ForgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /storage/local --users pveforge-harness@pve --roles ForgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum acl delete /sdn/zones/localnetwork/vmbr0 --users pveforge-harness@pve --roles ForgeHarnessNet'
 ```
 
 (Skip the four token rows if G4 never minted the token.)
@@ -55,18 +55,18 @@ ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum acl delete /sdn/zones
 ## R3-R6: token, user, pool, roles
 
 ```
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum user token remove pveforge-harness@pve build'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum user delete pveforge-harness@pve'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum pool delete pveforge-harness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarness'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarnessSpace'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarnessIso'
-ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com 'pveum role delete ForgeHarnessNet'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum user token remove pveforge-harness@pve build'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum user delete pveforge-harness@pve'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum pool delete pveforge-harness'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum role delete ForgeHarness'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum role delete ForgeHarnessSpace'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum role delete ForgeHarnessIso'
+ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum role delete ForgeHarnessNet'
 ```
 
 ## R7: the roster entry, by hand
 
-Delete the `qa-pve-02-harness` `[[targets]]` entry, its `[targets.token]` block
+Delete the `qa-pve-07-harness` `[[targets]]` entry, its `[targets.token]` block
 included, from `~/.config/pveforge/harness-outer.toml`. No pveforge command
 removes a target.
 
