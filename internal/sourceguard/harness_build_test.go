@@ -26,35 +26,35 @@ import (
 // these cases also prove it complete and valid.
 
 const (
-	bISO    = "get /nodes/qa-pve-02/storage/local/content content=iso"
-	bImport = "get /nodes/qa-pve-02/storage/local/content content=import"
+	bISO    = "get /nodes/qa-pve-07/storage/local/content content=iso"
+	bImport = "get /nodes/qa-pve-07/storage/local/content content=import"
 
 	nestedPub  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeNestedKeyFakeNestedKeyFakeNestedKey0 pveforge-harness-nested"
 	fakeHash   = "$6$fakesalt$FakeHashFakeHashFakeHashFakeHashFakeHashFakeHashFakeHashFakeHashFakeHashFakeHashFake12"
 	nestedPw   = "Nested-Test-Pw-7f3a9c"
 	otherPin   = "198.51.100.7 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherHostOtherHost"
 	allMembers = `[{"poolid":"pveforge-harness","comment":"","members":[` +
-		`{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-02"},` +
-		`{"id":"qemu/691","type":"qemu","vmid":691,"node":"qa-pve-02"},` +
-		`{"id":"qemu/692","type":"qemu","vmid":692,"node":"qa-pve-02"}]}]`
+		`{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-07"},` +
+		`{"id":"qemu/691","type":"qemu","vmid":691,"node":"qa-pve-07"},` +
+		`{"id":"qemu/692","type":"qemu","vmid":692,"node":"qa-pve-07"}]}]`
 )
 
 var buildIPs = map[string]string{"690": "192.0.2.90", "691": "192.0.2.91", "692": "192.0.2.92"}
 
 func bContent(v string) string {
-	return "get /nodes/qa-pve-02/storage/pveforge-harness/content vmid=" + v
+	return "get /nodes/qa-pve-07/storage/pveforge-harness/content vmid=" + v
 }
-func bConf(v string) string   { return "get /nodes/qa-pve-02/qemu/" + v + "/config" }
-func bStatus(v string) string { return "get /nodes/qa-pve-02/qemu/" + v + "/status/current" }
+func bConf(v string) string   { return "get /nodes/qa-pve-07/qemu/" + v + "/config" }
+func bStatus(v string) string { return "get /nodes/qa-pve-07/qemu/" + v + "/status/current" }
 func bNextID(v string) string { return "get /cluster/nextid vmid=" + v }
 func bDestroyKey(v string) string {
-	return "delete /nodes/qa-pve-02/qemu/" + v + " purge=1 destroy-unreferenced-disks=1"
+	return "delete /nodes/qa-pve-07/qemu/" + v + " purge=1 destroy-unreferenced-disks=1"
 }
 func bUPID(v string) string {
-	return "UPID:qa-pve-02:000107D" + v[2:] + ":0FA3B38F:6AB7381B:qmdestroy:" + v + ":pveforge-harness@pve!build:"
+	return "UPID:qa-pve-07:000107D" + v[2:] + ":0FA3B38F:6AB7381B:qmdestroy:" + v + ":pveforge-harness@pve!build:"
 }
-func bTask(v string) string  { return "get /nodes/qa-pve-02/tasks/" + bUPID(v) + "/status" }
-func bStart(v string) string { return "post /nodes/qa-pve-02/qemu/" + v + "/status/start" }
+func bTask(v string) string  { return "get /nodes/qa-pve-07/tasks/" + bUPID(v) + "/status" }
+func bStart(v string) string { return "post /nodes/qa-pve-07/qemu/" + v + "/status/start" }
 func hostKey(v string) string {
 	return buildIPs[v] + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKey" + v
 }
@@ -114,7 +114,7 @@ type buildHome struct {
 	knownM  os.FileMode
 	keyscan map[string]string // vmid -> the scan's output, replacing hostKey
 	tcp     map[string]string // "ip_port" -> attempts that fail first (default 1: the preflight's), or "never"
-	outer   string            // the harness roster's host for qa-pve-02-harness ("" = 198.51.100.20; "-" = none)
+	outer   string            // the harness roster's host for qa-pve-07-harness ("" = 198.51.100.20; "-" = none)
 	roster  string            // the whole harness roster, replacing the one outer builds
 	pins    string            // a stand-in pins tool's body ("" = the real cmd/pveforge-harness-pins)
 	getent  map[string]string // host -> getent ahostsv4's answer
@@ -177,7 +177,7 @@ func (b buildHome) setup(t *testing.T, home string) {
 // addresses, so reading either one's host refuses the build.
 func outerRoster(host string) string {
 	return "# test roster\n[[targets]]\nid = \"qa-pve-01\"\nhost = \"192.0.2.91\"\nnode = \"qa-pve-01\"\n\n" +
-		"[[targets]]\nnode = \"qa-pve-02\"\nid = \"qa-pve-02-harness\"\n" + host +
+		"[[targets]]\nnode = \"qa-pve-07\"\nid = \"qa-pve-07-harness\"\n" + host +
 		"\n  [targets.token]\n  id = \"pveforge-harness@pve!build\"\n  secret_enc = \"\"\"\n" + testArmor + "\"\"\"\n\n" +
 		"[[targets]]\nid = \"qa-pve-03\"\nhost = \"192.0.2.90\"\nnode = \"qa-pve-03\"\n"
 }
@@ -221,7 +221,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// buildWorld: a clean slate on qa-pve-02. The pool is empty at the preflight
+// buildWorld: a clean slate on qa-pve-07. The pool is empty at the preflight
 // and then lists all three; each VM carries the tag and is running; each
 // VMID is free in the cluster (/cluster/nextid offers it) before the create
 // and again once it is destroyed, when the fake drops it from the pool.
@@ -267,7 +267,7 @@ func buildWorld(t *testing.T, h buildHome) probeSpec {
 		s.resp[bStatus(v)] = `{"status":"running"}`
 		s.resp[bNextID(v)] = `"` + v + `"`
 		s.resp[bDestroyKey(v)] = `"` + bUPID(v) + `"`
-		s.resp[bTask(v)] = taskStatus(bUPID(v), "qa-pve-02", "qmdestroy", v, "stopped", "OK")
+		s.resp[bTask(v)] = taskStatus(bUPID(v), "qa-pve-07", "qmdestroy", v, "stopped", "OK")
 	}
 	return s
 }
@@ -289,7 +289,7 @@ func clockStubs(t *testing.T, stubs map[string]string) map[string]string {
 }
 
 func bCall(verb, sub, data string) string {
-	c := "api " + verb + " /nodes/qa-pve-02/qemu/" + sub + " qa-pve-02-harness --roster R -o json"
+	c := "api " + verb + " /nodes/qa-pve-07/qemu/" + sub + " qa-pve-07-harness --roster R -o json"
 	if data != "" {
 		c += " " + data
 	}
@@ -300,9 +300,9 @@ const sshkeysURI = "ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIFakeNestedKeyFakeNest
 
 var (
 	bCreate = map[string]string{
-		"690": `vm create qa-pve-02-harness 690 --roster R --json {"name":"pvh-n1","ostype":"l26","cpu":"host","cores":"4","memory":"16384","bios":"seabios","scsihw":"virtio-scsi-single","scsi0":"pveforge-harness:128","ide2":"local:iso/pvh-n1-auto.iso,media=cdrom","net0":"virtio=02:00:00:00:00:90,bridge=vmbr0,firewall=0","boot":"order=scsi0;ide2","pool":"pveforge-harness"}`,
-		"691": `vm create qa-pve-02-harness 691 --roster R --json {"name":"pvh-n2","ostype":"l26","cpu":"host","cores":"4","memory":"16384","bios":"seabios","scsihw":"virtio-scsi-single","scsi0":"pveforge-harness:128","ide2":"local:iso/pvh-n2-auto.iso,media=cdrom","net0":"virtio=02:00:00:00:00:91,bridge=vmbr0,firewall=0","boot":"order=scsi0;ide2","pool":"pveforge-harness"}`,
-		"692": `vm create qa-pve-02-harness 692 --roster R --json {"name":"pvh-nfs","ostype":"l26","cpu":"host","cores":"2","memory":"2048","bios":"seabios","scsihw":"virtio-scsi-single","scsi0":"pveforge-harness:0,import-from=local:import/debian-13-genericcloud-amd64.qcow2","scsi1":"pveforge-harness:200","ide2":"pveforge-harness:cloudinit","net0":"virtio=02:00:00:00:00:92,bridge=vmbr0,firewall=0","boot":"order=scsi0","agent":"1","ipconfig0":"ip=192.0.2.92/24,gw=192.0.2.1","nameserver":"192.0.2.53","searchdomain":"pvh.example.invalid","ciuser":"pvh","sshkeys":"` + sshkeysURI + `","pool":"pveforge-harness"}`,
+		"690": `vm create qa-pve-07-harness 690 --roster R --json {"name":"pvh-n1","ostype":"l26","cpu":"host","cores":"4","memory":"16384","bios":"seabios","scsihw":"virtio-scsi-single","scsi0":"pveforge-harness:128","ide2":"local:iso/pvh-n1-auto.iso,media=cdrom","net0":"virtio=02:00:00:00:00:90,bridge=vmbr0,firewall=0","boot":"order=scsi0;ide2","pool":"pveforge-harness"}`,
+		"691": `vm create qa-pve-07-harness 691 --roster R --json {"name":"pvh-n2","ostype":"l26","cpu":"host","cores":"4","memory":"16384","bios":"seabios","scsihw":"virtio-scsi-single","scsi0":"pveforge-harness:128","ide2":"local:iso/pvh-n2-auto.iso,media=cdrom","net0":"virtio=02:00:00:00:00:91,bridge=vmbr0,firewall=0","boot":"order=scsi0;ide2","pool":"pveforge-harness"}`,
+		"692": `vm create qa-pve-07-harness 692 --roster R --json {"name":"pvh-nfs","ostype":"l26","cpu":"host","cores":"2","memory":"2048","bios":"seabios","scsihw":"virtio-scsi-single","scsi0":"pveforge-harness:0,import-from=local:import/debian-13-genericcloud-amd64.qcow2","scsi1":"pveforge-harness:200","ide2":"pveforge-harness:cloudinit","net0":"virtio=02:00:00:00:00:92,bridge=vmbr0,firewall=0","boot":"order=scsi0","agent":"1","ipconfig0":"ip=192.0.2.92/24,gw=192.0.2.1","nameserver":"192.0.2.53","searchdomain":"pvh.example.invalid","ciuser":"pvh","sshkeys":"` + sshkeysURI + `","pool":"pveforge-harness"}`,
 	}
 	bTag    = func(v string) string { return bCall("put", v+"/config", "--data tags=pveforge-harness") }
 	bStartC = func(v string) string { return bCall("post", v+"/status/start", "") }
@@ -397,13 +397,13 @@ func TestBuild_PreflightRefusals(t *testing.T) {
 	}{
 		"691 exists": {edit: func(s probeSpec) { s.seq[pPool] = nil }, want: "VM 690 already exists in pool pveforge-harness: the build runs on a clean slate"},
 		"a leftover": {edit: func(s probeSpec) { s.resp[bContent("692")] = oneVolume }, want: "storage pveforge-harness already holds volumes of VM 692"},
-		"no n2 ISO":  {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n1-auto.iso"}]` }, want: "local:iso/pvh-n2-auto.iso is not on qa-pve-02"},
-		"no n1 ISO":  {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n2-auto.iso"}]` }, want: "local:iso/pvh-n1-auto.iso is not on qa-pve-02"},
-		"no image":   {edit: func(s probeSpec) { s.resp[bImport] = `[]` }, want: "local:import/debian-13-genericcloud-amd64.qcow2 is not on qa-pve-02"},
+		"no n2 ISO":  {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n1-auto.iso"}]` }, want: "local:iso/pvh-n2-auto.iso is not on qa-pve-07"},
+		"no n1 ISO":  {edit: func(s probeSpec) { s.resp[bISO] = `[{"volid":"local:iso/pvh-n2-auto.iso"}]` }, want: "local:iso/pvh-n1-auto.iso is not on qa-pve-07"},
+		"no image":   {edit: func(s probeSpec) { s.resp[bImport] = `[]` }, want: "local:import/debian-13-genericcloud-amd64.qcow2 is not on qa-pve-07"},
 		// Not an empty harness storage: used above the empty dataset's 1 MiB.
 		"used above 1 MiB": {edit: func(s probeSpec) { s.resp[pStatus] = storageStatus("zfspool", gib600-(1<<20)-1, "") }, want: "storage pveforge-harness is not empty: its used is 1048577 bytes"},
 		"another VM in the pool": {edit: func(s probeSpec) {
-			s.seq[pPool] = map[int]string{1: strings.Replace(emptyPool, `"members":[]`, `"members":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"qa-pve-02"}]`, 1)}
+			s.seq[pPool] = map[int]string{1: strings.Replace(emptyPool, `"members":[]`, `"members":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"qa-pve-07"}]`, 1)}
 		}, want: "pool pveforge-harness is not empty: the build runs on an empty harness storage"},
 		// A VMID held anywhere in the cluster, outside the pool the token sees.
 		"691 in use in the cluster":  {edit: func(s probeSpec) { s.rc[bNextID("691")] = map[int]int{0: 1} }, want: "VMID 691 is not free in the cluster: /cluster/nextid did not answer 200 for VMID 691"},
@@ -552,7 +552,7 @@ func TestBuild_KeepOnFailure(t *testing.T) {
 func TestBuild_CreateFailsMidway(t *testing.T) {
 	s := buildWorld(t, buildHome{})
 	s.rc["vm create 691"] = map[int]int{0: 5}
-	s.resp[pPool] = strings.Replace(allMembers, `,{"id":"qemu/692","type":"qemu","vmid":692,"node":"qa-pve-02"}`, "", 1)
+	s.resp[pPool] = strings.Replace(allMembers, `,{"id":"qemu/692","type":"qemu","vmid":692,"node":"qa-pve-07"}`, "", 1)
 	s.resp[bStatus("690")] = `{"status":"stopped"}`
 	r := runProbe(t, s)
 	if r.code != 5 {
@@ -567,7 +567,7 @@ func TestBuild_CreateFailsMidway(t *testing.T) {
 // B8: cleanup cannot destroy a VM: the report names it and the status stands.
 func TestBuild_CleanupFailsReportsLeftover(t *testing.T) {
 	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.90_22": "never"}})
-	s.rc["delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1"] = map[int]int{0: 7}
+	s.rc["delete /nodes/qa-pve-07/qemu/690 purge=1 destroy-unreferenced-disks=1"] = map[int]int{0: 7}
 	s.rc[bNextID("690")] = map[int]int{2: 1} // in use, after the preflight's read
 	r := runProbe(t, s)
 	if r.code != 4 {
@@ -1093,7 +1093,7 @@ func TestBuild_SiteFileSymlink(t *testing.T) {
 // ignored, and a VM is taken as gone only on a positive proof.
 func TestBuild_CleanupRunsToItsEnd(t *testing.T) {
 	s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
-	s.kill = map[string]map[int]string{"post /nodes/qa-pve-02/qemu/692/status/stop": {1: "group:INT"}}
+	s.kill = map[string]map[int]string{"post /nodes/qa-pve-07/qemu/692/status/stop": {1: "group:INT"}}
 	r := runProbe(t, s)
 	if r.code != 4 || !strings.Contains(r.stderr, "build: cleanup: this run's VM(s) 690 691 692 destroyed") {
 		t.Fatalf("exit %d\n%s", r.code, r.stderr)
@@ -1117,12 +1117,12 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 		"in use":               {buildHome{tcp: map[string]string{"192.0.2.92_22": "0"}}, "192.0.2.92:22 already answers, before pvh-nfs exists: the address is in use"},
 		"a node's 8006 in use": {buildHome{tcp: map[string]string{"192.0.2.91_8006": "0"}}, "192.0.2.91:8006 already answers, before pvh-n2 exists"},
 		"the outer host":       {buildHome{outer: "192.0.2.90"}, "pvh-n1's address 192.0.2.90 is the outer host 192.0.2.90"},
-		"the outer host by name": {buildHome{outer: "qa-pve-02.example.invalid", getent: map[string]string{
-			"qa-pve-02.example.invalid": "198.51.100.20   STREAM qa-pve-02.example.invalid\n192.0.2.92      STREAM\n"}}, "pvh-nfs's address 192.0.2.92 is the outer host qa-pve-02.example.invalid"},
+		"the outer host by name": {buildHome{outer: "qa-pve-07.example.invalid", getent: map[string]string{
+			"qa-pve-07.example.invalid": "198.51.100.20   STREAM qa-pve-07.example.invalid\n192.0.2.92      STREAM\n"}}, "pvh-nfs's address 192.0.2.92 is the outer host qa-pve-07.example.invalid"},
 		"unresolvable": {buildHome{outer: "nowhere.example.invalid"}, "cannot resolve the outer host nowhere.example.invalid"},
 		// pveforge's loader refuses a target without a host.
 		"no host":        {buildHome{outer: "-"}, "cannot read " + outerRosterTail},
-		"no such target": {buildHome{roster: strings.Replace(outerRoster("host = \"198.51.100.20\"\n"), `"qa-pve-02-harness"`, `"qa-pve-02-other"`, 1)}, "harness-outer.toml names no target qa-pve-02-harness"},
+		"no such target": {buildHome{roster: strings.Replace(outerRoster("host = \"198.51.100.20\"\n"), `"qa-pve-07-harness"`, `"qa-pve-07-other"`, 1)}, "harness-outer.toml names no target qa-pve-07-harness"},
 		// A roster pveforge would not load is never read another way: here
 		// a host key inside [targets.ssh], which no roster has.
 		"not a roster pveforge loads": {buildHome{roster: outerRoster("host = \"198.51.100.20\"\n") + "\n  [targets.ssh]\n  user = \"root\"\n  host = \"192.0.2.90\"\n"}, "cannot read " + outerRosterTail},
@@ -1133,7 +1133,7 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 		"a bare host":             {buildHome{pins: "#!/bin/sh\necho 198.51.100.20\n"}, "cannot read " + outerRosterTail},
 		"the tool fails":          {buildHome{pins: "#!/bin/sh\necho '198.51.100.20 -'\nexit 2\n"}, "cannot read " + outerRosterTail},
 		"the tool prints nothing": {buildHome{pins: "#!/bin/sh\nexit 0\n"}, "cannot read " + outerRosterTail},
-		"the tool's no target":    {buildHome{pins: "#!/bin/sh\nexit 3\n"}, "names no target qa-pve-02-harness"},
+		"the tool's no target":    {buildHome{pins: "#!/bin/sh\nexit 3\n"}, "names no target qa-pve-07-harness"},
 		// Its stderr quotes roster values, and is never shown.
 		"the tool's stderr": {buildHome{pins: "#!/bin/sh\necho pins-stderr >&2\nexit 1\n"}, "cannot read " + outerRosterTail},
 	} {
@@ -1152,12 +1152,12 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 		})
 	}
 	// Resolved, and not one of the three: built.
-	r := runProbe(t, buildWorld(t, buildHome{outer: "qa-pve-02.example.invalid", getent: map[string]string{
-		"qa-pve-02.example.invalid": "198.51.100.20   STREAM qa-pve-02.example.invalid\n"}}))
+	r := runProbe(t, buildWorld(t, buildHome{outer: "qa-pve-07.example.invalid", getent: map[string]string{
+		"qa-pve-07.example.invalid": "198.51.100.20   STREAM qa-pve-07.example.invalid\n"}}))
 	if r.code != 0 {
 		t.Errorf("exit %d\n%s", r.code, r.stderr)
 	}
-	if got := r.buildEvidence(t, "outer-host"); got != "qa-pve-02.example.invalid: 198.51.100.20\n" {
+	if got := r.buildEvidence(t, "outer-host"); got != "qa-pve-07.example.invalid: 198.51.100.20\n" {
 		t.Errorf("outer-host %q", got)
 	}
 }
@@ -1174,10 +1174,10 @@ func TestBuild_OuterHostIsPveforges(t *testing.T) {
 		// A multi-line string holding a [[targets]] block for the same id,
 		// whose host is pvh-n1's address.
 		"a multi-line string": strings.Replace(outerRoster(real), testArmor,
-			"-----BEGIN AGE ENCRYPTED FILE-----\n[[targets]]\nid = \"qa-pve-02-harness\"\nhost = \"192.0.2.90\"\n-----END AGE ENCRYPTED FILE-----\n", 1),
-		"a comment on the header": strings.Replace(outerRoster(real), "[[targets]]\nnode = \"qa-pve-02\"", "[[targets]] # the harness\nnode = \"qa-pve-02\"", 1),
+			"-----BEGIN AGE ENCRYPTED FILE-----\n[[targets]]\nid = \"qa-pve-07-harness\"\nhost = \"192.0.2.90\"\n-----END AGE ENCRYPTED FILE-----\n", 1),
+		"a comment on the header": strings.Replace(outerRoster(real), "[[targets]]\nnode = \"qa-pve-07\"", "[[targets]] # the harness\nnode = \"qa-pve-07\"", 1),
 		"single quotes":           outerRoster("host = '198.51.100.20'\n"),
-		"an inline host":          strings.Replace(outerRoster(""), `id = "qa-pve-02-harness"`, `id = "qa-pve-02-harness"`+"\nhost = \"198.51.100.20\" # the outer host", 1),
+		"an inline host":          strings.Replace(outerRoster(""), `id = "qa-pve-07-harness"`, `id = "qa-pve-07-harness"`+"\nhost = \"198.51.100.20\" # the outer host", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := runProbe(t, buildWorld(t, buildHome{roster: roster}))
@@ -1197,7 +1197,7 @@ func TestBuild_SignalsDuringCleanup(t *testing.T) {
 	for _, sig := range []string{"INT", "TERM", "HUP"} {
 		t.Run(sig, func(t *testing.T) {
 			s := buildWorld(t, buildHome{tcp: map[string]string{"192.0.2.91_8006": "never"}})
-			s.kill = map[string]map[int]string{"post /nodes/qa-pve-02/qemu/692/status/stop": {1: "group:" + sig}}
+			s.kill = map[string]map[int]string{"post /nodes/qa-pve-07/qemu/692/status/stop": {1: "group:" + sig}}
 			r := runProbe(t, s)
 			if r.code != 4 || !strings.Contains(r.stderr, "build: cleanup: this run's VM(s) 690 691 692 destroyed") {
 				t.Fatalf("exit %d\n%s", r.code, r.stderr)
@@ -1296,7 +1296,7 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 		"nextid 400": {edit: func(s *probeSpec) { s.rc[bNextID("691")] = map[int]int{2: 1} }, left: []string{"691"}},
 		"nextid fails saying does not exist": {edit: func(s *probeSpec) {
 			s.rc[bNextID("691")] = map[int]int{2: 1}
-			s.err[bNextID("691")] = map[int]string{2: "Configuration file 'nodes/qa-pve-02/qemu-server/691.conf' does not exist"}
+			s.err[bNextID("691")] = map[int]string{2: "Configuration file 'nodes/qa-pve-07/qemu-server/691.conf' does not exist"}
 		}, left: []string{"691"}},
 		"nextid offers another VMID": {edit: func(s *probeSpec) { s.seq[bNextID("691")] = map[int]string{2: `"692"`} }, left: []string{"691"}},
 		"still in the pool":          {edit: func(s *probeSpec) { s.keepInPool = []string{"691"} }, left: []string{"691"}},
@@ -1317,7 +1317,7 @@ func TestBuild_CleanupNeedsPositiveProof(t *testing.T) {
 		// The destroy task of 691: WARNINGS (a disk PVE could not free), or
 		// no UPID printed.
 		"691's task WARNINGS": {edit: func(s *probeSpec) {
-			s.resp[bTask("691")] = taskStatus(bUPID("691"), "qa-pve-02", "qmdestroy", "691", "stopped", "WARNINGS: 1")
+			s.resp[bTask("691")] = taskStatus(bUPID("691"), "qa-pve-07", "qmdestroy", "691", "stopped", "WARNINGS: 1")
 		}, left: []string{"691"}},
 		"691's destroy printed no UPID": {edit: func(s *probeSpec) { s.resp[bDestroyKey("691")] = `null` }, left: []string{"691"}},
 		// 691's pveforge call fails with nothing on stdout (a wait that
