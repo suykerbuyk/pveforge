@@ -52,6 +52,13 @@ var _ NetworkFieldsClient = (*pve.RoutedClient)(nil)
 // makes this hold.
 var _ VMShutdownClient = (*pve.RoutedClient)(nil)
 
+// Compile-time proof that *pve.RoutedClient also satisfies
+// StorageCreateClient (storagecreate.go) — a separate narrow interface from
+// the ones above, for the same "narrow interface per Op" reason. The
+// CreateStorage and GetStorageConfig pass-throughs added to routed.go in this
+// task are what make this hold.
+var _ StorageCreateClient = (*pve.RoutedClient)(nil)
+
 // Compile-time proof that *pve.RoutedClient also satisfies VMCloneClient
 // (vmclone.go). Pins BOTH halves of the Chair-review fix this Op depends
 // on: RoutedClient.CloneVM and — the one an earlier design omitted —
