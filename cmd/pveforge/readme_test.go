@@ -836,8 +836,8 @@ func TestREADME_GuideHarnessGrantsAreD5s(t *testing.T) {
 		slices.Sort(out)
 		return out
 	}
-	d5 := grants("../../hack/harness/d5/sequence.md", "qa-pve-02-harness")
-	guide := grants("../../docs/operations/secrets-and-keys.md", "qa-pve-02-harness")
+	d5 := grants("../../hack/harness/d5/sequence.md", "qa-pve-07-harness")
+	guide := grants("../../docs/operations/secrets-and-keys.md", "qa-pve-07-harness")
 	if len(d5) != 4 || !slices.Equal(guide, d5) {
 		t.Errorf("the guide's harness grants %q are not D5 G4's %q", guide, d5)
 	}

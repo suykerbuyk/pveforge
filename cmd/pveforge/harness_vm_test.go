@@ -22,7 +22,7 @@ import (
 // mutation tests are named below; each asserts the CORRECT behaviour, so
 // reverting the fix it guards turns it red.
 
-const harnessNode = "qa-pve-02"
+const harnessNode = "qa-pve-07"
 
 // hfake is a stateful fake PVE for the harness verbs. Zero value is a
 // happy-path VM 690 (stopped, tagged, a qemu member of the harness pool on

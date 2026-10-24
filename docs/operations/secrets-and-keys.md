@@ -44,7 +44,7 @@ with `go test ./cmd/pveforge -run README`.
 | Age identity (harness) | A private `AGE-SECRET-KEY-1…` line per consumer, never committed. You point to it with `PVEFORGE_HARNESS_AGE_IDENTITY_FILE` (a file you own, mode 0600 or 0400). A CI runner has its content in its secret store as `PVEFORGE_HARNESS_AGE_IDENTITY`. Exactly one of the two may be set. | Your own storage and backups. | You. Each CI runner holds its own. | Never. |
 | `hack/harness/secrets.age` and `recipients.txt` | `secrets.age`: the two harness secrets as `NAME=value` lines, age-encrypted to every public recipient in `recipients.txt` (`<age1…> # <consumer>`). | Each recipient's private identity. Age does not authenticate who sealed a blob, so only two names are ever accepted from it (`PVEFORGE_ROSTER_PASSPHRASE`, `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD`). | Every recipient. | Both committed. That is safe only while every line in `recipients.txt` is one you reviewed. |
 | Nested test root password | In `secrets.age` as `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD`. It becomes a crypt hash in the nested installer ISOs, and is sent on stdin over SSH for n2's cluster join. For a nested node only, it reaches the bootstrap child's environment as `PVEFORGE_PVE_PASSWORD`. | The age identities. A test password, never the outer one. | The recipients, and harness steps run under `unlock.sh run`. | Only inside `secrets.age`. |
-| Outer root password (qa-pve-02) | Nowhere. Never stored, in no blob. | Not being written down anywhere pveforge or the harness can reach. | The operator only, typed at the prompt in their own terminal (D5 G4, or any bootstrap of an outer target). | Never. |
+| Outer root password (qa-pve-07) | Nowhere. Never stored, in no blob. | Not being written down anywhere pveforge or the harness can reach. | The operator only, typed at the prompt in their own terminal (D5 G4, or any bootstrap of an outer target). | Never. |
 
 **The roster file itself.** `pveforge roster init` creates it with mode 0600.
 Later writes keep an existing file's mode. The harness rosters live in
@@ -173,8 +173,8 @@ none"). `roster pin-tls` pins it without touching its token.
 - **A keyful target** (the roster holds its SSH key). Print first, then write:
 
   ```
-  pveforge roster pin-tls qa-pve-02 --roster ./pveforge.toml --print
-  pveforge roster pin-tls qa-pve-02 --roster ./pveforge.toml
+  pveforge roster pin-tls qa-pve-07 --roster ./pveforge.toml --print
+  pveforge roster pin-tls qa-pve-07 --roster ./pveforge.toml
   ```
 
   It captures over an SSH session pinned to the roster's stored host key. The
@@ -188,7 +188,7 @@ none"). `roster pin-tls` pins it without touching its token.
   you verified by other means:
 
   ```
-  pveforge roster pin-tls qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml --expect sha256//<verified-pin>
+  pveforge roster pin-tls qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml --expect sha256//<verified-pin>
   ```
 
   The address must serve exactly that key, and the pin is written with source
@@ -232,11 +232,11 @@ installed keypair and the TLS pin together, then mints a fresh token.
 3. Run your usual bootstrap line, adding `--reprovisioned` and the console
    value. Every run still needs `--grant` (the roster stores none),
    `--no-ssh-key` for a keyless target, `--capture-port` if you used one, and
-   the PVE password. For qa-pve-02, which two rosters address:
+   the PVE password. For qa-pve-07, which two rosters address:
 
    ```
-   pveforge bootstrap qa-pve-02 --roster ./pveforge.toml --reprovisioned --host-key-fingerprint SHA256:<console-value> --grant /:PVEVMAdmin::1
-   pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console-value> --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0'
+   pveforge bootstrap qa-pve-07 --roster ./pveforge.toml --reprovisioned --host-key-fingerprint SHA256:<console-value> --grant /:PVEVMAdmin::1
+   pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console-value> --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0'
    ```
 
    The grants must be exactly the held token's, since grants that differ are
@@ -336,11 +336,11 @@ nothing is persisted.
   paths or privileges differ from what the held token effectively has, the
   run REVOKES that token on PVE, for every holder, then mints a replacement. If
   the mint fails, the run ends `revoked_not_replaced`. Propagate defaults to
-  0. So the live `root@pam!pveforge` token on qa-pve-02 (PVEVMAdmin on `/`,
+  0. So the live `root@pam!pveforge` token on qa-pve-07 (PVEVMAdmin on `/`,
   propagate 1) must be re-requested with the trailing `::1`:
 
   ```
-  pveforge bootstrap qa-pve-02 --roster ./pveforge.toml --grant /:PVEVMAdmin::1
+  pveforge bootstrap qa-pve-07 --roster ./pveforge.toml --grant /:PVEVMAdmin::1
   ```
 
   The same grant without the trailing `::1` reads as too wide, which is a
@@ -631,5 +631,5 @@ step:
   `PVEFORGE_PVE_PASSWORD` only inside a nested bootstrap child's environment.
 - The harness guard requires a TLS pin on every nested target. It refuses a
   nested pin equal to an outer target's, and two nested targets sharing one.
-- No bootstrap of `qa-pve-02-harness` may run before G5's post-build checks
+- No bootstrap of `qa-pve-07-harness` may run before G5's post-build checks
   (hazard H-1, `hack/harness/d5/sequence.md`).

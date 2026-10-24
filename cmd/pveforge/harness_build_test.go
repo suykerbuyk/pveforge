@@ -21,7 +21,7 @@ import (
 // are asserted on the create form, the write log, result.txt and the returned
 // cause (exit 2/3/4 collapse through runRoot to 1).
 
-const bNode = "qa-pve-02"
+const bNode = "qa-pve-07"
 
 type bfake struct {
 	mu sync.Mutex

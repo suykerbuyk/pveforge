@@ -613,9 +613,9 @@ func d5WithoutPoolAudit(want []Grant, tree map[string]map[string]int) ([]Grant, 
 // d5MembersAns is GET /pools?poolid=pveforge-harness after the build, from
 // pve-manager Pool.pm c7d5332's source, NOT live-captured.
 var d5MembersAns = data(`[{"poolid":"pveforge-harness","comment":"pveforge nested harness (D5)","members":[` +
-	`{"id":"qemu/690","node":"qa-pve-02","type":"qemu","vmid":690},` +
-	`{"id":"qemu/691","node":"qa-pve-02","type":"qemu","vmid":691},` +
-	`{"id":"qemu/692","node":"qa-pve-02","type":"qemu","vmid":692}]}]`)
+	`{"id":"qemu/690","node":"qa-pve-07","type":"qemu","vmid":690},` +
+	`{"id":"qemu/691","node":"qa-pve-07","type":"qemu","vmid":691},` +
+	`{"id":"qemu/692","node":"qa-pve-07","type":"qemu","vmid":692}]}]`)
 
 // vmidTaken is PVE's /cluster/nextid answer for a vmid in use; vmidFreeAns
 // its answer for a free one (the id itself).
