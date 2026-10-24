@@ -15,7 +15,9 @@ import (
 //
 // The sites are pinned per file, so a new wait, or one the walk stopped
 // seeing, is a deliberate change here: 11 production waits, plus
-// RoutedClient's pass-through to Client.
+// RoutedClient's pass-through to Client, plus the Batch C harness capture
+// instrument's 4 waits (clone/start/destroy-oracle/cross-node create — all
+// //go:build harness, each given the caller's own ctx).
 func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 	sc, err := lockguard.ScanModule("../..")
 	if err != nil {
@@ -29,19 +31,20 @@ func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 		}
 	}
 	want := map[string]int{
-		"cmd/pveforge/api.go":                  1,
-		"cmd/pveforge/harness_vm.go":           1,
-		"internal/harness/build/build.go":      1,
-		"internal/harness/probe/probe.go":      5,
-		"internal/harness/reset/reset.go":      1,
-		"internal/idempotent/networkbridge.go": 1,
-		"internal/idempotent/networkfields.go": 1,
-		"internal/idempotent/vmclone.go":       1,
-		"internal/idempotent/vmcreate.go":      1,
-		"internal/idempotent/vmdestroy.go":     2,
-		"internal/idempotent/vmshutdown.go":    1,
-		"internal/pve/routed.go":               1,
-		"internal/pve/snapshot.go":             3,
+		"cmd/pveforge/api.go":                    1,
+		"cmd/pveforge/harness_vm.go":             1,
+		"internal/harness/build/build.go":        1,
+		"internal/harness/probe/probe.go":        5,
+		"internal/harness/reset/reset.go":        1,
+		"internal/idempotent/networkbridge.go":   1,
+		"internal/idempotent/networkfields.go":   1,
+		"internal/idempotent/vmclone.go":         1,
+		"internal/idempotent/vmcreate.go":        1,
+		"internal/idempotent/vmdestroy.go":       2,
+		"internal/idempotent/vmshutdown.go":      1,
+		"internal/pve/routed.go":                 1,
+		"internal/pve/snapshot.go":               3,
+		"internal/pve/capture_harness_batchc.go": 4,
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("WaitForTask calls per file = %v\nwant %v", got, want)

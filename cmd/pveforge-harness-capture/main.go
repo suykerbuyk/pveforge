@@ -11,11 +11,18 @@
 // outside `go test`), so this tool can dial the nested `pvh` cluster, while the
 // package-pve capture code stays verifiable on loopback under the test guard.
 //
-// It performs ONLY read-only GETs: the item-66 golden gate across the nested
-// nodes (every node's qemu list must be empty, else it refuses with
+// In its A-RO mode it performs read-only GETs: the item-66 golden gate across
+// the nested nodes (every node's qemu list must be empty, else it refuses with
 // "cluster not at golden"), and one raw GET whose negotiated protocol and raw
 // pre-unwrap body bytes (with sha256) answer item 66's null-vs-[] and item 68's
-// HTTP/2. It writes nothing to the cluster.
+// HTTP/2.
+//
+// It is NO LONGER read-only. The A-MUT legs read UPIDs of mutations the operator
+// ran; the Batch C legs (items 74/75/77) make the tool ITSELF a mutator — it
+// clones, snapshots, creates and destroys nested guests — and clean up the
+// guests they create via DestroyVM + the gone oracle. Never point a Batch C run
+// at anything but the disposable nested `pvh` cluster. Batch C guest VMIDs are
+// bounded by the 2026-09-24 operator ruling (create/destroy 690–699 inclusive).
 //
 // Usage:
 //
@@ -82,6 +89,12 @@ type captureReport struct {
 	UPIDSpellings    []pve.UPIDSpelling   `json:"upid_spellings,omitempty"`
 	TaskExitStatuses []pve.TaskExitStatus `json:"task_exit_statuses,omitempty"`
 
+	// Batch C (storage-free safety): items 74/75/76/77.
+	CloneVolid     *pve.CloneVolidCapture      `json:"clone_volid,omitempty"`      // C1 (74)
+	VmstateSection *pve.SnapshotSectionCapture `json:"vmstate_section,omitempty"`  // C2 (75)
+	TokenShortList *pve.TokenShortListCapture  `json:"token_short_list,omitempty"` // C3 (76)
+	CrossNodeVMID  *pve.CrossNodeCreateCapture `json:"cross_node_vmid,omitempty"`  // C4 (77)
+
 	// Errors records a per-leg failure without aborting the whole capture.
 	Errors []string `json:"errors,omitempty"`
 }
@@ -90,6 +103,14 @@ type captureReport struct {
 // golden gate (which requires zero guests) is skipped: A-MUT needs a live guest.
 func amutRequested(agentVMID, qmcreateVMID int, upids []string, vzdumpUPID, userUPID, exitstatusUPID string) bool {
 	return agentVMID != 0 || qmcreateVMID != 0 || len(upids) > 0 || vzdumpUPID != "" || userUPID != "" || exitstatusUPID != ""
+}
+
+// batchcRequested reports whether any Batch C capture flag is set. Like
+// amutRequested it suppresses the golden gate: every Batch C leg needs ≥1 live
+// nested guest, so a Batch-C-only run must NOT also demand a zero-guest cluster.
+// It is folded into amutMode at the same site so a Batch C run skips the gate.
+func batchcRequested(c1CloneVMID, c2VMID, c4TakenVMID int, c3RestrictedTarget string) bool {
+	return c1CloneVMID != 0 || c2VMID != 0 || c4TakenVMID != 0 || c3RestrictedTarget != ""
 }
 
 // qmcreateSpellingErrors asserts a recovered qmcreate UPID's spelling: type
@@ -161,6 +182,20 @@ func run() int {
 	userUPID := flag.String("user-upid", "", "item-70b: a UPID to assert the user field of (empty=skip)")
 	expectUser := flag.String("expect-user", "", "item-70b: the user field -user-upid must carry")
 	exitstatusUPID := flag.String("exitstatus-upid", "", "item-69: a UPID; reads PVE's own task status and asserts exitstatus ^WARNINGS: n$ (empty=skip)")
+	// Batch C probes (each optional; 0/empty = skip). The tool MUTATES for these.
+	c1CloneStorage := flag.String("c1-clone-storage", "", "item-74: the nested storage the clone/template live on (e.g. local-lvm)")
+	c1TemplateVMID := flag.Int("c1-template-vmid", 0, "item-74: an existing TEMPLATE VMID to linked-clone (operator precondition — OQ-5)")
+	c1CloneVMID := flag.Int("c1-clone-vmid", 0, "item-74: the VMID for the linked clone (690–699); created+destroyed by this tool (0=skip)")
+	c2Storage := flag.String("c2-storage", "", "item-75: the nested storage the guest's disk lives on")
+	c2VMID := flag.Int("c2-vmid", 0, "item-75: an existing guest VMID to start+snapshot (vmstate); its snapshot is deleted after (0=skip)")
+	c2Snap := flag.String("c2-snap", "", "item-75: the snapshot name to create (required with -c2-vmid)")
+	c3RestrictedTarget := flag.String("c3-restricted-target", "", "item-76: a SECOND roster target (view-restricted token, OQ-3) to compare list length against (empty=skip)")
+	c3Storage := flag.String("c3-storage", "", "item-76: the storage the hidden VM's volume lives on")
+	c3HiddenVolid := flag.String("c3-hidden-volid", "", "item-76: a volid owned by a VM the restricted token cannot see")
+	c3HiddenVMID := flag.Int("c3-hidden-vmid", 0, "item-76: the VMID that owns -c3-hidden-volid (for OrphanVolumesForVMID, the free's DELETE selector)")
+	c4TakenVMID := flag.Int("c4-taken-vmid", 0, "item-77: a VMID that already exists on -c4-other-node; a colliding create is attempted on the target node (0=skip)")
+	c4OtherNode := flag.String("c4-other-node", "", "item-77: the node where -c4-taken-vmid already exists")
+	c4FreeVMID := flag.Int("c4-free-vmid", 0, "item-77: a VMID known FREE, for the nextid free-direction probe")
 	flag.Parse()
 
 	if *target == "" {
@@ -215,7 +250,8 @@ func run() int {
 	// A-MUT run is a SEPARATE prior A-RO invocation, before the guest is
 	// created. In A-MUT mode gateErr stays nil, so the exit reflects the A-MUT
 	// assertions alone, never a golden refusal.
-	amutMode := amutRequested(*agentVMID, *qmcreateVMID, upids, *vzdumpUPID, *userUPID, *exitstatusUPID)
+	amutMode := amutRequested(*agentVMID, *qmcreateVMID, upids, *vzdumpUPID, *userUPID, *exitstatusUPID) ||
+		batchcRequested(*c1CloneVMID, *c2VMID, *c4TakenVMID, *c3RestrictedTarget)
 	var gateErr error
 	if !amutMode {
 		shapes, err := c.GoldenGateEmpty(ctx, []string(nodes))
@@ -367,6 +403,63 @@ func run() int {
 			if !es.IsWarnings {
 				report.Errors = append(report.Errors, fmt.Sprintf("item-69: task %q exitstatus %q is not WARNINGS: n (vacuous — re-induce)", *exitstatusUPID, es.ExitStatus))
 			}
+		}
+	}
+
+	// ---- Batch C captures (items 74/75/76/77). The tool MUTATES here. ----
+	// Each leg's Failures() — not any exit status — is the gate: a failed
+	// assertion appends to report.Errors (the A-MUT branch), and the tool exits
+	// nonzero below. Each live orchestrator cleans up the guests it creates.
+
+	// item 74: linked-clone disk volid identity on nested local-lvm.
+	if *c1CloneVMID != 0 {
+		if *c1TemplateVMID == 0 || *c1CloneStorage == "" {
+			report.Errors = append(report.Errors, "item-74: -c1-template-vmid and -c1-clone-storage are required with -c1-clone-vmid")
+		} else if capt, err := c.RunCloneVolidCapture(ctx, probeNodeName, *c1CloneStorage, *c1TemplateVMID, *c1CloneVMID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.CloneVolid = capt
+			report.Errors = append(report.Errors, capt.Failures()...)
+		}
+	}
+
+	// item 75: vmstate / snapshot-section claimed-surface gap.
+	if *c2VMID != 0 {
+		if *c2Snap == "" || *c2Storage == "" {
+			report.Errors = append(report.Errors, "item-75: -c2-snap and -c2-storage are required with -c2-vmid")
+		} else if capt, err := c.RunVmstateCapture(ctx, probeNodeName, *c2Storage, *c2VMID, *c2Snap); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.VmstateSection = capt
+			report.Errors = append(report.Errors, capt.Failures()...)
+		}
+	}
+
+	// item 76: token-view-rights short list (two clients; restricted is OQ-3).
+	if *c3RestrictedTarget != "" {
+		if *c3Storage == "" || *c3HiddenVolid == "" || *c3HiddenVMID == 0 {
+			report.Errors = append(report.Errors, "item-76: -c3-storage, -c3-hidden-volid and -c3-hidden-vmid are required with -c3-restricted-target")
+		} else if rt := r.Find(*c3RestrictedTarget); rt == nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("item-76: restricted target %q not found in %s", *c3RestrictedTarget, *rosterPath))
+		} else if restricted, err := pve.NewClientForTarget(rt, passphrase); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("item-76: build restricted client: %v", err))
+		} else if capt, err := c.CaptureTokenShortList(ctx, restricted, probeNodeName, *c3Storage, *target, *c3RestrictedTarget, *c3HiddenVolid, *c3HiddenVMID); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.TokenShortList = capt
+			report.Errors = append(report.Errors, capt.Failures()...)
+		}
+	}
+
+	// item 77: cross-node VMID collision + the nextid oracle, both directions.
+	if *c4TakenVMID != 0 {
+		if *c4OtherNode == "" || *c4FreeVMID == 0 {
+			report.Errors = append(report.Errors, "item-77: -c4-other-node and -c4-free-vmid are required with -c4-taken-vmid")
+		} else if capt, err := c.RunCrossNodeCapture(ctx, *c4TakenVMID, *c4FreeVMID, *c4OtherNode, probeNodeName); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+		} else {
+			report.CrossNodeVMID = capt
+			report.Errors = append(report.Errors, capt.Failures()...)
 		}
 	}
 
