@@ -1,0 +1,76 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-access-keys - List pveforge's SSH keys in root's authorized_keys, and which roster holds each (read-only)
+
+
+.SH SYNOPSIS
+\fBpveforge access keys <target-id> [flags]\fP
+
+
+.SH DESCRIPTION
+List every key in root's authorized_keys on a target whose comment begins
+pveforge@, read as root over SSH, and say which roster target holds each: a
+target whose [targets.ssh] public_key is exactly that line. Nothing is
+written, and nothing is removed.
+
+.PP
+On PVE, root's authorized_keys is /etc/pve/priv/authorized_keys, shared by
+every node of the cluster: the list is the cluster's, whichever node is read.
+
+.PP
+A key no roster checked holds is a "stray", listed with remove_command: the
+exact command that removes that one line when run as root on the node. It
+removes the line only if it appears exactly once, writes nothing if the
+file changes while it runs, and writes the new file beside the resolved
+target (on PVE in /etc/pve/priv) and renames it onto it, so the symlink
+~/.ssh/authorized_keys is never replaced and the cluster's file never
+unshared. A stray whose line holds a carriage return (a CRLF file) gets no
+command (remove_command_withheld says why): remove it by hand. A stray is
+typically left by a first bootstrap that failed after installing its key,
+on a pveforge older than the one that removes its own key again. pveforge
+never removes a stray itself.
+
+.PP
+A key is held when a target's public_key is the same key, whatever options
+(from="...", no-pty) or comment the line in the file carries. A target whose
+public_key does not parse is listed in unverifiable, and while any is, no
+stray gets a remove_command (remove_command_withheld says why): its live key
+could otherwise read as a stray. Only root's authorized_keys is read.
+
+.PP
+The rosters checked are --roster (the one the target is read from) and each
+--also-roster. A key that another roster uses, one not checked (a
+colleague's, one on another machine, a test roster), ALSO reads as a stray:
+check every roster that can reach this cluster before removing anything.
+Lines without a pveforge@ comment are never listed.
+
+
+.SH OPTIONS
+\fB--also-roster\fP=[]
+	another roster whose SSH keys count as held (repeatable): every roster that can reach this cluster, so a key one of them uses is not reported as a stray
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for keys
+
+.PP
+\fB--host-key-fingerprint\fP=""
+	the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves.
+
+.PP
+\fB--no-ssh-key\fP[=false]
+	connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-access(1)\fP

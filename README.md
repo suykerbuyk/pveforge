@@ -47,6 +47,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `user ensure`, `group ensure` | Create a PVE user or group, or bring it to the state asked for (as root over SSH) |
 | `acl grant` | Grant a role on a path to a user, group or token (as root over SSH) |
 | `access inventory` | List every user, group and ACL entry, and each `@pam` user's account on the node (read as root over SSH) |
+| `access keys` | List pveforge's SSH keys in root's `authorized_keys`, which roster holds each, and each stray's manual removal command (read-only) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
 | `vm snapshot list` / `create` / `delete` / `rollback` | List, create and delete a VM's snapshots; roll back to the newest one and prove the guest came back |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
@@ -141,7 +142,7 @@ not.
 |---|---|
 | `PVEFORGE_ROSTER` | Roster path, when `--roster` is not given |
 | `PVEFORGE_ROSTER_PASSPHRASE` | The roster passphrase; without it, a terminal prompt (never for `roster import-token`, whose stdin is the token secret). Removed from `exec`'s command's environment |
-| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password, and root's password for `user ensure`, `group ensure`, `acl grant` and `access inventory` with `--no-ssh-key`; without it, a terminal prompt. Removed from `exec`'s command's environment |
+| `PVEFORGE_PVE_PASSWORD` | `bootstrap`'s PAM login password, and root's password for `user ensure`, `group ensure`, `acl grant`, `access inventory` and `access keys` with `--no-ssh-key`; without it, a terminal prompt. Removed from `exec`'s command's environment |
 | `PVEFORGE_HARNESS_AGE_IDENTITY_FILE` | Not read by pveforge. The nested-harness secrets helper (`hack/harness/unlock.sh`): a file holding one consumer's private age identity, mode 0600 or 0400, owned by the user; see "Harness secrets". Removed from `unlock.sh run`'s command's environment |
 | `PVEFORGE_HARNESS_AGE_IDENTITY` | Not read by pveforge. The same identity's content, for a CI runner's secret store; exactly one of the two may be set. Removed from `unlock.sh run`'s command's environment |
 | `PVEFORGE_HARNESS_ROSTER` | Not read by pveforge. The nested-harness suites (`make harness`): the absolute path of the roster whose targets are the nested `pvh-*` nodes. The suites refuse to run without it, or when it is the same file as an outer roster |
@@ -447,6 +448,14 @@ signal kills the process immediately. The kernel releases any lock it held.
 
 These rest on PVE's documentation or source, not yet on observation. Each is
 owed to the nested PVE test harness:
+
+- A failed first bootstrap's removal of its own key from root's
+  `authorized_keys`: that pmxcfs allows creating `authorized_keys.tmp.*`
+  beside `/etc/pve/priv/authorized_keys` and renaming it onto it; that the
+  other nodes see the result; that `~/.ssh/authorized_keys` stays a symlink;
+  that root logins during the rename survive it; that with quorum lost the
+  removal fails at that create and leaves the file intact; and that a hangup
+  mid-run leaves no `.tmp.` file in `/etc/pve/priv`.
 
 - `vm set`'s pending-change detection: the `/pending` answer's shape, that a
   stopped VM reports nothing pending, and that hot-pluggable changes are not

@@ -23,6 +23,11 @@ func (realSSHTransport) InstallPubkeyViaPassword(ctx context.Context, addr, user
 	if err != nil {
 		return "", err
 	}
+	// res.AlreadyPresent is dropped on purpose: bootstrap generates a fresh
+	// keypair for every install, so its line can only already be present if
+	// the same freshly generated key was installed before, which cannot
+	// happen. A run that removes its key again (operator ruling T2k) removes
+	// a line it put there itself either way.
 	return res.HostKeyFingerprint, nil
 }
 

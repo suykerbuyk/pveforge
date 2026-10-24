@@ -711,8 +711,9 @@ ciphertext, so the file stays reviewable.
   or sent, and before any pin is stored. The order governs the roster and the
   token; one node-side write precedes it: a keyful first run installs its
   public key in the node's `authorized_keys` during the password session,
-  before step 1, which is where a failed first run's stray key line comes
-  from (a known gap, below). Whatever step a run fails at, every pin it
+  before step 1. A run that fails before the roster holds that key removes
+  it again (below); stray lines left by earlier runs remain a known gap,
+  below. Whatever step a run fails at, every pin it
   stored came from the one session pinned to the operator's fingerprint (or
   trusted on first use under `--ssh-tofu`, and recorded as such), so a retry
   is sound; the guide walks through what a retry finds. No state exists in
@@ -775,6 +776,29 @@ ciphertext, so the file stays reviewable.
   - Every mismatch message labels the presented key "Do NOT pin", points to
     the console, and never fills a presented key into a suggested command. A
     test holds that wording.
+
+**A failed run's own SSH key (operator ruling T2k, 2026-09-26).** A first
+run or a reprovision installs a key it generated, then captures, then writes
+the roster. If it fails in that window it removes exactly that line again: a
+whole-line match, over the session it opened with that key (or, if that
+dial failed, over a password session pinned to the host key the install was
+checked against), refusing unless the line appears exactly once, writing
+nothing if the file changed meanwhile, and writing the new file beside the
+resolved target and renaming it onto it, as PVE's own `file_set_contents`
+writes `/etc/pve/priv/authorized_keys`, so PVE's symlink to that
+cluster-shared file survives and no reader sees a truncated file. A line
+another writer adds between the last check and the rename is lost (an
+accepted risk: the window is two commands wide, PVE's own lockless
+`ssh_merge_keys` takes the same one, and no lock helps). An install whose
+outcome is unknown (its script was sent, then failed or timed out) is
+reported with the manual command; install also guarantees its line starts
+on a line of its own. A comment is never a match key:
+`pveforge@<target>` is not unique to a roster, since two rosters can hold the
+same target id, and removing by comment could cut another roster's root
+access on every node. Nothing is removed on success, or once the roster
+holds the key. Strays from earlier runs are reported read-only (`access
+keys`, with the exact manual command) and never removed by pveforge. The
+removal's behaviour on pmxcfs is owed a live check on the nested harness.
 
 **Encryption at rest.**
 - **Each secret value is its own armored age ciphertext.** It uses a scrypt
@@ -905,10 +929,11 @@ rollout order (upgrade every reader of a roster before pinning it).
   is built or managed by pveforge.
 - **Multi-operator access to one roster.** Rosters keep a single passphrase
   (see §6 item 5).
-- **These are known gaps, recorded rather than built** (§8 names the work in
-  flight on the second; none is in flight on the first):
+- **These are known gaps, recorded rather than built** (none is in flight):
   - a command to rotate the SSH keypair of a node that was not rebuilt;
-  - removal of stray `authorized_keys` lines left by failed first runs.
+  - removal of stray `authorized_keys` lines left by earlier runs: `access
+    keys` reports them read-only, with the exact command to remove each by
+    hand (operator ruling T2k).
 
 ### 4.2 Command surface
 
@@ -925,7 +950,7 @@ are, and both are generated from the command tree and held to it by tests.
 | `network` (`get`, `set`, `bridge create`, `bridge destroy`) | Node network interfaces | Token over REST, PVE's stage-then-commit | One lock per node. `bridge create` and `bridge destroy` require a `--management-bridge` canary read before and after staging; `set` instead proves every other interface on the node unchanged. A staged change pveforge did not make reverts the stage rather than be swept in; no bypass |
 | `node` (`get`) | Read node state | Nothing | Read-only |
 | `storage` (`get`, `orphans`, `create`) | Read storage state and create storage definitions | Token over REST (`create` only) | `storage orphans` keeps no state, fails closed on any read it cannot trust, and refuses shared storage; its output is not a list of volumes safe to delete. `storage create` writes the cluster-wide `storage.cfg` (datacenter, not node-scoped), needs `Datastore.Allocate` at `/storage` — a storage-pool token with only `Datastore.AllocateSpace` cannot — is idempotent, and refuses a differing definition rather than converging one |
-| `access inventory`, `user ensure`, `group ensure`, `acl grant` | PVE principals and ACLs | Root over SSH (`pveum`), never the token | The token must never hold `User.Modify` or `Permissions.Modify`. A grant to the roster's own token, its owner or a group it is in is refused; escalating roles need `--allow-escalating-role`; membership is only ever added; every write is read back as root |
+| `access inventory`, `access keys`, `user ensure`, `group ensure`, `acl grant` | PVE principals and ACLs, and pveforge's keys in root's `authorized_keys` | Root over SSH (`pveum`), never the token | The token must never hold `User.Modify` or `Permissions.Modify`. A grant to the roster's own token, its owner or a group it is in is refused; escalating roles need `--allow-escalating-role`; membership is only ever added; every write is read back as root. `access keys` only reads |
 | `api` (`get`, `post`, `put`, `delete`) | Any PVE REST path with no command yet | Token over REST | §3.1. Locks a modelled object, else needs `--unsafe-no-lock`; waits on a returned task; `/access` refused |
 | `discover`, `schema` | Describe PVE's schema and pveforge's own | Nothing | §3.5 |
 | `harness` (`stop`, `shutdown`, `destroy`, `gone`, `snapshot …`, `probe`) | Outer test-harness VM lifecycle and the storage-capability probe (operator-driven) | Token over REST | U-CORE/U-PROBE Go port of hack/harness/lib.sh and probe.sh. Acts only on VMs 690-699 that are tagged qemu members of the harness pool; reuses the snapshot ops and the fail-closed status-gated VMDestroy posture. `probe` creates and destroys VM 690 to measure a storage's rollback rule. Every state decision is on PVE's JSON, never its error text (except the probe's own storage-level rollback classification); the destructive tier is confined to these verbs |
@@ -937,7 +962,7 @@ holds this table to every runnable command's annotation, both ways):
 |---|---|
 | destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `storage create`, `vm snapshot delete`, `vm snapshot rollback`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe`, `harness golden`, `harness reset`, `harness build` |
 | mutating | `roster pin-tls`, `vm create`, `vm set`, `vm snapshot create`, `network set`, `network bridge create`, `user ensure`, `group ensure`, `harness vm snapshot create` |
-| safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
+| safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `access keys`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
 
 Cobra's own `help` and `completion` commands carry no tier.
 
@@ -1237,12 +1262,11 @@ document describes `main` only. Where work exists, it is staged in a
 worktree with no commits yet: its branch still points at an older `main`.
 
 - **TLS pinning, remainder** (`pveforge-rest-tls-certificate-pinning`): T1a
-  to T3 are merged. T2k (staged in the `t2k` worktree; sent back in review)
-  removes pveforge's own `authorized_keys` line after a failed first run and
-  adds a read-only access-keys report of stray lines; removing strays left by
-  earlier runs stays manual (operator ruling). It addresses §4.1's second
-  known gap; nothing is in flight on SSH keypair rotation. (The byte cap on
-  the TLS capture's output, once a third gap, has landed: §4.1.)
+  to T3 and T2k are merged. T2k's removal of a failed run's own
+  `authorized_keys` line is owed its live checks on the nested harness
+  (§4.1); removing strays left by earlier runs stays manual (operator
+  ruling). Nothing is in flight on SSH keypair rotation. (The byte cap on the
+  TLS capture's output has landed: §4.1.)
 - **Keyless targets cannot store a host-key pin**
   (`pveforge-keyless-target-host-key-pin`): every `--no-ssh-key` run needs
   the fingerprint again, or trusts the host key on first use (only with

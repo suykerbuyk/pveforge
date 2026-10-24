@@ -484,12 +484,21 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 		hostKeyFP, err := transport.InstallPubkeyViaPassword(ctx, addr, sshUser, opts.PVEPassword, keypair.AuthorizedKeyLine, opts.HostKeyFingerprint)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap %s: install pubkey: %w", opts.TargetID, err)
+			cause := fmt.Errorf("bootstrap %s: install pubkey: %w", opts.TargetID, err)
+			if errors.Is(err, sshexec.ErrNoCommandSent) {
+				return nil, cause // nothing ran on the node: no key was installed
+			}
+			// The install script was sent: whether it appended the key
+			// before it failed (or timed out) is unknown.
+			return nil, keyLeftBehind(cause, opts.Host, sshUser, keypair.AuthorizedKeyLine, "the install's outcome is unknown")
 		}
 
 		session, err := transport.DialWithKey(ctx, addr, sshUser, keypair.PrivateKeyPEM, hostKeyFP)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap %s: connect with fresh key: %w", opts.TargetID, err)
+			// Ruling (a): still before the roster holds the key, so it is
+			// removed, over a password session pinned to the host key the
+			// install was checked against.
+			return nil, r.dropKeyOverPassword(fmt.Errorf("bootstrap %s: connect with fresh key: %w", opts.TargetID, err), addr, sshUser, hostKeyFP, keypair.AuthorizedKeyLine)
 		}
 		r.session = session
 		defer func() { _ = r.session.Close() }()
@@ -501,7 +510,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		// operator, and can never pass the pin off as ssh-stored.
 		if captureTLS {
 			if err := tls.capture(r.session); err != nil {
-				return nil, err
+				return nil, r.dropInstalledKey(err, keypair.AuthorizedKeyLine)
 			}
 		}
 
@@ -522,11 +531,13 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 				if tls.replaced {
 					done = fmt.Sprintf("; the TLS pin was already replaced (previous %s), the SSH host key pin was not (still %s): re-run the same command to finish", tls.previous, existing.HostKeyFingerprint)
 				}
-				return nil, fmt.Errorf("bootstrap %s: replace ssh auth: %w%s", opts.TargetID, err, done)
+				return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: replace ssh auth: %w%s", opts.TargetID, err, done), keypair.AuthorizedKeyLine)
 			}
-		} else if err := roster.WriteSSHAuth(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
-			return nil, fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err)
+		} else if err := writeSSHAuthFn(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
+			return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err), keypair.AuthorizedKeyLine)
 		}
+		// From here the roster holds the key: it is the target's live key,
+		// and nothing in this run may remove it.
 	}
 	r.res = &Result{HostKeyFingerprint: r.ident.hostKeyFP, TokenID: fullTokenID}
 
@@ -1805,4 +1816,78 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 		res.OrphanedToken = held.ID
 	}
 	return res, nil
+}
+
+// dropInstalledKey is operator ruling T2k (2026-09-26): a first run (or a
+// reprovision) that installed line, a key it generated itself, and then
+// failed before the roster held it removes exactly that line again, over
+// the session it opened with that key. Nothing else is ever removed: the
+// match is the whole line (sshexec.RemoveAuthorizedKeyScript), and a key
+// the roster holds is out of reach, since this runs only before the roster
+// write succeeds. The result is cause, with what happened to the key added.
+func (r *runner) dropInstalledKey(cause error, line string) error {
+	return r.dropKeyOver(r.session, cause, r.ident.user, line)
+}
+
+// dropKeyOverPassword is dropInstalledKey for a run whose dial with its
+// fresh key failed (operator ruling (a), T2k 2026-10-02): the key is
+// removed over a password session pinned to hostKeyFP, the host key the
+// install was checked against. A run with no such fingerprint, or whose
+// password session fails too, reports the key instead.
+func (r *runner) dropKeyOverPassword(cause error, addr, user, hostKeyFP, line string) error {
+	if hostKeyFP == "" {
+		return keyLeftBehind(cause, r.opts.Host, user, line, "no host key fingerprint to pin a password session to")
+	}
+	ctx, cancel := r.cleanupCtx()
+	defer cancel()
+	s, _, err := r.transport.DialWithPassword(ctx, addr, user, r.opts.PVEPassword, hostKeyFP)
+	if err != nil {
+		return keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("no session to remove it over: the password session failed too: %v", err))
+	}
+	defer func() { _ = s.Close() }()
+	return r.dropKeyOver(s, cause, user, line)
+}
+
+// dropKeyOver removes line over s, a session logged in as user, from that
+// user's authorized_keys (sshexec.RemoveAuthorizedKeyScript), and returns
+// cause with what happened to the key added. user is the SSH login, root
+// unless --pve-user named another @pam user: the key went into that
+// login's ~/.ssh/authorized_keys, and it is that file the error names.
+func (r *runner) dropKeyOver(s SSHSession, cause error, user, line string) error {
+	script, err := sshexec.RemoveAuthorizedKeyScript(line)
+	if err != nil {
+		return keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("it was not removed: %v", err))
+	}
+	ctx, cancel := r.cleanupCtx()
+	defer cancel()
+	res, err := s.Run(ctx, script)
+	switch {
+	case err != nil:
+		return keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("removing it failed: %v", err))
+	case res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "removed":
+		return keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("removing it was refused (exit %d, %s)", res.ExitCode, strings.TrimSpace(res.Stdout)))
+	}
+	return fmt.Errorf("%w; the SSH key this run had installed on the node (%s) was removed from %s's authorized_keys again", cause, keyComment(line), user)
+}
+
+// keyLeftBehind is cause, saying that this run's key may still be in
+// user's authorized_keys on host (user is the SSH login the key was
+// installed for: root, or the @pam user --pve-user named), and how to
+// remove exactly it by hand, as that user: the manual command edits
+// ~/.ssh/authorized_keys, so run as anyone else it would find nothing. The
+// line is a public key: printing it discloses nothing.
+func keyLeftBehind(cause error, host, user, line, why string) error {
+	manual, err := sshexec.ManualKeyRemovalCommand(line)
+	if err != nil {
+		return fmt.Errorf("%w; the SSH key this run installed may still be in %s's authorized_keys on %s (%s), and no removal command can be given for it: %v", cause, user, host, why, err)
+	}
+	return fmt.Errorf("%w; the SSH key this run installed may still be in %s's authorized_keys on %s (%s): remove exactly it as %s on the node with: %s", cause, user, host, why, user, manual)
+}
+
+// keyComment is an authorized_keys line's comment (pveforge@<target>).
+func keyComment(line string) string {
+	if f := strings.Fields(line); len(f) >= 3 {
+		return strings.Join(f[2:], " ")
+	}
+	return "its key"
 }

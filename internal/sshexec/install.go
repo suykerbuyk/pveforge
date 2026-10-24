@@ -36,12 +36,15 @@ func InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authori
 	if pin != "" {
 		var err error
 		if cb, err = ExpectedHostKeyCallback(pin); err != nil {
-			return nil, fmt.Errorf("install pubkey: %w", err)
+			return nil, fmt.Errorf("install pubkey: %w (%w)", err, ErrNoCommandSent)
 		}
 	}
+	// A failed dial (refused password, host key, network) ran nothing on
+	// the node: it matches ErrNoCommandSent, so a caller can tell it from an
+	// install whose outcome is unknown.
 	client, err := DialWithPassword(ctx, addr, user, password, cb)
 	if err != nil {
-		return nil, fmt.Errorf("install pubkey: %w", err)
+		return nil, fmt.Errorf("install pubkey: %w (%w)", err, ErrNoCommandSent)
 	}
 	defer func() { _ = client.Close() }()
 
@@ -67,7 +70,12 @@ func InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authori
 // buildIdempotentAppendScript returns a POSIX sh script that ensures
 // ~/.ssh/authorized_keys exists with the right permissions and contains
 // line exactly once, printing "present" if it was already there or "added"
-// if this run appended it.
+// if this run appended it. Before it appends, a file that does not end in a
+// newline gets one, so the line can never be glued onto the last line's
+// comment (where no whole-line match, automatic or manual, could ever find
+// it again). That guard is in the else branch: a run that finds the line
+// already present never writes the file, which on PVE is the cluster's
+// shared /etc/pve/priv/authorized_keys.
 func buildIdempotentAppendScript(line string) string {
 	q := ShellQuote(line)
 	return fmt.Sprintf(`set -e
@@ -78,6 +86,7 @@ chmod 600 ~/.ssh/authorized_keys
 if grep -qxF %s ~/.ssh/authorized_keys; then
   echo present
 else
+  [ -s ~/.ssh/authorized_keys ] && [ -n "$(tail -c1 ~/.ssh/authorized_keys)" ] && echo >> ~/.ssh/authorized_keys
   echo %s >> ~/.ssh/authorized_keys
   echo added
 fi

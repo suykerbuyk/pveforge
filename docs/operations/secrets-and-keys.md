@@ -359,10 +359,65 @@ nothing is persisted.
   `/etc/pve/priv/authorized_keys`, shared by the whole cluster. The roster
   still holds the dead keypair, and every keyful command then fails to
   connect.
-- **Stray keys.** A first run that fails after installing its key (a failed
-  cross-check, say) leaves that key in `authorized_keys`, and each retry adds
-  another, all with the same comment. Remove the lines whose key is not the
-  roster's `public_key`. No command does this yet.
+- **A failed run removes its own key.** A first run (or a reprovision)
+  installs a freshly generated key before it captures the TLS pin and writes
+  the roster. If it fails in between, it removes exactly that line again,
+  matched by the whole key, and says so in its error: `the SSH key this run
+  had installed on the node (pveforge@<target>) was removed from root's
+  authorized_keys again`. The key goes into the SSH login's own
+  `~/.ssh/authorized_keys`: root's, unless `--pve-user` names another `@pam`
+  user, and then the messages name that user's file instead of root's. It removes it over the connection it opened with
+  that key or, if that connection itself failed, over a password connection
+  pinned to the host key the install was checked against. It removes nothing
+  else, and nothing once the roster holds the key.
+  - The removal writes the new file beside the real one (on PVE in
+    `/etc/pve/priv`) and renames it onto it, as PVE itself writes that file:
+    `~/.ssh/authorized_keys` stays a symlink, and a login never reads a
+    half-written file. Any failure leaves the file as it was.
+  - If the removal cannot be made (no connection, the line not found exactly
+    once, the file changed meanwhile, or an install whose outcome is unknown,
+    such as a timeout), the error says the key `may still be` there and gives
+    the exact command to remove that one line by hand. Run it as the user the
+    error names (root, or the `--pve-user` login): it edits that user's own
+    `~/.ssh/authorized_keys`, so run as anyone else it finds nothing.
+  - A line written by another process between the removal's last check and
+    its rename is lost, for example a node key from `pvecm updatecerts`. The
+    window is two commands wide, and PVE's own writer takes the same risk; if
+    nodes cannot reach each other by SSH afterwards, rerun `pvecm
+    updatecerts`.
+- **Stray keys from earlier runs** (older pveforge versions, or removals
+  that failed) stay manual. List them, read-only:
+
+  ```
+  pveforge access keys qa-pve-02 --roster ./pveforge.toml --also-roster ~/.config/pveforge/harness-outer.toml
+  ```
+
+  It reads root's `authorized_keys` and lists every `pveforge@` key, with
+  `held_by` (each roster target whose `public_key` is the same key, whatever
+  options the line carries) or `stray`, and for each stray a
+  `remove_command`. It changes nothing. A file it cannot read is an error,
+  never an empty list: on PVE a dangling symlink means pmxcfs is down.
+  - It reads root's `authorized_keys` only. A key a run installed for
+    another `@pam` login (`--pve-user`) is in that user's own file, which
+    `access keys` does not report.
+  - A roster target whose `public_key` does not parse is listed under
+    `unverifiable`. While any is, no stray gets a `remove_command`
+    (`remove_command_withheld` says why): that target's live key could
+    otherwise read as a stray. Fix its `public_key`, then report again.
+  - **A key used by a roster you did not name also shows as a stray.** Name
+    every roster that can reach the cluster with `--also-roster`, including
+    other people's, before removing anything. Removing a key a roster still
+    uses cuts that roster's root access on every node of the cluster.
+  - Run the `remove_command` as root on the node, one stray at a time. It is
+    the same program as the automatic removal: it removes the line only if it
+    appears exactly once, writes nothing if the file changes meanwhile, and
+    renames a new file onto the real one, never onto the symlink. A stray in
+    a CRLF file has no command (`remove_command_withheld`): remove it by
+    hand. Never edit `~/.ssh/authorized_keys` on PVE with `sed -i` or an
+    editor that replaces the file: that turns the cluster's shared file into
+    a local one.
+  - **Verify:** run `access keys` again; the stray is gone and every other
+    line is still listed as before.
 - **No command rotates the keypair of a node that was not rebuilt.**
   `--reprovisioned` with the unchanged fingerprint runs as a plain bootstrap
   and keeps the keypair. What remains is the first-run path, in a new roster:

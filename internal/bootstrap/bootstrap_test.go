@@ -704,7 +704,8 @@ func TestRun_PubkeyInstallFailure(t *testing.T) {
 
 func TestRun_DialWithKeyFailure(t *testing.T) {
 	rosterPath := newTestRoster(t, "")
-	transport := &fakeTransport{installFingerprint: "SHA256:abc", dialErr: errors.New("handshake failed")}
+	// The session is the password one ruling (a) removes the key over.
+	transport := &fakeTransport{installFingerprint: "SHA256:abc", dialErr: errors.New("handshake failed"), session: &fakeSession{}}
 	validator := &fakeValidator{}
 
 	_, err := Run(context.Background(), baseOptions(rosterPath), transport, validator)
