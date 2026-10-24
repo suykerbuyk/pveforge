@@ -227,13 +227,13 @@ const (
 	stdInit  = "harness_init\nharness_declare_vmids 690\n"
 	stdInitS = stdInit + "harness_require_storage pveforge-harness\n"
 	keyPool  = "get /pools poolid=pveforge-harness"
-	keyConf  = "get /nodes/qa-pve-02/qemu/690/config"
+	keyConf  = "get /nodes/qa-pve-07/qemu/690/config"
 )
 
 // harnessWorld is the fake's default answers: VM 690 in the pool on
-// qa-pve-02, carrying the tag.
+// qa-pve-07, carrying the tag.
 var harnessWorld = map[string]string{
-	keyPool: `[{"poolid":"pveforge-harness","comment":"","members":[{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-02"}]}]`,
+	keyPool: `[{"poolid":"pveforge-harness","comment":"","members":[{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-07"}]}]`,
 	keyConf: `{"cores":"1","tags":"pveforge-harness"}`,
 }
 
@@ -501,7 +501,7 @@ func harnessCases() []harnessCase {
 		refused("storage twice", "harness_init\nharness_require_storage pveforge-harness\nharness_require_storage local-lvm\n", 2, "ran twice"),
 		{name: "storage ok", body: "harness_init\nharness_require_storage pveforge-harness\n[ \"$HARNESS_STORAGE\" = pveforge-harness ]\n", wantErr: " sha256 ", wantCalls: []string{}},
 		{name: "a default roster never reaches pveforge", env: map[string]string{"PVEFORGE_ROSTER": "/nonexistent/pveforge.toml"}, resp: map[string]string{"get /cluster/resources": "[]"},
-			body: "harness_init\nharness_get /cluster/resources >/dev/null\n", wantCalls: []string{"api get /cluster/resources qa-pve-02-harness --roster R -o json"}},
+			body: "harness_init\nharness_get /cluster/resources >/dev/null\n", wantCalls: []string{"api get /cluster/resources qa-pve-07-harness --roster R -o json"}},
 
 		// VMIDs: 690-699 matched as a string.
 		{name: "declare 690 and 699", body: "harness_init\nharness_declare_vmids 690 699\n", wantCalls: []string{}},
@@ -532,9 +532,9 @@ func harnessCases() []harnessCase {
 
 		// Pool, node and tag, before any change.
 		{name: "not a pool member", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[]}]`}, body: stdInit + post, wantCode: 2, wantErr: "not a qemu member of pool", wantNotErr: "REACHED", noMutation: true},
-		{name: "a container is not a qemu member", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[{"type":"lxc","vmid":690,"node":"qa-pve-02"}]}]`}, body: stdInit + post, wantCode: 2, wantErr: "not a qemu member of pool", noMutation: true},
+		{name: "a container is not a qemu member", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[{"type":"lxc","vmid":690,"node":"qa-pve-07"}]}]`}, body: stdInit + post, wantCode: 2, wantErr: "not a qemu member of pool", noMutation: true},
 		{name: "member on another node", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-01"}]}]`}, body: stdInit + post, wantCode: 2, wantErr: "on node qa-pve-01", noMutation: true},
-		{name: "vmid as a string is not a match", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":"690","node":"qa-pve-02"}]}]`}, body: stdInit + post, wantCode: 2, wantErr: "not a qemu member of pool", noMutation: true},
+		{name: "vmid as a string is not a match", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":"690","node":"qa-pve-07"}]}]`}, body: stdInit + post, wantCode: 2, wantErr: "not a qemu member of pool", noMutation: true},
 		{name: "pool answer an object", resp: map[string]string{keyPool: `{}`}, body: stdInit + post, wantCode: 1, wantErr: "unexpected shape", noMutation: true},
 		{name: "pool answer two pools", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness","members":[]},{"poolid":"pveforge-harness","members":[]}]`}, body: stdInit + post, wantCode: 1, wantErr: "unexpected shape", noMutation: true},
 		{name: "pool answer without members", resp: map[string]string{keyPool: `[{"poolid":"pveforge-harness"}]`}, body: stdInit + post, wantCode: 1, wantErr: "unexpected shape", noMutation: true},
@@ -556,17 +556,17 @@ func harnessCases() []harnessCase {
 		refused("create params with a line break", stdInit+`harness_vm_create 690 '{"description":"a\nb"}'`+"\n", 2, "single-line strings"),
 		refused("create params not an object", stdInit+`harness_vm_create 690 '["cores"]'`+"\n", 2, "single-line strings"),
 		{name: "create fails", rc: map[string]int{"vm create 690": 1}, body: stdInit + `harness_vm_create 690 '{"cores":"1"}'` + "\necho REACHED >&2\n", wantCode: 1, wantNotErr: "REACHED",
-			wantCalls: []string{`vm create qa-pve-02-harness 690 --roster R --json {"cores":"1","pool":"pveforge-harness"}`}},
+			wantCalls: []string{`vm create qa-pve-07-harness 690 --roster R --json {"cores":"1","pool":"pveforge-harness"}`}},
 		// A failed create is never recorded: a subshell that failed to create
 		// leaves nothing this run may destroy.
 		{name: "a failed create is never recorded", rc: map[string]int{"vm create 690": 1}, body: stdInit + `( harness_vm_create 690 '{"cores":"1"}' ) || true` + "\nharness_vm_destroy 690\n", wantCode: 2, wantErr: "was not created by this run",
-			wantCalls: []string{`vm create qa-pve-02-harness 690 --roster R --json {"cores":"1","pool":"pveforge-harness"}`, "api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness"}},
+			wantCalls: []string{`vm create qa-pve-07-harness 690 --roster R --json {"cores":"1","pool":"pveforge-harness"}`, "api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness"}},
 
 		// A failure inside $(...) aborts, and pveforge's own status reaches
 		// the caller.
 		{name: "a failed read aborts before the write", rc: map[string]int{keyPool: 1}, body: stdInit + post, wantCode: 1, wantNotErr: "REACHED",
-			wantCalls: []string{"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness"}},
-		{name: "a signal status passes through", rc: map[string]int{"post /nodes/qa-pve-02/qemu/690/status/stop": 130}, body: stdInit + post, wantCode: 130, wantNotErr: "REACHED"},
+			wantCalls: []string{"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness"}},
+		{name: "a signal status passes through", rc: map[string]int{"post /nodes/qa-pve-07/qemu/690/status/stop": 130}, body: stdInit + post, wantCode: 130, wantNotErr: "REACHED"},
 
 		// Positive control: every guard passes when it should, and the exact
 		// calls go out, the create through `vm create` and never an unlocked
@@ -578,25 +578,25 @@ func harnessCases() []harnessCase {
 			"harness_vm_delete 690 snapshot/s1\n" +
 			"harness_vm_destroy 690\n" +
 			"harness_vm_get 690 status/current >/dev/null\n",
-			resp:    map[string]string{"get /nodes/qa-pve-02/qemu/690/status/current": `{"status":"stopped"}`},
-			wantErr: "harness: delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1",
+			resp:    map[string]string{"get /nodes/qa-pve-07/qemu/690/status/current": `{"status":"stopped"}`},
+			wantErr: "harness: delete /nodes/qa-pve-07/qemu/690 purge=1 destroy-unreferenced-disks=1",
 			wantCalls: []string{
-				`vm create qa-pve-02-harness 690 --roster R --json {"cores":"1","scsi0":"pveforge-harness:1","pool":"pveforge-harness"}`,
-				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
-				"api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness",
-				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
-				"api get /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json",
-				"api post /nodes/qa-pve-02/qemu/690/snapshot qa-pve-02-harness --roster R -o json --data snapname=s1 --data vmstate=0",
-				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
-				"api get /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json",
-				"api post /nodes/qa-pve-02/qemu/690/snapshot/s1/rollback qa-pve-02-harness --roster R -o json",
-				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
-				"api get /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json",
-				"api delete /nodes/qa-pve-02/qemu/690/snapshot/s1 qa-pve-02-harness --roster R -o json",
-				"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
-				"api get /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json",
-				"api delete /nodes/qa-pve-02/qemu/690 qa-pve-02-harness --roster R -o json --data purge=1 --data destroy-unreferenced-disks=1",
-				"api get /nodes/qa-pve-02/qemu/690/status/current qa-pve-02-harness --roster R -o json",
+				`vm create qa-pve-07-harness 690 --roster R --json {"cores":"1","scsi0":"pveforge-harness:1","pool":"pveforge-harness"}`,
+				"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness",
+				"api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data tags=pveforge-harness",
+				"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness",
+				"api get /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json",
+				"api post /nodes/qa-pve-07/qemu/690/snapshot qa-pve-07-harness --roster R -o json --data snapname=s1 --data vmstate=0",
+				"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness",
+				"api get /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json",
+				"api post /nodes/qa-pve-07/qemu/690/snapshot/s1/rollback qa-pve-07-harness --roster R -o json",
+				"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness",
+				"api get /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json",
+				"api delete /nodes/qa-pve-07/qemu/690/snapshot/s1 qa-pve-07-harness --roster R -o json",
+				"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness",
+				"api get /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json",
+				"api delete /nodes/qa-pve-07/qemu/690 qa-pve-07-harness --roster R -o json --data purge=1 --data destroy-unreferenced-disks=1",
+				"api get /nodes/qa-pve-07/qemu/690/status/current qa-pve-07-harness --roster R -o json",
 			}},
 	}
 	cases = append(cases, tagSeparatorCases()...)
@@ -607,8 +607,8 @@ func harnessCases() []harnessCase {
 
 // guardReads are the reads a change of VM 690 makes before it writes.
 var guardReads = []string{
-	"api get /pools qa-pve-02-harness --roster R -o json --data poolid=pveforge-harness",
-	"api get /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json",
+	"api get /pools qa-pve-07-harness --roster R -o json --data poolid=pveforge-harness",
+	"api get /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json",
 }
 
 // PVE splits a tag list (PVE::ParseUtils::split_list, pve-common) on NUL
@@ -617,7 +617,7 @@ func tagSeparatorCases() []harnessCase {
 	var cs []harnessCase
 	for name, tags := range map[string]string{"comma": `a,pveforge-harness`, "semicolon": `a;pveforge-harness`, "space": `a pveforge-harness`, "tab": `a\tpveforge-harness`, "newline": `a\npveforge-harness`, "NUL": `a\u0000pveforge-harness`, "alone": `pveforge-harness`} {
 		cs = append(cs, harnessCase{name: "tag list split on " + name, resp: map[string]string{keyConf: `{"tags":"` + tags + `"}`}, body: stdInit + "harness_vm_post 690 status/stop\n",
-			wantCalls: append(append([]string(nil), guardReads...), "api post /nodes/qa-pve-02/qemu/690/status/stop qa-pve-02-harness --roster R -o json")})
+			wantCalls: append(append([]string(nil), guardReads...), "api post /nodes/qa-pve-07/qemu/690/status/stop qa-pve-07-harness --roster R -o json")})
 	}
 	return cs
 }
@@ -648,13 +648,13 @@ func endpointCases() []harnessCase {
 		cs = append(cs, harnessCase{name: "endpoint refused: " + call, body: stdInit + call + "\n", wantCode: 2, wantErr: "is not an allowed harness change", wantCalls: []string{}})
 	}
 	for _, c := range []struct{ call, want string }{
-		{"harness_vm_put 690 config cores=2", "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data cores=2"},
-		{"harness_vm_post 690 snapshot snapname=s1", "api post /nodes/qa-pve-02/qemu/690/snapshot qa-pve-02-harness --roster R -o json --data snapname=s1"},
-		{"harness_vm_post 690 snapshot/pvh-golden/rollback", "api post /nodes/qa-pve-02/qemu/690/snapshot/pvh-golden/rollback qa-pve-02-harness --roster R -o json"},
-		{"harness_vm_post 690 status/start", "api post /nodes/qa-pve-02/qemu/690/status/start qa-pve-02-harness --roster R -o json"},
-		{"harness_vm_post 690 status/stop", "api post /nodes/qa-pve-02/qemu/690/status/stop qa-pve-02-harness --roster R -o json"},
-		{"harness_vm_post 690 status/shutdown", "api post /nodes/qa-pve-02/qemu/690/status/shutdown qa-pve-02-harness --roster R -o json"},
-		{"harness_vm_delete 690 snapshot/s1", "api delete /nodes/qa-pve-02/qemu/690/snapshot/s1 qa-pve-02-harness --roster R -o json"},
+		{"harness_vm_put 690 config cores=2", "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data cores=2"},
+		{"harness_vm_post 690 snapshot snapname=s1", "api post /nodes/qa-pve-07/qemu/690/snapshot qa-pve-07-harness --roster R -o json --data snapname=s1"},
+		{"harness_vm_post 690 snapshot/pvh-golden/rollback", "api post /nodes/qa-pve-07/qemu/690/snapshot/pvh-golden/rollback qa-pve-07-harness --roster R -o json"},
+		{"harness_vm_post 690 status/start", "api post /nodes/qa-pve-07/qemu/690/status/start qa-pve-07-harness --roster R -o json"},
+		{"harness_vm_post 690 status/stop", "api post /nodes/qa-pve-07/qemu/690/status/stop qa-pve-07-harness --roster R -o json"},
+		{"harness_vm_post 690 status/shutdown", "api post /nodes/qa-pve-07/qemu/690/status/shutdown qa-pve-07-harness --roster R -o json"},
+		{"harness_vm_delete 690 snapshot/s1", "api delete /nodes/qa-pve-07/qemu/690/snapshot/s1 qa-pve-07-harness --roster R -o json"},
 	} {
 		cs = append(cs, harnessCase{name: "endpoint allowed: " + c.call, body: stdInit + c.call + "\n", wantCalls: append(append([]string(nil), guardReads...), c.want)})
 	}
@@ -668,7 +668,7 @@ func endpointCases() []harnessCase {
 func fieldCases() []harnessCase {
 	const create = `harness_vm_create 690 '{"cores":"1"}'` + "\n"
 	put := func(kv string) string {
-		return "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data " + kv
+		return "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data " + kv
 	}
 	var cs []harnessCase
 	for _, kv := range []string{
@@ -703,7 +703,7 @@ func fieldCases() []harnessCase {
 			want = "is not allowed here"
 		}
 		cs = append(cs, harnessCase{name: "disk refused on a created VM: " + kv, body: stdInitS + create + "harness_vm_put 690 config " + kv + "\n", wantCode: 2, wantErr: want,
-			wantLast: "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness"})
+			wantLast: "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data tags=pveforge-harness"})
 	}
 	for _, kv := range []string{"scsi1=pveforge-harness:8", "scsi1=pveforge-harness:8,cache=writeback,discard=on", "ide2=local:iso/pve.iso,media=cdrom", "ide2=pveforge-harness:cloudinit", "ide2=none,media=cdrom",
 		"scsi0=pveforge-harness:0,import-from=local:import/debian-13.qcow2", "delete=ide2"} {
@@ -735,10 +735,10 @@ func fieldCases() []harnessCase {
 	// Other endpoints take only their own fields.
 	for _, c := range []struct{ call, want string }{
 		{"harness_vm_post 690 snapshot snapname=s1 vmstatestorage=local-lvm", ""},
-		{"harness_vm_post 690 snapshot/s1/rollback start=1", "api post /nodes/qa-pve-02/qemu/690/snapshot/s1/rollback qa-pve-02-harness --roster R -o json --data start=1"},
-		{"harness_vm_post 690 status/stop timeout=30", "api post /nodes/qa-pve-02/qemu/690/status/stop qa-pve-02-harness --roster R -o json --data timeout=30"},
+		{"harness_vm_post 690 snapshot/s1/rollback start=1", "api post /nodes/qa-pve-07/qemu/690/snapshot/s1/rollback qa-pve-07-harness --roster R -o json --data start=1"},
+		{"harness_vm_post 690 status/stop timeout=30", "api post /nodes/qa-pve-07/qemu/690/status/stop qa-pve-07-harness --roster R -o json --data timeout=30"},
 		{"harness_vm_post 690 status/stop skiplock=1", ""},
-		{"harness_vm_post 690 status/shutdown forceStop=1", "api post /nodes/qa-pve-02/qemu/690/status/shutdown qa-pve-02-harness --roster R -o json --data forceStop=1"},
+		{"harness_vm_post 690 status/shutdown forceStop=1", "api post /nodes/qa-pve-07/qemu/690/status/shutdown qa-pve-07-harness --roster R -o json --data forceStop=1"},
 		{"harness_vm_post 690 status/start timeout=60 migratedfrom=qa-pve-01", ""},
 		{"harness_vm_delete 690 snapshot/s1 force=1", ""},
 	} {
@@ -753,7 +753,7 @@ func fieldCases() []harnessCase {
 	// failure shows in its task's exit status.
 	for _, f := range []string{"skiplock=1", "purge=1", "destroy-unreferenced-disks=0"} {
 		cs = append(cs, harnessCase{name: "destroy field refused: " + f, body: stdInit + create + "harness_vm_destroy 690 " + f + "\n", wantCode: 2, wantErr: "harness_vm_destroy takes only a VMID",
-			wantLast: "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness"})
+			wantLast: "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data tags=pveforge-harness"})
 	}
 	// NEW-1: no control character in any field name or value, a newline least
 	// of all: it would start a second line of disk options.
@@ -774,7 +774,7 @@ func fieldCases() []harnessCase {
 		"newline in a read field":               `harness_get /cluster/resources $'type=vm\nx=1'`,
 	} {
 		cs = append(cs, harnessCase{name: "control character refused: " + name, body: stdInitS + create + body + "\n", wantCode: 2, wantErr: "harness",
-			wantLast: "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness"})
+			wantLast: "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data tags=pveforge-harness"})
 	}
 	// Tags: ASCII whitespace separates, NBSP and the other Unicode spaces do
 	// not; NUL, when present, is the only separator.
@@ -782,13 +782,13 @@ func fieldCases() []harnessCase {
 		cs = append(cs, harnessCase{name: "tag list does not split on " + name, resp: map[string]string{keyConf: `{"tags":"` + tags + `"}`}, body: stdInit + "harness_vm_post 690 status/stop\n", wantCode: 2, wantErr: "does not carry tag", noMutation: true})
 	}
 	cs = append(cs, harnessCase{name: "tag list split on vertical tab", resp: map[string]string{keyConf: `{"tags":"a\u000bpveforge-harness"}`}, body: stdInit + "harness_vm_post 690 status/stop\n",
-		wantCalls: append(append([]string(nil), guardReads...), "api post /nodes/qa-pve-02/qemu/690/status/stop qa-pve-02-harness --roster R -o json")})
+		wantCalls: append(append([]string(nil), guardReads...), "api post /nodes/qa-pve-07/qemu/690/status/stop qa-pve-07-harness --roster R -o json")})
 	// The C locale: under en_US.UTF-8, bash's [0-9] matches ².
 	cs = append(cs, harnessCase{name: "a superscript digit is not a VMID digit", skipUnlessLocale: "en_US.UTF-8", env: map[string]string{"LC_ALL": "en_US.UTF-8"}, body: "harness_init\nharness_declare_vmids 69²\n", wantCode: 2, wantErr: "is not one of 690-699", wantCalls: []string{}})
 	// Tools are found once, when lib is sourced.
 	cs = append(cs, harnessCase{name: "a tool missing at source time", pathWithout: "jq", body: stdInit, wantCode: 2, wantErr: "jq is not on PATH", wantCalls: []string{}})
 	cs = append(cs, harnessCase{name: "a PATH changed after sourcing finds a wrong jq and grep", body: stdInitS + "mkdir \"$HOME/wrong\"\nfor t in jq grep; do printf '#!/bin/sh\\nexit 99\\n' >\"$HOME/wrong/$t\"; chmod +x \"$HOME/wrong/$t\"; done\nPATH=$HOME/wrong:$PATH\nharness_vm_create 690 '{\"cores\":\"1\"}'\nharness_vm_put 690 config scsi1=pveforge-harness:8\n",
-		wantLast: "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data scsi1=pveforge-harness:8"})
+		wantLast: "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data scsi1=pveforge-harness:8"})
 	return cs
 }
 
@@ -810,10 +810,10 @@ func ifNotCases() []harnessCase {
 		{name: "harness_require_storage", pre: "harness_init\n", call: "harness_require_storage Local", code: 2},
 		{name: "harness_get", pre: stdInit, call: "harness_get /cluster/resources", resp: map[string]string{"get /cluster/resources": "[]"}, rc: map[string]int{"get /cluster/resources": 1}, code: 1},
 		{name: "harness_vm_get", pre: stdInit, call: "harness_vm_get 690 config", rc: map[string]int{keyConf: 1}, code: 1},
-		{name: "harness_vm_put", pre: stdInit, call: "harness_vm_put 690 config cores=2", rc: map[string]int{"put /nodes/qa-pve-02/qemu/690/config cores=2": 1}, code: 1},
-		{name: "harness_vm_post", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{"post /nodes/qa-pve-02/qemu/690/status/stop": 1}, code: 1},
-		{name: "harness_vm_delete", pre: stdInit, call: "harness_vm_delete 690 snapshot/s1", rc: map[string]int{"delete /nodes/qa-pve-02/qemu/690/snapshot/s1": 1}, code: 1},
-		{name: "harness_vm_destroy", pre: stdInit + created, call: "harness_vm_destroy 690", rc: map[string]int{"delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1": 1}, code: 1},
+		{name: "harness_vm_put", pre: stdInit, call: "harness_vm_put 690 config cores=2", rc: map[string]int{"put /nodes/qa-pve-07/qemu/690/config cores=2": 1}, code: 1},
+		{name: "harness_vm_post", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{"post /nodes/qa-pve-07/qemu/690/status/stop": 1}, code: 1},
+		{name: "harness_vm_delete", pre: stdInit, call: "harness_vm_delete 690 snapshot/s1", rc: map[string]int{"delete /nodes/qa-pve-07/qemu/690/snapshot/s1": 1}, code: 1},
+		{name: "harness_vm_destroy", pre: stdInit + created, call: "harness_vm_destroy 690", rc: map[string]int{"delete /nodes/qa-pve-07/qemu/690 purge=1 destroy-unreferenced-disks=1": 1}, code: 1},
 		{name: "harness_vm_create", pre: stdInit, call: `harness_vm_create 690 '{"cores":"1"}'`, rc: map[string]int{"vm create 690": 1}, code: 1},
 		{name: "a guard's pool read", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{keyPool: 1}, code: 1},
 		{name: "a guard's config read", pre: stdInit, call: "harness_vm_post 690 status/stop", rc: map[string]int{keyConf: 1}, code: 1},
@@ -828,7 +828,7 @@ func ifNotCases() []harnessCase {
 		"create fails under ||":   `harness_vm_create 690 '{"cores":"1"}' || echo SCRIPT-CONTINUED >&2` + "\nharness_vm_destroy 690\n",
 	} {
 		cs = append(cs, harnessCase{name: name, rc: map[string]int{"vm create 690": 1}, body: stdInit + body, wantCode: 1, wantNotErr: "SCRIPT-CONTINUED",
-			wantCalls: []string{`vm create qa-pve-02-harness 690 --roster R --json {"cores":"1","pool":"pveforge-harness"}`}})
+			wantCalls: []string{`vm create qa-pve-07-harness 690 --roster R --json {"cores":"1","pool":"pveforge-harness"}`}})
 	}
 	return cs
 }
