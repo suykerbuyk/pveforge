@@ -2,8 +2,11 @@ package pve
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strings"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
 )
@@ -82,6 +85,98 @@ func (c *Client) GetStorageConfigPath(ctx context.Context, storageID string) (st
 		return "", fmt.Errorf("storage %q has no configured filesystem path (not a directory-backed storage type?)", storageID)
 	}
 	return result.Path, nil
+}
+
+// CreateStorage issues PVE's create-storage call — POST /storage — and
+// returns PVE's raw (envelope-unwrapped) response for the caller to decode.
+//
+// Unlike CreateVM, this is a DATACENTER/cluster-level write, not node-scoped:
+// there is no POST /nodes/{node}/storage; a storage definition lives in the
+// cluster-wide storage.cfg and applies to the whole cluster however one node
+// is addressed. This method's only job on top of params is stamping
+// storage=<name> onto a clone and dispatching the call — no structured
+// create-options type, mirroring CreateVM's own raw/schema-free precedent
+// (PVE owns the per-type parameter surface and validates it).
+//
+// Goes through RawRequest for the same reasons CreateVM does (see its doc
+// comment): PVE's own verbatim error text reaches the caller — a duplicate id
+// comes back as a *StatusError carrying "storage ID already defined", and a
+// 403 satisfies errors.Is(err, ErrNotAuthorized) — rather than HTTP/2 erasing
+// the reason phrase, and the form-encoded body PVE expects.
+//
+// POST /storage is SYNCHRONOUS on PVE's side: it writes storage.cfg and
+// answers with the created storage's config object as data, NOT a bare UPID
+// task-id — so unlike CreateVM this returns the response for the caller to
+// decode and normally needs no WaitForTask. NOT live-verified (owed to
+// pveforge-nested-pve-test-harness): the one caller (idempotent.StorageCreate)
+// decodes defensively and waits on a bare UPID if PVE ever returns one, so the
+// design is correct either way.
+func (c *Client) CreateStorage(ctx context.Context, name string, params url.Values) (json.RawMessage, error) {
+	if name == "" {
+		return nil, fmt.Errorf("create storage: a storage name is required")
+	}
+
+	// Cloned, never mutated in place: params is the caller's own map (the Op
+	// passes op.Params directly), so stamping "storage" onto it destructively
+	// would leave the caller's map holding a key it never set.
+	form := params.Clone()
+	if form == nil {
+		form = url.Values{}
+	}
+	form.Set("storage", name)
+
+	raw, err := c.RawRequest(ctx, http.MethodPost, "/storage", form)
+	if err != nil {
+		return nil, fmt.Errorf("create storage %q: %w", name, err)
+	}
+	return raw, nil
+}
+
+// GetStorageConfig resolves storageID's cluster-wide CONFIG object —
+// GET /storage/{storageID} — carrying type, content, nodes, digest and the
+// rest of the definition PVE holds in storage.cfg. This is the right read-back
+// for a create: it exists cluster-wide the instant the config is written,
+// unlike GetStorage's per-node runtime STATUS endpoint. Unlike
+// GetStorageConfigPath (which returns only the filesystem path and rejects a
+// storage type that has none), this returns the whole object, so it works for
+// a zfspool/lvm storage that has no on-disk path.
+//
+// A not-found id is left for the caller to classify (IsStorageNotFoundError):
+// PVE answers a missing storage with its own 400 "No such storage.", which
+// this wraps with %w so errors.As still finds the typed answer.
+//
+// Deliberately calls c.pc.Get directly rather than go-proxmox's own
+// Client.ClusterStorage wrapper, for the same reason as GetStorage/GetNode
+// (see their own doc comments): keeps the returned struct's unexported client
+// field nil.
+func (c *Client) GetStorageConfig(ctx context.Context, storageID string) (*proxmox.ClusterStorage, error) {
+	if storageID == "" {
+		return nil, fmt.Errorf("get storage config: storage id is required")
+	}
+	result := &proxmox.ClusterStorage{}
+	if err := c.pc.Get(ctx, fmt.Sprintf("/storage/%s", url.PathEscape(storageID)), result); err != nil {
+		return nil, fmt.Errorf("get storage config for %q: %w", storageID, err)
+	}
+	return result, nil
+}
+
+// IsStorageNotFoundError reports whether err is PVE's own answer that a
+// storage id does not exist. GET /storage/{id} for a missing id answers 400
+// "No such storage." in its errors.storage parameter map — NOT the "does not
+// exist" phrase pve.NotFound keys on — so storage needs its own classifier
+// (verified live against nested pvh 2026-10-23, evidence
+// ~/.config/pveforge/harness-evidence/batch-a/; see notfound.go's own note on
+// the missing-storage wording). Fails CLOSED: only a typed PVE answer (a
+// *StatusError or *proxmox.StatusError anywhere in err's chain) whose text
+// carries "no such storage" is read as absent; a transport failure or any
+// untyped text that merely looks like an answer is not, so a read that failed
+// for some other reason is never mistaken for "the storage isn't there".
+func IsStorageNotFoundError(err error) bool {
+	answer, ok := pveAnswer(err)
+	if !ok {
+		return false
+	}
+	return strings.Contains(strings.ToLower(answer), "no such storage")
 }
 
 // GetStorageVolumes lists the content (volumes: disks, ISOs, backups,

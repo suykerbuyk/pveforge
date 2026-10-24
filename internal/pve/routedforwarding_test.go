@@ -1588,6 +1588,42 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 // TestRoutedForwarding_FindByTag pins FindByTag's tag. The tag is matched
 // client-side, so only the answer shows which tag was forwarded: two VMs carry
 // two different tags, and each lookup must find its own.
+// TestRoutedForwarding_GetStorageConfig proves RoutedClient.GetStorageConfig
+// forwards its storage-id argument to the cluster-wide GET /storage/{id} (no
+// node): a wrong id changes the path, which this catches.
+func TestRoutedForwarding_GetStorageConfig(t *testing.T) {
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeData(w, `{"storage":"stor-x","type":"zfspool"}`)
+	})
+	rc := fwdClient(t, srv)
+	for _, id := range []string{"stor-x", "stor-y"} {
+		if _, err := rc.GetStorageConfig(context.Background(), id); err != nil {
+			t.Fatalf("GetStorageConfig(%q): %v", id, err)
+		}
+	}
+	assertRequests(t, rec.got(), "GET /storage/stor-x", "GET /storage/stor-y")
+}
+
+// TestRoutedForwarding_CreateStorage proves RoutedClient.CreateStorage forwards
+// its name and params to the cluster-wide POST /storage with storage=<name>
+// stamped on (no node): a wrong name or param changes the body, which this
+// catches.
+func TestRoutedForwarding_CreateStorage(t *testing.T) {
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeData(w, `{"storage":"stor-x","type":"zfspool"}`)
+	})
+	rc := fwdClient(t, srv)
+	if _, err := rc.CreateStorage(context.Background(), "stor-x", url.Values{"type": {"zfspool"}}); err != nil {
+		t.Fatalf("CreateStorage(stor-x): %v", err)
+	}
+	if _, err := rc.CreateStorage(context.Background(), "stor-y", url.Values{"type": {"dir"}}); err != nil {
+		t.Fatalf("CreateStorage(stor-y): %v", err)
+	}
+	assertRequests(t, rec.got(),
+		"POST /storage storage=stor-x&type=zfspool",
+		"POST /storage storage=stor-y&type=dir")
+}
+
 func TestRoutedForwarding_FindByTag(t *testing.T) {
 	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeData(w, `[`+
@@ -1697,6 +1733,8 @@ var routedClientSeam = map[string]seamEntry{
 	"GetVMs":                     {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetStorage":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetStorages":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorageConfig":           {tests: []string{"TestRoutedForwarding_GetStorageConfig"}},
+	"CreateStorage":              {tests: []string{"TestRoutedForwarding_CreateStorage"}},
 	"GetStorageVolumes":          {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"ClaimedVolumes":             {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"OrphanVolumes":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},

@@ -38,6 +38,7 @@ func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 		"internal/harness/reset/reset.go":        1,
 		"internal/idempotent/networkbridge.go":   1,
 		"internal/idempotent/networkfields.go":   1,
+		"internal/idempotent/storagecreate.go":   1,
 		"internal/idempotent/vmclone.go":         1,
 		"internal/idempotent/vmcreate.go":        1,
 		"internal/idempotent/vmdestroy.go":       2,
