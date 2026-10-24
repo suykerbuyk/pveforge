@@ -23,11 +23,11 @@
 # caller.
 #
 # What is fixed here, never taken from the environment: the roster target
-# qa-pve-02-harness, the node qa-pve-02, the pool and tag pveforge-harness, and
+# qa-pve-07-harness, the node qa-pve-07, the pool and tag pveforge-harness, and
 # the VMIDs 690-699 (operator ruling 2026-09-24 (3)). A script declares the
 # VMIDs it may touch (harness_declare_vmids); every VM operation must name one
 # of them. Before changing an existing VM, lib reads that it is a qemu member
-# of the pool, on qa-pve-02, and carries the tag. It destroys only a VM this
+# of the pool, on qa-pve-07, and carries the tag. It destroys only a VM this
 # run created. What a change may do is an allow-list, of endpoints
 # (_harness_allow_endpoint) and, per endpoint, of fields
 # (_harness_config_field, _harness_field_allowed); anything not named is
@@ -124,8 +124,8 @@ done
 unset harness_tool harness_tool_path
 
 # ---- Fixed values. ----
-readonly HARNESS_TARGET=qa-pve-02-harness
-readonly HARNESS_NODE=qa-pve-02
+readonly HARNESS_TARGET=qa-pve-07-harness
+readonly HARNESS_NODE=qa-pve-07
 readonly HARNESS_POOL=pveforge-harness
 readonly HARNESS_TAG=pveforge-harness
 # 690-699, matched as a string: no arithmetic, so no leading zero, sign or

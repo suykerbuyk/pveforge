@@ -24,27 +24,27 @@ import (
 // dies midway.
 
 const (
-	pStatus   = "get /nodes/qa-pve-02/storage/pveforge-harness/status"
-	pContent  = "get /nodes/qa-pve-02/storage/pveforge-harness/content vmid=690"
+	pStatus   = "get /nodes/qa-pve-07/storage/pveforge-harness/status"
+	pContent  = "get /nodes/qa-pve-07/storage/pveforge-harness/content vmid=690"
 	pPool     = "get /pools poolid=pveforge-harness"
-	pConf     = "get /nodes/qa-pve-02/qemu/690/config"
-	pSnaps    = "get /nodes/qa-pve-02/qemu/690/snapshot"
-	pGone     = "get /nodes/qa-pve-02/qemu/690/status/current" // never read: a pool token gets 403 for a destroyed VM
+	pConf     = "get /nodes/qa-pve-07/qemu/690/config"
+	pSnaps    = "get /nodes/qa-pve-07/qemu/690/snapshot"
+	pGone     = "get /nodes/qa-pve-07/qemu/690/status/current" // never read: a pool token gets 403 for a destroyed VM
 	pNextID   = "get /cluster/nextid vmid=690"
-	pRollback = "post /nodes/qa-pve-02/qemu/690/snapshot/s1/rollback"
-	pSnapS2   = "post /nodes/qa-pve-02/qemu/690/snapshot snapname=s2 vmstate=0"
-	pDelS2    = "delete /nodes/qa-pve-02/qemu/690/snapshot/s2"
-	pDelS1    = "delete /nodes/qa-pve-02/qemu/690/snapshot/s1"
-	pDestroy  = "delete /nodes/qa-pve-02/qemu/690 purge=1 destroy-unreferenced-disks=1"
-	upid690   = "UPID:qa-pve-02:000107D0:0FA3B38F:6AB7381B:qmdestroy:690:pveforge-harness@pve!build:"
-	pTask     = "get /nodes/qa-pve-02/tasks/" + upid690 + "/status"
+	pRollback = "post /nodes/qa-pve-07/qemu/690/snapshot/s1/rollback"
+	pSnapS2   = "post /nodes/qa-pve-07/qemu/690/snapshot snapname=s2 vmstate=0"
+	pDelS2    = "delete /nodes/qa-pve-07/qemu/690/snapshot/s2"
+	pDelS1    = "delete /nodes/qa-pve-07/qemu/690/snapshot/s1"
+	pDestroy  = "delete /nodes/qa-pve-07/qemu/690 purge=1 destroy-unreferenced-disks=1"
+	upid690   = "UPID:qa-pve-07:000107D0:0FA3B38F:6AB7381B:qmdestroy:690:pveforge-harness@pve!build:"
+	pTask     = "get /nodes/qa-pve-07/tasks/" + upid690 + "/status"
 	pCreate   = "vm create 690"
 
 	gib600      = int64(600) << 30
 	zfsRefusal  = "task UPID:fake failed: can't rollback, 's1' is not most recent snapshot on 'pveforge-harness:vm-690-disk-0'"
 	nextIDInUse = "api get /cluster/nextid: pve returned 400 Parameter verification failed: vmid: VM 690 already exists"
 	emptyPool   = `[{"poolid":"pveforge-harness","comment":"","members":[]}]`
-	poolWith690 = `[{"poolid":"pveforge-harness","comment":"","members":[{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-02"}]}]`
+	poolWith690 = `[{"poolid":"pveforge-harness","comment":"","members":[{"id":"qemu/690","type":"qemu","vmid":690,"node":"qa-pve-07"}]}]`
 	oneVolume   = `[{"volid":"pveforge-harness:vm-690-disk-0","vmid":690,"size":1073741824}]`
 )
 
@@ -145,7 +145,7 @@ func zfsWorld() probeSpec {
 			pSnaps:   `[{"name":"current"}]`,
 			pNextID:  `"690"`,
 			pDestroy: `"` + upid690 + `"`,
-			pTask:    taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK"),
+			pTask:    taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "OK"),
 		},
 		gone: map[string]string{},
 		seq: map[string]map[int]string{
@@ -483,14 +483,14 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 }
 
 const (
-	createCall = `vm create qa-pve-02-harness 690 --roster R --json {"scsi0":"pveforge-harness:1","name":"pveforge-probe","memory":"512","cores":"1","pool":"pveforge-harness"}`
-	tagCall    = "api put /nodes/qa-pve-02/qemu/690/config qa-pve-02-harness --roster R -o json --data tags=pveforge-harness"
-	snapS1     = "api post /nodes/qa-pve-02/qemu/690/snapshot qa-pve-02-harness --roster R -o json --data snapname=s1 --data vmstate=0"
-	snapS2     = "api post /nodes/qa-pve-02/qemu/690/snapshot qa-pve-02-harness --roster R -o json --data snapname=s2 --data vmstate=0"
-	rollback   = "api post /nodes/qa-pve-02/qemu/690/snapshot/s1/rollback qa-pve-02-harness --roster R -o json"
-	delS2      = "api delete /nodes/qa-pve-02/qemu/690/snapshot/s2 qa-pve-02-harness --roster R -o json"
-	delS1      = "api delete /nodes/qa-pve-02/qemu/690/snapshot/s1 qa-pve-02-harness --roster R -o json"
-	destroy    = "api delete /nodes/qa-pve-02/qemu/690 qa-pve-02-harness --roster R -o json --data purge=1 --data destroy-unreferenced-disks=1"
+	createCall = `vm create qa-pve-07-harness 690 --roster R --json {"scsi0":"pveforge-harness:1","name":"pveforge-probe","memory":"512","cores":"1","pool":"pveforge-harness"}`
+	tagCall    = "api put /nodes/qa-pve-07/qemu/690/config qa-pve-07-harness --roster R -o json --data tags=pveforge-harness"
+	snapS1     = "api post /nodes/qa-pve-07/qemu/690/snapshot qa-pve-07-harness --roster R -o json --data snapname=s1 --data vmstate=0"
+	snapS2     = "api post /nodes/qa-pve-07/qemu/690/snapshot qa-pve-07-harness --roster R -o json --data snapname=s2 --data vmstate=0"
+	rollback   = "api post /nodes/qa-pve-07/qemu/690/snapshot/s1/rollback qa-pve-07-harness --roster R -o json"
+	delS2      = "api delete /nodes/qa-pve-07/qemu/690/snapshot/s2 qa-pve-07-harness --roster R -o json"
+	delS1      = "api delete /nodes/qa-pve-07/qemu/690/snapshot/s1 qa-pve-07-harness --roster R -o json"
+	destroy    = "api delete /nodes/qa-pve-07/qemu/690 qa-pve-07-harness --roster R -o json --data purge=1 --data destroy-unreferenced-disks=1"
 )
 
 var fullWrites = []string{createCall, tagCall, snapS1, snapS2, rollback, delS2, rollback, delS1, destroy}
@@ -528,7 +528,7 @@ func TestProbe_ZFSPool(t *testing.T) {
 	}
 	// The answers the proof decided on, recorded as read.
 	gone := r.evidence(t, "gone.log")
-	for _, want := range []string{"task " + upid690 + ": " + taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK"), `nextid vmid=690: "690"`, "pool pveforge-harness: " + emptyPool} {
+	for _, want := range []string{"task " + upid690 + ": " + taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "OK"), `nextid vmid=690: "690"`, "pool pveforge-harness: " + emptyPool} {
 		if !strings.Contains(gone, want) {
 			t.Errorf("gone.log lacks %q:\n%s", want, gone)
 		}
@@ -555,7 +555,7 @@ func TestProbe_ZFSPool(t *testing.T) {
 			t.Errorf("690's status was read: a pool token gets 403 for a destroyed VM, so its answer proves nothing: %s", c)
 		}
 	}
-	if !slices.Contains(r.calls, "api get /cluster/nextid qa-pve-02-harness --roster R -o json --data vmid=690") {
+	if !slices.Contains(r.calls, "api get /cluster/nextid qa-pve-07-harness --roster R -o json --data vmid=690") {
 		t.Errorf("690 was never proven free by /cluster/nextid: %q", r.calls)
 	}
 }
@@ -586,7 +586,7 @@ func TestProbe_StaticRefusals(t *testing.T) {
 		want   string
 	}{
 		"not enabled":           {strings.Replace(storageStatus("zfspool", gib600, ""), `"enabled":1`, `"enabled":0`, 1), nil, 3, "it is not enabled"},
-		"not active":            {strings.Replace(storageStatus("zfspool", gib600, ""), `"active":1`, `"active":0`, 1), nil, 3, "it is not active on qa-pve-02"},
+		"not active":            {strings.Replace(storageStatus("zfspool", gib600, ""), `"active":1`, `"active":0`, 1), nil, 3, "it is not active on qa-pve-07"},
 		"no images":             {strings.Replace(storageStatus("zfspool", gib600, ""), `"images,rootdir"`, `"rootdir,iso"`, 1), nil, 3, "does not include images"},
 		"images only as prefix": {strings.Replace(storageStatus("zfspool", gib600, ""), `"images,rootdir"`, `"imagesx"`, 1), nil, 3, "does not include images"},
 		"a dir storage":         {storageStatus("dir", gib600, ""), nil, 3, "type dir cannot hold the harness: it needs zfspool"},
@@ -639,7 +639,7 @@ func TestProbe_StaticOnly(t *testing.T) {
 	if r.code != 0 || !strings.Contains(r.stdout, "passes the static checks") {
 		t.Fatalf("exit %d stdout %q\n%s", r.code, r.stdout, r.stderr)
 	}
-	equalCalls(t, "calls", r.calls, []string{"api get /nodes/qa-pve-02/storage/pveforge-harness/status qa-pve-02-harness --roster R -o json"})
+	equalCalls(t, "calls", r.calls, []string{"api get /nodes/qa-pve-07/storage/pveforge-harness/status qa-pve-07-harness --roster R -o json"})
 	if _, ok := r.rule(); ok {
 		t.Error("--static-only wrote the rule")
 	}
@@ -908,10 +908,10 @@ func TestProbe_PollIsBounded(t *testing.T) {
 // its text, is a named failure and no rule is written.
 func TestProbe_VerifyGone(t *testing.T) {
 	const notGone = "VM 690 is not proven gone after the destroy: "
-	const taskNotOK = "the destroy task " + upid690 + " is not a stopped qmdestroy of VM 690 on qa-pve-02 with exitstatus OK"
+	const taskNotOK = "the destroy task " + upid690 + " is not a stopped qmdestroy of VM 690 on qa-pve-07 with exitstatus OK"
 	upidFor := func(old, new string) string { return strings.Replace(upid690, old, new, 1) }
 	printed := func(u string) string {
-		return "the destroy of VM 690 printed " + u + ", which is not a qmdestroy task for VM 690 on qa-pve-02"
+		return "the destroy of VM 690 printed " + u + ", which is not a qmdestroy task for VM 690 on qa-pve-07"
 	}
 	for name, c := range map[string]struct {
 		edit func(s *probeSpec)
@@ -923,7 +923,7 @@ func TestProbe_VerifyGone(t *testing.T) {
 		}, "/cluster/nextid did not answer 200"},
 		"nextid fails saying does not exist": {func(s *probeSpec) {
 			s.goneRC = map[string]int{pNextID: 1}
-			s.err[pNextID] = map[int]string{0: "Configuration file 'nodes/qa-pve-02/qemu-server/690.conf' does not exist"}
+			s.err[pNextID] = map[int]string{0: "Configuration file 'nodes/qa-pve-07/qemu-server/690.conf' does not exist"}
 		}, "/cluster/nextid did not answer 200"},
 		"another VMID":        {func(s *probeSpec) { s.gone[pNextID] = `"691"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
 		"a longer VMID":       {func(s *probeSpec) { s.gone[pNextID] = `"6900"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
@@ -935,35 +935,35 @@ func TestProbe_VerifyGone(t *testing.T) {
 		"still in the pool":   {func(s *probeSpec) { s.keepInPool = []string{"690"} }, "pool pveforge-harness still lists VM 690"},
 		"the pool unreadable": {func(s *probeSpec) { s.goneRC = map[string]int{pPool: 1} }, "reading pool pveforge-harness failed"},
 		"the pool lists 690 as a string": {func(s *probeSpec) {
-			s.gone[pPool] = `[{"poolid":"pveforge-harness","members":[{"id":"qemu/690","type":"qemu","vmid":"690","node":"qa-pve-02"}]}]`
+			s.gone[pPool] = `[{"poolid":"pveforge-harness","members":[{"id":"qemu/690","type":"qemu","vmid":"690","node":"qa-pve-07"}]}]`
 		}, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
 		"another pool's answer": {func(s *probeSpec) { s.gone[pPool] = `[{"poolid":"other","members":[]}]` }, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
 		"an empty answer":       {func(s *probeSpec) { s.gone[pPool] = `[]` }, "pool pveforge-harness still lists VM 690, or its answer has an unexpected shape"},
 		// The destroy's own task: exactly this task, stopped, exitstatus OK.
 		"task WARNINGS": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "WARNINGS: 1")
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "WARNINGS: 1")
 		}, taskNotOK},
 		"task OK with space": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK ")
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "OK ")
 		}, taskNotOK},
 		"task ok lowercase": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "ok")
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "ok")
 		}, taskNotOK},
 		"task running": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "running", "OK")
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "running", "OK")
 		}, taskNotOK},
 		"task no exitstatus": {func(s *probeSpec) {
-			s.resp[pTask] = strings.Replace(taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "OK"), `,"exitstatus":"OK"`, "", 1)
+			s.resp[pTask] = strings.Replace(taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "OK"), `,"exitstatus":"OK"`, "", 1)
 		}, taskNotOK},
 		"task unreadable": {func(s *probeSpec) { s.rc[pTask] = map[int]int{0: 1} }, "the status of the destroy task " + upid690 + " could not be read"},
 		"another task's upid": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(strings.Replace(upid690, "6AB7381B", "6AB7381C", 1), "qa-pve-02", "qmdestroy", "690", "stopped", "OK")
+			s.resp[pTask] = taskStatus(strings.Replace(upid690, "6AB7381B", "6AB7381C", 1), "qa-pve-07", "qmdestroy", "690", "stopped", "OK")
 		}, taskNotOK},
 		"another task's type": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmstart", "690", "stopped", "OK")
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmstart", "690", "stopped", "OK")
 		}, taskNotOK},
 		"another task's id": {func(s *probeSpec) {
-			s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "691", "stopped", "OK")
+			s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmdestroy", "691", "stopped", "OK")
 		}, taskNotOK},
 		"another task's node": {func(s *probeSpec) {
 			s.resp[pTask] = taskStatus(upid690, "qa-pve-01", "qmdestroy", "690", "stopped", "OK")
@@ -976,8 +976,8 @@ func TestProbe_VerifyGone(t *testing.T) {
 			s.resp[pDestroy] = `"` + strings.Replace(upid690, "qmdestroy", "qmstop", 1) + `"`
 		}, printed(upidFor("qmdestroy", "qmstop"))},
 		"a UPID on another node": {func(s *probeSpec) {
-			s.resp[pDestroy] = `"` + strings.Replace(upid690, "qa-pve-02", "qa-pve-01", 1) + `"`
-		}, printed(upidFor("qa-pve-02", "qa-pve-01"))},
+			s.resp[pDestroy] = `"` + strings.Replace(upid690, "qa-pve-07", "qa-pve-01", 1) + `"`
+		}, printed(upidFor("qa-pve-07", "qa-pve-01"))},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := zfsWorld()
@@ -1288,7 +1288,7 @@ func TestProbe_CleanupGoneNeedsPositiveProof(t *testing.T) {
 	}{
 		"does-not-exist text": {func(s *probeSpec) {
 			s.goneRC = map[string]int{pNextID: 1}
-			s.err[pNextID] = map[int]string{0: "Configuration file 'nodes/qa-pve-02/qemu-server/690.conf' does not exist"}
+			s.err[pNextID] = map[int]string{0: "Configuration file 'nodes/qa-pve-07/qemu-server/690.conf' does not exist"}
 		}, "/cluster/nextid did not answer 200 for VMID 690"},
 		"another VMID":      {func(s *probeSpec) { s.gone[pNextID] = `"691"` }, "/cluster/nextid answered 200 for VMID 690, but not with 690"},
 		"still in the pool": {func(s *probeSpec) { s.keepInPool = []string{"690"} }, "pool pveforge-harness still lists VM 690"},
@@ -1328,9 +1328,9 @@ func TestProbe_DestroyWithoutAnswerIsNotProven(t *testing.T) {
 // refused (690 left the pool): the report keeps the real cause, the task.
 func TestProbe_CleanupKeepsTheRealCause(t *testing.T) {
 	s := zfsWorld()
-	s.resp[pTask] = taskStatus(upid690, "qa-pve-02", "qmdestroy", "690", "stopped", "WARNINGS: 1")
+	s.resp[pTask] = taskStatus(upid690, "qa-pve-07", "qmdestroy", "690", "stopped", "WARNINGS: 1")
 	r := runProbe(t, s)
-	want := "LEFTOVER: VM 690 is not proven gone after cleanup: the destroy task " + upid690 + " is not a stopped qmdestroy of VM 690 on qa-pve-02 with exitstatus OK"
+	want := "LEFTOVER: VM 690 is not proven gone after cleanup: the destroy task " + upid690 + " is not a stopped qmdestroy of VM 690 on qa-pve-07 with exitstatus OK"
 	if r.code != 4 || !strings.Contains(r.stderr, want) || strings.Contains(r.stderr, "printed no task UPID") {
 		t.Errorf("exit %d, want %q\n%s", r.code, want, r.stderr)
 	}

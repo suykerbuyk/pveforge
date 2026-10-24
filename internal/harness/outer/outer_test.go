@@ -41,10 +41,10 @@ func (f *fakeReader) RawRequest(_ context.Context, method, path string, _ url.Va
 	return nil, fmt.Errorf("fakeReader: unexpected %s %s", method, path)
 }
 
-var testCfg = Config{Pool: "pveforge-harness", Node: "qa-pve-02", Tag: "pveforge-harness"}
+var testCfg = Config{Pool: "pveforge-harness", Node: "qa-pve-07", Tag: "pveforge-harness"}
 
 func validUPID(vmid int) string {
-	return fmt.Sprintf("UPID:qa-pve-02:00001234:0000ABCD:5F000000:qmdestroy:%d:root@pam:", vmid)
+	return fmt.Sprintf("UPID:qa-pve-07:00001234:0000ABCD:5F000000:qmdestroy:%d:root@pam:", vmid)
 }
 
 func taskBody(upid, typ, id, node, status, exit string) string {
@@ -168,7 +168,7 @@ func TestLedger(t *testing.T) {
 }
 
 func TestGuard_PassesAndRefuses(t *testing.T) {
-	poolOK := `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-02"}]}]`
+	poolOK := `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-07"}]}]`
 	confOK := `{"tags":"pveforge-harness"}`
 
 	// Positive control: every leg passes.
@@ -210,23 +210,23 @@ func TestGuard_PassesAndRefuses(t *testing.T) {
 func TestDestroyTaskOK_BodyReassert(t *testing.T) {
 	upid := validUPID(690)
 	// Positive control.
-	r := &fakeReader{task: taskBody(upid, "qmdestroy", "690", "qa-pve-02", "stopped", "OK")}
+	r := &fakeReader{task: taskBody(upid, "qmdestroy", "690", "qa-pve-07", "stopped", "OK")}
 	if err := DestroyTaskOK(context.Background(), r, testCfg, 690, upid); err != nil {
 		t.Fatalf("should pass: %v", err)
 	}
 	// WARNINGS is not OK (a disk the worker could not free).
-	r = &fakeReader{task: taskBody(upid, "qmdestroy", "690", "qa-pve-02", "stopped", "WARNINGS: 1")}
+	r = &fakeReader{task: taskBody(upid, "qmdestroy", "690", "qa-pve-07", "stopped", "WARNINGS: 1")}
 	if err := DestroyTaskOK(context.Background(), r, testCfg, 690, upid); err == nil {
 		t.Error("WARNINGS task accepted as OK")
 	}
 	// S1: UPID string parses fine, but the BODY names a different id.
-	r = &fakeReader{task: taskBody(upid, "qmdestroy", "691", "qa-pve-02", "stopped", "OK")}
+	r = &fakeReader{task: taskBody(upid, "qmdestroy", "691", "qa-pve-07", "stopped", "OK")}
 	if err := DestroyTaskOK(context.Background(), r, testCfg, 690, upid); err == nil {
 		t.Error("status body with mismatched id accepted")
 	}
 	// UPID string itself names the wrong type.
-	badUPID := "UPID:qa-pve-02:00001234:0000ABCD:5F000000:qmstart:690:root@pam:"
-	r = &fakeReader{task: taskBody(badUPID, "qmdestroy", "690", "qa-pve-02", "stopped", "OK")}
+	badUPID := "UPID:qa-pve-07:00001234:0000ABCD:5F000000:qmstart:690:root@pam:"
+	r = &fakeReader{task: taskBody(badUPID, "qmdestroy", "690", "qa-pve-07", "stopped", "OK")}
 	if err := DestroyTaskOK(context.Background(), r, testCfg, 690, badUPID); err == nil {
 		t.Error("UPID naming a non-qmdestroy task accepted")
 	}
@@ -234,9 +234,9 @@ func TestDestroyTaskOK_BodyReassert(t *testing.T) {
 
 func TestVMIDFreeAndVMGone(t *testing.T) {
 	upid := validUPID(690)
-	okTask := taskBody(upid, "qmdestroy", "690", "qa-pve-02", "stopped", "OK")
+	okTask := taskBody(upid, "qmdestroy", "690", "qa-pve-07", "stopped", "OK")
 	poolAbsent := `[{"poolid":"pveforge-harness","members":[]}]`
-	poolStill := `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-02"}]}]`
+	poolStill := `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-07"}]}]`
 
 	// Proven gone.
 	r := &fakeReader{task: okTask, nextid: `690`, pool: poolAbsent}

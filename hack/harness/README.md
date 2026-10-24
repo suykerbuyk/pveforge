@@ -1,7 +1,7 @@
 # The nested PVE test harness, end to end
 
 A nested Proxmox cluster, `pvh` (VMs 690 pvh-n1, 691 pvh-n2 and 692 pvh-nfs on
-qa-pve-02), for pveforge's real end-to-end and destructive tests (epic
+qa-pve-07), for pveforge's real end-to-end and destructive tests (epic
 `pveforge-nested-pve-test-harness`). This page gives the order of the steps,
 who runs each one, and which secrets each needs. Each script's header has its
 details.
@@ -40,7 +40,7 @@ under `~/.config/pveforge/harness-evidence/`, which is never overwritten.
 | 1 | D5: the outer pool, its owner and the scoped token | `d5/sequence.md`, printed, never self-executing (revert: `d5/revert.md`) | Implementor for the root writes (key-based root ssh) and gates G0–G3 and G5. **The operator** runs G4 in their own terminal. | G4: the **outer root password** and `PVEFORGE_ROSTER_PASSPHRASE`. G5: `PVEFORGE_ROSTER_PASSPHRASE`. | `pveforge-harness-d5-scripts` |
 | 2 | The storage capability probe | `unlock.sh run -- hack/harness/probe.sh --storage <id>` | Implementor | `PVEFORGE_ROSTER_PASSPHRASE` | `pveforge-harness-capability-probe` |
 | 3 | The installer ISOs | `unlock.sh run -- hack/harness/build/prepare-iso.sh` (workstation only) | Implementor | `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD` (it becomes a crypt hash in the answer files) | `pveforge-harness-build` |
-| 3a | Uploads | `pvh-n1-auto.iso` and `pvh-n2-auto.iso` to qa-pve-02 `local:iso/`, and the Debian 13 genericcloud image to `local:import/` | **The operator**, as root on qa-pve-02 | root's own access | `pveforge-harness-build` |
+| 3a | Uploads | `pvh-n1-auto.iso` and `pvh-n2-auto.iso` to qa-pve-07 `local:iso/`, and the Debian 13 genericcloud image to `local:import/` | **The operator**, as root on qa-pve-07 | root's own access | `pveforge-harness-build` |
 | 4 | The three VMs | `unlock.sh run -- hack/harness/build/build.sh --storage <id>` | Implementor | `PVEFORGE_ROSTER_PASSPHRASE` | `pveforge-harness-build` |
 | 5 | The nested cluster `pvh` | `unlock.sh run -- hack/harness/build/cluster.sh` | Implementor | `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD` (sent over ssh, on stdin, for n2's join) | `pveforge-harness-build` |
 | 6 | The nested bootstrap (the roster `harness-nested.toml`, targets pvh-n1 and pvh-n2) | `unlock.sh run -- hack/harness/nested.sh bootstrap` | Implementor | `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD` (put in the bootstrap child's environment only, as `PVEFORGE_PVE_PASSWORD`), `PVEFORGE_ROSTER_PASSPHRASE` | `pveforge-harness-golden-reset` |
@@ -53,7 +53,7 @@ Each step relies on the ones before it:
 - **1 → 2:** the probe runs as the pool token D5 minted. It must pass before
   anything is built.
 - **3 → 3a → 4:** build.sh refuses to start until both ISOs and the cloud
-  image are on qa-pve-02. It pins the nested host keys into
+  image are on qa-pve-07. It pins the nested host keys into
   `harness-nested.known_hosts`.
 - **5:** cluster.sh reaches the three VMs only through build.sh's pins and
   the nested key.

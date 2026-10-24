@@ -82,7 +82,7 @@ type pfake struct {
 	hookFired     bool
 }
 
-const pnode = "qa-pve-02"
+const pnode = "qa-pve-07"
 
 func pUPID(typ string, id int) string {
 	return fmt.Sprintf("UPID:%s:00001234:0000ABCD:5F000000:%s:%d:root@pam:", pnode, typ, id)
@@ -557,7 +557,7 @@ func TestProbe_RollbackBusyIsNotLatestOnly(t *testing.T) {
 // --- CR3: a pre-create pool member with a STRING vmid "690" must be refused
 // as an unexpected shape, never read as absent (nor aliased to the number). -
 func TestProbe_StringPoolMemberRefused(t *testing.T) {
-	rosterPath, _ := newProbeTest(t, &pfake{poolMemberRaw: `{"type":"qemu","vmid":"690","node":"qa-pve-02"}`})
+	rosterPath, _ := newProbeTest(t, &pfake{poolMemberRaw: `{"type":"qemu","vmid":"690","node":"qa-pve-07"}`})
 	code, stdout, _ := runRootArgs("harness", "probe", "--roster", rosterPath, "--storage", "pveforge-harness", "h")
 	if code == 0 {
 		t.Fatalf("a string-vmid pool member exited 0: %q", stdout)

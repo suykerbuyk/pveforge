@@ -7,7 +7,7 @@
 #
 # Two layers, every call through lib.sh:
 #
-#   static     the storage's node status: enabled, active on qa-pve-02, content
+#   static     the storage's node status: enabled, active on qa-pve-07, content
 #              includes images, type zfspool (anything else, lvmthin included,
 #              is refused by name: see below), and room for the
 #              harness (HARNESS_PROBE_MIN_FREE_GIB).

@@ -188,12 +188,12 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
   `--capture-port` if one was used, and the PVE password. Where the stored pins
   already match the node, the run is a plain bootstrap, so repeating the
   command after a partial failure converges. Recovery is one command per
-  roster; for a node that two rosters address (qa-pve-02 and its harness
+  roster; for a node that two rosters address (qa-pve-07 and its harness
   target), for example:
 
-      pveforge bootstrap qa-pve-02 --roster ./pveforge.toml --reprovisioned \
+      pveforge bootstrap qa-pve-07 --roster ./pveforge.toml --reprovisioned \
         --host-key-fingerprint SHA256:<console> --grant /:PVEVMAdmin::1
-      pveforge bootstrap qa-pve-02-harness --roster ~/.config/pveforge/harness-outer.toml \
+      pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml \
         --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console> \
         --token-owner pveforge-harness@pve --token-id build --grant …
 

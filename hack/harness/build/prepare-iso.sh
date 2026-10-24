@@ -27,7 +27,7 @@
 #    So the output directory needs about 1.7 GB free beyond the two finished
 #    ISOs (about 1.7 GB each), while a node's ISO is being prepared.
 # 5. Prints each prepared ISO's sha256. The operator uploads the two ISOs by
-#    hand, as root, to qa-pve-02's local:iso/ under these exact names:
+#    hand, as root, to qa-pve-07's local:iso/ under these exact names:
 #    pvh-n1-auto.iso and pvh-n2-auto.iso.
 #
 # Site values come from ~/.config/pveforge/harness-build.env (see
@@ -231,4 +231,4 @@ evidence iso.sha256 "${sums%$'\n'}"
 evidence SUMMARY "prepared pvh-n1-auto.iso and pvh-n2-auto.iso in $OUT"
 (cd -- "$EVID" && "$HB_TOOL_SHA256SUM" -- * >MANIFEST.sha256) || fail "cannot write MANIFEST.sha256"
 printf '%s' "$sums"
-printf 'prepare-iso: upload both, as root, to qa-pve-02 local:iso/ under these names (from %s), then run build.sh\n' "$OUT" >&2
+printf 'prepare-iso: upload both, as root, to qa-pve-07 local:iso/ under these names (from %s), then run build.sh\n' "$OUT" >&2

@@ -28,12 +28,12 @@ const (
 	d5Fixtures = "../pve/testdata/permissions"
 	d5User     = "pveforge-harness@pve"
 	d5Token    = "pveforge-harness@pve!build"
-	d5SSHHost  = "ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com "
+	d5SSHHost  = "ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com "
 	// d5SSHArgs is how every root read must be sent, as the fake ssh logs it.
-	d5SSHArgs = "-o BatchMode=yes -o ConnectTimeout=15 root@qa-pve-02.lab.quantum.com "
+	d5SSHArgs = "-o BatchMode=yes -o ConnectTimeout=15 root@qa-pve-07.lab.quantum.com "
 )
 
-var d5V4Paths = []string{"/", "/vms", "/vms/105", "/vms/101", "/vms/600", "/nodes", "/nodes/qa-pve-02", "/storage", "/storage/local-lvm", "/storage/qa-dev-01-image-pool", "/sdn/zones/localnetwork/vmbr0/100", "/access", "/pool"}
+var d5V4Paths = []string{"/", "/vms", "/vms/105", "/vms/101", "/vms/600", "/nodes", "/nodes/qa-pve-07", "/storage", "/storage/local-lvm", "/storage/qa-dev-01-image-pool", "/sdn/zones/localnetwork/vmbr0/100", "/access", "/pool"}
 
 type d5Row struct {
 	Path      string `json:"path"`
@@ -109,7 +109,7 @@ func d5WorldAt(t *testing.T, phase string) d5World {
 	pool := []map[string]any{}
 	w := d5World{
 		"true": "",
-		"pvesh get /nodes/qa-pve-02/storage/pveforge-harness/status --output-format json": `{"active":1,"enabled":1,"type":"zfspool"}`,
+		"pvesh get /nodes/qa-pve-07/storage/pveforge-harness/status --output-format json": `{"active":1,"enabled":1,"type":"zfspool"}`,
 		// datacenter.cfg with no user-tag-access set: user-allow defaults to
 		// free, and there are no registered tags.
 		"pvesh get /cluster/options --output-format json": `{"keyboard":"en-us"}`,
@@ -125,7 +125,7 @@ func d5WorldAt(t *testing.T, phase string) d5World {
 		members := []map[string]any{}
 		if at >= 5 {
 			for _, v := range []int{690, 691, 692} {
-				members = append(members, map[string]any{"id": fmt.Sprintf("qemu/%d", v), "type": "qemu", "vmid": v, "node": "qa-pve-02"})
+				members = append(members, map[string]any{"id": fmt.Sprintf("qemu/%d", v), "type": "qemu", "vmid": v, "node": "qa-pve-07"})
 			}
 		}
 		pool = append(pool, map[string]any{"poolid": "pveforge-harness", "comment": "pveforge nested harness (D5)", "members": members})
@@ -208,12 +208,12 @@ func d5KeyscanLines(t *testing.T, dir string, types ...string) string {
 			t.Fatal(err)
 		}
 		f := strings.Fields(string(b))
-		lines = append(lines, "qa-pve-02.lab.quantum.com "+f[0]+" "+f[1])
+		lines = append(lines, "qa-pve-07.lab.quantum.com "+f[0]+" "+f[1])
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// d5PinRoster is a roster whose qa-pve-02 target pins pin; qa-pve-01, first,
+// d5PinRoster is a roster whose qa-pve-07 target pins pin; qa-pve-01, first,
 // pins something else, and a token id sits between, so the parse must follow
 // the tables.
 func d5PinRoster(pin string) string {
@@ -223,12 +223,12 @@ host = "qa-pve-01.lab.quantum.com"
 node = "qa-pve-01"
 
   [targets.ssh]
-  host_key_fingerprint = "SHA256:not-the-one-for-qa-pve-02"
+  host_key_fingerprint = "SHA256:not-the-one-for-qa-pve-07"
 
 [[targets]]
-id = "qa-pve-02"
-host = "qa-pve-02.lab.quantum.com"
-node = "qa-pve-02"
+id = "qa-pve-07"
+host = "qa-pve-07.lab.quantum.com"
+node = "qa-pve-07"
 
   [targets.token]
   id = "root@pam!pveforge"
@@ -341,7 +341,7 @@ func runD5(t *testing.T, c d5Case) d5Result {
 	switch pin {
 	case "":
 		pin = fps["ecdsa"]
-	case "-": // the qa-pve-02 target pins nothing
+	case "-": // the qa-pve-07 target pins nothing
 		pin = ""
 	}
 	pinRoster := filepath.Join(tmp, "pveforge.toml")
@@ -467,7 +467,7 @@ func d5TokenWorld(t *testing.T, phase string) map[string]string {
 	if phase == "post" {
 		tree = d5Tree(t, "post")
 		for _, v := range []int{690, 691, 692} {
-			members = append(members, map[string]any{"type": "qemu", "vmid": v, "node": "qa-pve-02"})
+			members = append(members, map[string]any{"type": "qemu", "vmid": v, "node": "qa-pve-07"})
 		}
 	}
 	w := map[string]string{
@@ -550,7 +550,7 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		groups  = "pveum group list --output-format json"
 		pools   = "pvesh get /pools --output-format json"
 		pool    = "pvesh get /pools --poolid pveforge-harness --output-format json"
-		store   = "pvesh get /nodes/qa-pve-02/storage/pveforge-harness/status --output-format json"
+		store   = "pvesh get /nodes/qa-pve-07/storage/pveforge-harness/status --output-format json"
 		options = "pvesh get /cluster/options --output-format json"
 		tokens  = "pveum user token list " + d5User + " --output-format json"
 		ttree   = "pveum user token permissions " + d5User + " build --output-format json"
@@ -576,7 +576,7 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "V0b another custom role changed", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "OpsRole" then .privs = "VM.Audit,VM.Allocate" else . end)`}, want: []string{"V0b"}},
 		{name: "L1b a harness role marked special", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "ForgeHarnessNet" then .special = 1 else . end)`}, want: []string{"L1b"}},
 		{name: "L1b privs as an array", phase: "roles", worldAt: "roles", mutate: map[string]string{roles: `map(if .roleid == "ForgeHarnessNet" then .privs = ["SDN.Use"] else . end)`}, want: []string{"V0", "L1b"}},
-		{name: "O1 the pool has a member", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-02"}]`}, want: []string{"O1"}},
+		{name: "O1 the pool has a member", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-07"}]`}, want: []string{"O1"}},
 		{name: "O2 the user expires", phase: "owner", worldAt: "owner", mutate: map[string]string{users: `map(if .userid == "pveforge-harness@pve" then .expire = 1893456000 else . end)`}, want: []string{"O2"}},
 		{name: "O1 two pools answered", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `. + [{"poolid":"pveforge-harness","members":[]}]`}, want: []string{"O1"}},
 		{name: "O1 another pool answered", phase: "owner", worldAt: "owner", mutate: map[string]string{pool: `map(.poolid = "other-pool")`}, want: []string{"O1"}},
@@ -598,7 +598,7 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "V7 two pools answered", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `. + [{"poolid":"pveforge-harness","members":[]}]`}, want: []string{"V7"}},
 		{name: "V7 another pool answered", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `map(.poolid = "other-pool")`}, want: []string{"V7"}},
 		{name: "V4 an extra path in the answer", phase: "token", worldAt: "token", mutate: map[string]string{v4("/"): `{"/":{},"/vms":{}}`}, want: []string{"V4"}},
-		{name: "V7 a foreign member", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-02"}]`}, want: []string{"V7"}},
+		{name: "V7 a foreign member", phase: "pre", worldAt: "token", mutate: map[string]string{pool: `.[0].members = [{"type":"qemu","vmid":105,"node":"qa-pve-07"}]`}, want: []string{"V7"}},
 		{name: "V7 a storage member", phase: "post", worldAt: "post", mutate: map[string]string{pool: `.[0].members += [{"type":"storage","storage":"local"}]`}, want: []string{"V7"}},
 		{name: "V7 a member missing (post)", phase: "post", worldAt: "post", mutate: map[string]string{pool: `.[0].members |= map(select(.vmid != 691))`}, want: []string{"V7"}},
 		{name: "RV1 an ACL row left", phase: "reverted", worldAt: "p0", mutate: map[string]string{acl: `. + [{"path":"/nodes","propagate":1,"roleid":"PVEAuditor","type":"user","ugid":"johns@pve"}]`}, want: []string{"RV1"}},
@@ -610,10 +610,10 @@ func TestD5Verify_EachCheckGoesRed(t *testing.T) {
 		{name: "V3t the token's tree", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/permissions": `{"/":{"Sys.Audit":0}}`}, want: []string{"V3t"}},
 		{name: "V0t a role widened", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/roles/ForgeHarnessNet": `{"SDN.Use":1,"SDN.Audit":1}`}, want: []string{"V0t"}},
 		{name: "V1t the token sees a row", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/acl": `[{"path":"/vms/690","ugid":"x@pve","roleid":"PVEVMUser"}]`}, want: []string{"V1t"}},
-		{name: "V7t a foreign member", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":105,"node":"qa-pve-02"}]}]`}, want: []string{"V7t"}},
-		{name: "V7t-node a member elsewhere", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-01"},{"type":"qemu","vmid":691,"node":"qa-pve-02"},{"type":"qemu","vmid":692,"node":"qa-pve-02"}]}]`}, want: []string{"V7t-node"}},
-		{name: "V7t a storage member", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-02"},{"type":"qemu","vmid":691,"node":"qa-pve-02"},{"type":"qemu","vmid":692,"node":"qa-pve-02"},{"type":"storage","storage":"local","node":"qa-pve-02"}]}]`}, want: []string{"V7t"}},
-		{name: "K1 no pin for qa-pve-02", phase: "p0", worldAt: "p0", pin: "-", want: []string{"K1"}},
+		{name: "V7t a foreign member", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":105,"node":"qa-pve-07"}]}]`}, want: []string{"V7t"}},
+		{name: "V7t-node a member elsewhere", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-01"},{"type":"qemu","vmid":691,"node":"qa-pve-07"},{"type":"qemu","vmid":692,"node":"qa-pve-07"}]}]`}, want: []string{"V7t-node"}},
+		{name: "V7t a storage member", script: "verify-token.sh", phase: "post", token: map[string]string{"get /pools poolid=pveforge-harness": `[{"poolid":"pveforge-harness","members":[{"type":"qemu","vmid":690,"node":"qa-pve-07"},{"type":"qemu","vmid":691,"node":"qa-pve-07"},{"type":"qemu","vmid":692,"node":"qa-pve-07"},{"type":"storage","storage":"local","node":"qa-pve-07"}]}]`}, want: []string{"V7t"}},
+		{name: "K1 no pin for qa-pve-07", phase: "p0", worldAt: "p0", pin: "-", want: []string{"K1"}},
 		{name: "Z0 an extra path in the answer", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/permissions path=/storage/local-lvm": `{"/storage/local-lvm":{},"/x":{}}`}, want: []string{"Z0"}},
 		{name: "Z0 a bare {} for a path held nothing on", script: "verify-token.sh", phase: "pre", token: map[string]string{"get /access/permissions path=/storage/local-lvm": `{}`}, want: []string{"Z0"}},
 		{name: "a failed token read is red, and so is its check", script: "verify-token.sh", phase: "pre", tokenRC: map[string]int{"get /access/acl": 1}, want: []string{"fetch", "V1t"}},
@@ -806,7 +806,7 @@ func TestD5Sequence_MatchesTheFixtures(t *testing.T) {
 	if !strings.Contains(text, `echo "E=$E"`) {
 		t.Error("G0 does not print the evidence path for the operator's G4 terminal")
 	}
-	for _, flag := range []string{"bootstrap qa-pve-02-harness ", "--roster ~/.config/pveforge/harness-outer.toml ", "--node qa-pve-02 ", "--no-ssh-key ", `--host-key-fingerprint "$PIN" `, "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
+	for _, flag := range []string{"bootstrap qa-pve-07-harness ", "--roster ~/.config/pveforge/harness-outer.toml ", "--node qa-pve-07 ", "--no-ssh-key ", `--host-key-fingerprint "$PIN" `, "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
 		if !strings.Contains(boot, flag) {
 			t.Errorf("bootstrap line lacks %q", flag)
 		}
@@ -849,7 +849,7 @@ func TestD5Sequence_MatchesTheFixtures(t *testing.T) {
 	if !strings.Contains(gates[4], "OPERATOR-RUN") {
 		t.Errorf("G4 %q is not marked OPERATOR-RUN", gates[4])
 	}
-	if !strings.Contains(text, "`ssh -o BatchMode=yes root@qa-pve-02.lab.quantum.com true`") {
+	if !strings.Contains(text, "`ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com true`") {
 		t.Error("G0 does not name the BatchMode root ssh check")
 	}
 }

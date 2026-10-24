@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hack/harness/build/build.sh: T2 of the harness build (pveforge-harness-build).
-# Creates the three outer VMs of the nested cluster on qa-pve-02, as the pool
+# Creates the three outer VMs of the nested cluster on qa-pve-07, as the pool
 # token, through lib.sh only:
 #
 #   690 pvh-n1   nested PVE node, installed unattended from pvh-n1-auto.iso
@@ -230,12 +230,12 @@ isos=$(harness_get "/nodes/$HARNESS_NODE/storage/local/content" content=iso)
 evidence local-iso.json "$isos"
 for v in 690 691; do
 	jqe "$isos" --arg id "local:iso/${NAME[$v]}-auto.iso" 'type == "array" and any(.[]; .volid == $id)' ||
-		refuse "local:iso/${NAME[$v]}-auto.iso is not on qa-pve-02: upload prepare-iso.sh's output first"
+		refuse "local:iso/${NAME[$v]}-auto.iso is not on qa-pve-07: upload prepare-iso.sh's output first"
 done
 imports=$(harness_get "/nodes/$HARNESS_NODE/storage/local/content" content=import)
 evidence local-import.json "$imports"
 jqe "$imports" --arg id "local:import/${HB[NFS_IMAGE]}" 'type == "array" and any(.[]; .volid == $id)' ||
-	refuse "local:import/${HB[NFS_IMAGE]} is not on qa-pve-02: upload the Debian 13 genericcloud image first"
+	refuse "local:import/${HB[NFS_IMAGE]} is not on qa-pve-07: upload the Debian 13 genericcloud image first"
 step "PASS preflight"
 
 # ---- Cleanup: on any exit that is not a complete build. ----

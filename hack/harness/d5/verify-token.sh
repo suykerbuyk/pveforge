@@ -6,7 +6,7 @@
 #
 # Usage: HARNESS_EVIDENCE=<new dir> verify-token.sh <pre|post>
 #   pre   before the harness VMs exist: the pool has no members.
-#   post  after the build: its members are 690-692, on qa-pve-02.
+#   post  after the build: its members are 690-692, on qa-pve-07.
 # See d5/sequence.md, gate G5.
 source "$(dirname "$0")/../lib.sh"
 source "$(dirname "$0")/evidence.sh"
