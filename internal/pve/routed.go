@@ -192,6 +192,15 @@ func (c *RoutedClient) GetStorageConfig(ctx context.Context, storageID string) (
 	return c.rest.GetStorageConfig(ctx, storageID)
 }
 
+// GetStorageConfigRaw reads one storage's cluster-wide config as the raw PVE
+// object — see Client.GetStorageConfigRaw's own doc comment. A thin
+// pass-through like the typed getters above, with no node parameter: a storage
+// definition is cluster-wide (datacenter), not scoped to this RoutedClient's
+// target node.
+func (c *RoutedClient) GetStorageConfigRaw(ctx context.Context, storageID string) (map[string]json.RawMessage, error) {
+	return c.rest.GetStorageConfigRaw(ctx, storageID)
+}
+
 func (c *RoutedClient) GetStorageVolumes(ctx context.Context, node, storage string) ([]*proxmox.StorageContent, error) {
 	return c.rest.GetStorageVolumes(ctx, node, storage)
 }

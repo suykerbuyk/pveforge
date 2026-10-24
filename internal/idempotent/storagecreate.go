@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	proxmox "github.com/suykerbuyk/go-proxmox"
-
 	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
@@ -21,10 +19,12 @@ import (
 // fake — *pve.RoutedClient satisfies it structurally (compat_test.go pins
 // that), the same "narrow interface per Op" shape VMCreateClient uses.
 type StorageCreateClient interface {
-	// GetStorageConfig reads storageID's cluster-wide config object. Read
-	// uses it to detect existence and, with Satisfied, to compare the
-	// definition; a not-found id is classified with pve.IsStorageNotFoundError.
-	GetStorageConfig(ctx context.Context, storageID string) (*proxmox.ClusterStorage, error)
+	// GetStorageConfigRaw reads storageID's cluster-wide config object as the
+	// RAW PVE object (every key PVE holds, including ones the typed
+	// proxmox.ClusterStorage drops — pool, sparse, an omitempty shared=0). Read
+	// uses it to detect existence and, with Satisfied, to compare EVERY desired
+	// parameter; a not-found id is classified with pve.IsStorageNotFoundError.
+	GetStorageConfigRaw(ctx context.Context, storageID string) (map[string]json.RawMessage, error)
 	// CreateStorage issues PVE's POST /storage with storage=name stamped on,
 	// returning PVE's raw (envelope-unwrapped) response.
 	CreateStorage(ctx context.Context, name string, params url.Values) (json.RawMessage, error)
@@ -67,9 +67,12 @@ var requiredKeysByType = map[string][]string{
 //     error propagates, because the differ-refusal below depends on a
 //     trustworthy read (VMCreate can be laxer — its create call is its own
 //     authoritative existence check).
-//   - Satisfied requires the definition to MATCH, not merely exist: a storage
-//     of the same name but a different type/content is a real misconfiguration
-//     to surface, not a silent no-op.
+//   - Satisfied requires the definition to MATCH every desired parameter, not
+//     merely exist: a storage of the same name but a different type, pool,
+//     content, nodes, ... is a real misconfiguration to surface, not a silent
+//     no-op. The read-back is the RAW PVE object (GetStorageConfigRaw), so a
+//     desired key the storage does not carry (notably `pool`, which the typed
+//     proxmox.ClusterStorage drops) is drift, not an unconfirmable skip.
 //
 // Drift: absent -> create; present+matching -> no-op; present+differing ->
 // StorageDiffersError (refuse-and-report, NO POST). --force (idempotent.Run's
@@ -86,13 +89,6 @@ var requiredKeysByType = map[string][]string{
 // POST /storage refuses a duplicate id with PVE's "storage ID already defined"
 // verbatim, never a silent overwrite.
 //
-// v1 drift-detection limitation (documented, honest): the read-back
-// (proxmox.ClusterStorage) does not model every PVE storage key — notably
-// `pool` for a zfspool — so a desired key the read-back does not carry is not
-// drift-checked (Satisfied skips it). The required-keys guard still forces
-// `pool` to be PRESENT on create; a FUTURE raw read-back (or a go-proxmox
-// field) is owed to drift-check it. The modeled fields (type, content, nodes,
-// shared, thinpool, vgname, path) ARE drift-checked today.
 type StorageCreate struct {
 	Client StorageCreateClient
 	Name   string
@@ -166,7 +162,7 @@ func (op *StorageCreate) Validate() error {
 // differ-refusal in Apply/Satisfied must not fire against a read it could not
 // trust.
 func (op *StorageCreate) Read(ctx context.Context) (string, error) {
-	cfg, err := op.Client.GetStorageConfig(ctx, op.Name)
+	raw, err := op.Client.GetStorageConfigRaw(ctx, op.Name)
 	if err != nil {
 		if pve.IsStorageNotFoundError(err) {
 			op.current = ""
@@ -174,7 +170,7 @@ func (op *StorageCreate) Read(ctx context.Context) (string, error) {
 		}
 		return "", fmt.Errorf("storage create: storage %q: read current config: %w", op.Name, err)
 	}
-	b, err := json.Marshal(cfg)
+	b, err := json.Marshal(raw)
 	if err != nil {
 		return "", fmt.Errorf("storage create: storage %q: encode current state: %w", op.Name, err)
 	}
@@ -193,12 +189,23 @@ func (op *StorageCreate) Satisfied(current string) bool {
 	return op.matches(current)
 }
 
-// matches reports whether every desired param (bar the name and digest)
-// equals the read-back's value for that key, compared case-insensitively on
-// the key (the read-back marshals Go-cased field names: Type, Content, ...).
-// A desired key the read-back does not carry is NOT compared — it cannot be
-// confirmed, so it is neither a match nor a mismatch (the documented v1
-// limitation; `pool` is the case). Fails closed on an unparseable current.
+// matches reports whether the storage's current definition matches every
+// desired param. The read-back is the RAW PVE object (Read via
+// GetStorageConfigRaw), so its keys are PVE's own lowercase names (type, pool,
+// content, nodes, ...) and nothing the operator asked for is dropped. For each
+// desired param (except `storage`, the name, and `digest`, PVE's own CAS token
+// — never part of the requested definition):
+//   - a key MISSING from the read-back is a MISMATCH — the operator asked for a
+//     value the storage does not carry (e.g. `pool=tank` against a zfspool on a
+//     different pool, or `nodes=` / `shared=0` against a config that omits it).
+//     This is the refuse-on-drift contract; a silent no-op there would be a
+//     false "already matches" on the very field a zfspool is defined by.
+//   - a present key must equal the desired value (case-insensitive key,
+//     jsonScalar-normalized so a boolish 0/1 compares as its scalar).
+//
+// Extra keys PVE adds that the operator did not ask for are ignored (the loop
+// is over desired params only), so PVE's own defaults never read as drift.
+// Fails closed on an unparseable current.
 func (op *StorageCreate) matches(current string) bool {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(current), &raw); err != nil {
@@ -215,7 +222,7 @@ func (op *StorageCreate) matches(current string) bool {
 		}
 		got, present := actual[lk]
 		if !present {
-			continue // not modeled by the read-back; cannot confirm drift (v1)
+			return false // a desired key the storage does not carry is drift
 		}
 		if got != op.Params.Get(key) {
 			return false

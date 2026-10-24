@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	proxmox "github.com/suykerbuyk/go-proxmox"
-
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 )
@@ -21,13 +19,13 @@ import (
 type fakeStorageCreateClient struct {
 	node string
 
-	getConfigResult *proxmox.ClusterStorage
+	getConfigResult map[string]json.RawMessage
 	getConfigErr    error
 	getConfigCalls  int
-	// createdConfig, when set, is what GetStorageConfig answers once
+	// createdConfig, when set, is what GetStorageConfigRaw answers once
 	// CreateStorage has run: a fake that reflects its own create, so Run's
 	// re-read after a create is clean.
-	createdConfig *proxmox.ClusterStorage
+	createdConfig map[string]json.RawMessage
 
 	createResult json.RawMessage
 	createErr    error
@@ -43,7 +41,7 @@ type fakeStorageCreateClient struct {
 
 func (f *fakeStorageCreateClient) Node() string { return f.node }
 
-func (f *fakeStorageCreateClient) GetStorageConfig(_ context.Context, _ string) (*proxmox.ClusterStorage, error) {
+func (f *fakeStorageCreateClient) GetStorageConfigRaw(_ context.Context, _ string) (map[string]json.RawMessage, error) {
 	f.getConfigCalls++
 	if f.createdConfig != nil && f.createCalls > 0 {
 		return f.createdConfig, nil
@@ -52,6 +50,17 @@ func (f *fakeStorageCreateClient) GetStorageConfig(_ context.Context, _ string) 
 		return nil, f.getConfigErr
 	}
 	return f.getConfigResult, nil
+}
+
+// rawCfg builds a raw PVE storage config object (string-valued keys) from
+// key,value pairs, the shape GetStorageConfigRaw returns.
+func rawCfg(kv ...string) map[string]json.RawMessage {
+	m := map[string]json.RawMessage{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		b, _ := json.Marshal(kv[i+1])
+		m[kv[i]] = b
+	}
+	return m
 }
 
 func (f *fakeStorageCreateClient) CreateStorage(_ context.Context, name string, params url.Values) (json.RawMessage, error) {
@@ -92,7 +101,7 @@ func TestStorageCreate_Absent_Creates(t *testing.T) {
 	client := &fakeStorageCreateClient{
 		node:          "qa-pve-07",
 		getConfigErr:  storageNotFoundErr(),
-		createdConfig: &proxmox.ClusterStorage{Storage: "pveforge-harness", Type: "zfspool", Content: "images"},
+		createdConfig: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank"),
 		createResult:  json.RawMessage(`{"storage":"pveforge-harness","type":"zfspool"}`), // an object, not a UPID
 	}
 	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
@@ -132,12 +141,13 @@ func TestStorageCreate_Absent_Creates(t *testing.T) {
 // with the requested definition is Satisfied: Apply is never called and
 // Changed is false.
 func TestStorageCreate_PresentMatching_NoOp(t *testing.T) {
+	// Truly matching, pool included: the raw read-back carries every desired
+	// key (type, pool, content), so matching means truly-matching — this no
+	// longer bakes in the old pool blind spot.
 	client := &fakeStorageCreateClient{
 		node:            "qa-pve-07",
-		getConfigResult: &proxmox.ClusterStorage{Storage: "pveforge-harness", Type: "zfspool", Content: "images"},
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank"),
 	}
-	// pool is not modeled by the read-back, so it is not drift-checked (v1);
-	// the modeled type+content match.
 	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
 	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
 
@@ -161,7 +171,7 @@ func TestStorageCreate_PresentMatching_NoOp(t *testing.T) {
 func TestStorageCreate_PresentDiffering_Refuses(t *testing.T) {
 	client := &fakeStorageCreateClient{
 		node:            "qa-pve-07",
-		getConfigResult: &proxmox.ClusterStorage{Storage: "pveforge-harness", Type: "dir", Content: "images"}, // type differs
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "dir", "content", "images"), // type differs
 	}
 	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
 	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
@@ -185,7 +195,7 @@ func TestStorageCreate_PresentDiffering_Refuses(t *testing.T) {
 func TestStorageCreate_PresentDiffering_ForceStillRefuses(t *testing.T) {
 	client := &fakeStorageCreateClient{
 		node:            "qa-pve-07",
-		getConfigResult: &proxmox.ClusterStorage{Storage: "pveforge-harness", Type: "dir", Content: "images"},
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "dir", "content", "images"), // type differs
 	}
 	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
 	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
@@ -200,6 +210,125 @@ func TestStorageCreate_PresentDiffering_ForceStillRefuses(t *testing.T) {
 	}
 	if client.createCalls != 0 {
 		t.Errorf("CreateStorage must NOT be called for a differing storage even with force, got %d calls", client.createCalls)
+	}
+}
+
+// --- H1: drift must see EVERY desired key, not just modeled ones ------------
+
+// TestStorageCreate_PresentDifferingPool_Refuses is the headline H1 fix: a
+// present zfspool on a DIFFERENT pool (same type and content) is refused, not a
+// silent no-op. `pool` is dropped by the typed proxmox.ClusterStorage, so this
+// only passes because Read uses the raw read-back.
+func TestStorageCreate_PresentDifferingPool_Refuses(t *testing.T) {
+	client := &fakeStorageCreateClient{
+		node:            "qa-pve-07",
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "otherpool"),
+	}
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()} // pool=tank
+	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
+
+	_, err := Run(context.Background(), testRosterPath(t), key, op, false)
+	if err == nil {
+		t.Fatal("expected a differing-pool storage to be refused, not a silent no-op")
+	}
+	var differs *StorageDiffersError
+	if !errors.As(err, &differs) {
+		t.Fatalf("error = %v, want a *StorageDiffersError for a differing pool", err)
+	}
+	if client.createCalls != 0 {
+		t.Errorf("CreateStorage must NOT be called for a differing pool, got %d", client.createCalls)
+	}
+}
+
+// TestStorageCreate_DesiredNodesVsNoneRefuses: a desired nodes= against a
+// read-back that omits nodes (cluster-wide) is drift, not a no-op.
+func TestStorageCreate_DesiredNodesVsNoneRefuses(t *testing.T) {
+	client := &fakeStorageCreateClient{
+		node:            "qa-pve-07",
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank"), // no nodes
+	}
+	params := zfspoolParams()
+	params.Set("nodes", "qa-pve-07")
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: params}
+	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
+
+	_, err := Run(context.Background(), testRosterPath(t), key, op, false)
+	if err == nil {
+		t.Fatal("expected a desired nodes= against an unscoped storage to be refused")
+	}
+	if client.createCalls != 0 {
+		t.Errorf("CreateStorage must NOT be called, got %d", client.createCalls)
+	}
+}
+
+// TestStorageCreate_DesiredShared0VsOmittedRefuses: the omitempty hole — a
+// desired shared=0 against a read-back that omits shared is drift, not a no-op.
+func TestStorageCreate_DesiredShared0VsOmittedRefuses(t *testing.T) {
+	client := &fakeStorageCreateClient{
+		node:            "qa-pve-07",
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank"), // no shared
+	}
+	params := zfspoolParams()
+	params.Set("shared", "0")
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: params}
+	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
+
+	_, err := Run(context.Background(), testRosterPath(t), key, op, false)
+	if err == nil {
+		t.Fatal("expected a desired shared=0 against a storage omitting shared to be refused")
+	}
+	if client.createCalls != 0 {
+		t.Errorf("CreateStorage must NOT be called, got %d", client.createCalls)
+	}
+}
+
+// TestStorageCreate_DigestIsNotDrift (M3): once the raw read-back carries
+// `digest`, a desired `digest=` (and `storage=`) must NOT count as drift — they
+// are skipped. A matching definition whose read-back digest differs from a
+// desired digest is still a no-op.
+func TestStorageCreate_DigestIsNotDrift(t *testing.T) {
+	client := &fakeStorageCreateClient{
+		node:            "qa-pve-07",
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank", "digest", "actual-digest"),
+	}
+	params := zfspoolParams()
+	params.Set("digest", "a-different-digest")
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: params}
+	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
+
+	res, err := Run(context.Background(), testRosterPath(t), key, op, false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Changed {
+		t.Error("a differing digest must NOT count as drift (digest is skipped): expected a no-op")
+	}
+	if client.createCalls != 0 {
+		t.Errorf("CreateStorage must not be called, got %d", client.createCalls)
+	}
+}
+
+// TestStorageCreate_ForceMatchingRePosts (L4): --force on a present+matching
+// storage bypasses the no-op and re-POSTs (createCalls==1); PVE would then
+// refuse the duplicate — force never silently converges.
+func TestStorageCreate_ForceMatchingRePosts(t *testing.T) {
+	client := &fakeStorageCreateClient{
+		node:            "qa-pve-07",
+		getConfigResult: rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank"),
+		createResult:    json.RawMessage(`{"storage":"pveforge-harness","type":"zfspool"}`),
+	}
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
+	key := lock.ObjectKey{TargetID: "qa-pve-07", Kind: "storage", ID: "pveforge-harness"}
+
+	res, err := Run(context.Background(), testRosterPath(t), key, op, true) // force
+	if err != nil {
+		t.Fatalf("Run(force): %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected --force to re-POST a matching storage (Changed=true)")
+	}
+	if client.createCalls != 1 {
+		t.Errorf("expected exactly 1 CreateStorage call on force+matching, got %d", client.createCalls)
 	}
 }
 
@@ -281,6 +410,39 @@ func TestStorageCreate_Apply_DuplicateRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "already defined") {
 		t.Errorf("PVE's verbatim duplicate text was not propagated: %v", err)
 	}
+}
+
+// TestStorageCreate_Apply_ForcePathDuplicateNotSwallowed (M2) proves the
+// "no silent success" property on the FORCE path, not just the absent path:
+// with op.current a MATCHING snapshot (what --force on a present+matching
+// storage produces), a 500 "already defined" from CreateStorage must still be
+// an error, never nil.
+func TestStorageCreate_Apply_ForcePathDuplicateNotSwallowed(t *testing.T) {
+	dup := pve.NewStatusError("create storage", 500, "500 Internal Server Error", []byte(`storage ID 'pveforge-harness' already defined`))
+	client := &fakeStorageCreateClient{node: "qa-pve-07", createErr: dup}
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
+	// The force path: Read already ran and found a matching storage, so
+	// op.current is a matching snapshot and Apply falls through to the POST.
+	op.current = string(mustJSON(rawCfg("storage", "pveforge-harness", "type", "zfspool", "content", "images", "pool", "tank")))
+	if !op.matches(op.current) {
+		t.Fatal("test setup: op.current must be a matching snapshot for the force path")
+	}
+
+	err := op.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected the duplicate 500 to be an error on the force path, not silently swallowed")
+	}
+	if !strings.Contains(err.Error(), "already defined") {
+		t.Errorf("PVE's verbatim duplicate text was not propagated on the force path: %v", err)
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 // --- Invariant 7: defensive UPID row -> WaitForTask path runs ---------------

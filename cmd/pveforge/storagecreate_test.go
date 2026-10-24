@@ -93,6 +93,34 @@ func TestNewStorageCreateCmd_RequiredKeysGuardRefusesBeforeTheServer(t *testing.
 	}
 }
 
+// TestNewStorageCreateCmd_DataTypeConflictRefused proves `--data type=` is
+// refused in favor of `--type`, before any request (fold-in for surviving
+// mutant C): dropping the guard would silently overwrite the --data value.
+func TestNewStorageCreateCmd_DataTypeConflictRefused(t *testing.T) {
+	var hits int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":null}`))
+	}))
+	defer srv.Close()
+
+	rosterPath := newTestRosterWithTLSTarget(t, srv, "qa-pve-07", "qa-pve-07")
+	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
+
+	cmd := newStorageCreateCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--roster", rosterPath, "qa-pve-07", "pveforge-harness", "--type", "zfspool", "--data", "type=dir", "--data", "pool=tank"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected --data type= to be refused in favor of --type")
+	} else if !strings.Contains(err.Error(), "type") {
+		t.Errorf("expected the refusal to name the type conflict, got: %v", err)
+	}
+	if atomic.LoadInt32(&hits) != 0 {
+		t.Errorf("the conflict must be refused before any request, got %d hits", atomic.LoadInt32(&hits))
+	}
+}
+
 // TestNewStorageCreateCmd_DifferingRefusedNoPost proves a present+differing
 // storage is refused by the command with no POST.
 func TestNewStorageCreateCmd_DifferingRefusedNoPost(t *testing.T) {

@@ -160,23 +160,65 @@ func (c *Client) GetStorageConfig(ctx context.Context, storageID string) (*proxm
 	return result, nil
 }
 
+// GetStorageConfigRaw reads storageID's cluster-wide CONFIG object —
+// GET /storage/{storageID} — as the RAW PVE object, decoded into a map of its
+// own PVE-named keys (type, pool, content, nodes, sparse, shared, digest, ...),
+// NOT the typed proxmox.ClusterStorage. That struct models only a subset
+// (Content, Digest, Storage, Type, Shared, Nodes, Thinpool, Path, VgName) and
+// encoding/json silently DROPS every other key on decode — notably `pool` (the
+// field a zfspool is defined by), `sparse`, and an omitempty `shared=0`. A
+// drift check that must compare every parameter the operator asked for needs
+// those keys, so StorageCreate reads through this; GetStorageConfig and
+// GetStorageConfigPath keep the typed struct for callers that only need the
+// modeled fields. This mirrors storageorphans.go's storageContentEntry, which
+// adds back the one field proxmox.StorageContent drops for the same reason.
+//
+// A not-found id is left for the caller to classify (IsStorageNotFoundError),
+// exactly as GetStorageConfig: the error is wrapped with %w so errors.As still
+// finds the typed PVE answer.
+func (c *Client) GetStorageConfigRaw(ctx context.Context, storageID string) (map[string]json.RawMessage, error) {
+	if storageID == "" {
+		return nil, fmt.Errorf("get storage config: storage id is required")
+	}
+	raw := map[string]json.RawMessage{}
+	if err := c.pc.Get(ctx, fmt.Sprintf("/storage/%s", url.PathEscape(storageID)), &raw); err != nil {
+		return nil, fmt.Errorf("get storage config for %q: %w", storageID, err)
+	}
+	return raw, nil
+}
+
 // IsStorageNotFoundError reports whether err is PVE's own answer that a
-// storage id does not exist. GET /storage/{id} for a missing id answers 400
-// "No such storage." in its errors.storage parameter map — NOT the "does not
-// exist" phrase pve.NotFound keys on — so storage needs its own classifier
-// (verified live against nested pvh 2026-10-23, evidence
-// ~/.config/pveforge/harness-evidence/batch-a/; see notfound.go's own note on
-// the missing-storage wording). Fails CLOSED: only a typed PVE answer (a
-// *StatusError or *proxmox.StatusError anywhere in err's chain) whose text
-// carries "no such storage" is read as absent; a transport failure or any
-// untyped text that merely looks like an answer is not, so a read that failed
-// for some other reason is never mistaken for "the storage isn't there".
+// storage id does not exist. PVE answers a missing storage with a 400
+// parameter-verification body whose errors.storage entry is exactly
+// "No such storage." — NOT the "does not exist" phrase pve.NotFound keys on —
+// so storage needs its own classifier. The missing-storage wording was
+// observed live for the per-node STATUS endpoint
+// (GET /nodes/{node}/storage/{name}/status; nested pvh 2026-10-23, evidence
+// ~/.config/pveforge/harness-evidence/batch-a/, item storage-missing); the
+// config endpoint GET /storage/{id} that GetStorageConfigRaw calls shares that
+// wording by PVE convention, but its 400 body is NOT yet captured on a live
+// host, so this is not a claim that the config route was live-verified.
+//
+// Anchored, not a whole-answer substring: it is true ONLY when a typed PVE
+// answer (a *StatusError or *proxmox.StatusError anywhere in err's chain)
+// carries a parameter-verification map whose `storage` entry equals
+// "No such storage." (case-insensitive, optional trailing period), via the
+// same parameterErrors decode notfound.go uses. Fails CLOSED both ways: an
+// untyped error, a transport failure, a duplicate-id 500, or a privilege 403
+// whose prose merely contains the phrase "no such storage pool" is NOT read as
+// absent — only PVE's exact absence answer is, so a read that failed for some
+// other reason is never mistaken for "the storage isn't there".
 func IsStorageNotFoundError(err error) bool {
 	answer, ok := pveAnswer(err)
 	if !ok {
 		return false
 	}
-	return strings.Contains(strings.ToLower(answer), "no such storage")
+	entries, structured := parameterErrors(answer)
+	if !structured {
+		return false
+	}
+	entry := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(entries["storage"])), ".")
+	return entry == "no such storage"
 }
 
 // GetStorageVolumes lists the content (volumes: disks, ISOs, backups,
