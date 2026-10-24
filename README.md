@@ -52,6 +52,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
 | `network set`, `network bridge create` / `destroy` | Change node-level network interfaces |
 | `storage orphans` | Diff claimed against actual storage volumes |
+| `storage create` | Create a cluster-wide storage definition, idempotently; refuses a differing one |
 | `discover …` | Describe PVE's own object schemas, or a pveforge device type |
 | `api get` / `post` / `put` / `delete` | Raw PVE REST passthrough |
 | `schema` | pveforge's own command tree, flags and mutation levels, as JSON |
