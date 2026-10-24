@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
@@ -142,8 +143,9 @@ func (c *Client) CreateStorage(ctx context.Context, name string, params url.Valu
 // a zfspool/lvm storage that has no on-disk path.
 //
 // A not-found id is left for the caller to classify (IsStorageNotFoundError):
-// PVE answers a missing storage with its own 400 "No such storage.", which
-// this wraps with %w so errors.As still finds the typed answer.
+// this config endpoint answers a missing id with HTTP 500 "storage '<id>' does
+// not exist" (qa-pve-07, 2026-10-24), which this wraps with %w so errors.As
+// still finds the typed answer.
 //
 // Deliberately calls c.pc.Get directly rather than go-proxmox's own
 // Client.ClusterStorage wrapper, for the same reason as GetStorage/GetNode
@@ -187,38 +189,53 @@ func (c *Client) GetStorageConfigRaw(ctx context.Context, storageID string) (map
 	return raw, nil
 }
 
-// IsStorageNotFoundError reports whether err is PVE's own answer that a
-// storage id does not exist. PVE answers a missing storage with a 400
-// parameter-verification body whose errors.storage entry is exactly
-// "No such storage." — NOT the "does not exist" phrase pve.NotFound keys on —
-// so storage needs its own classifier. The missing-storage wording was
-// observed live for the per-node STATUS endpoint
-// (GET /nodes/{node}/storage/{name}/status; nested pvh 2026-10-23, evidence
-// ~/.config/pveforge/harness-evidence/batch-a/, item storage-missing); the
-// config endpoint GET /storage/{id} that GetStorageConfigRaw calls shares that
-// wording by PVE convention, but its 400 body is NOT yet captured on a live
-// host, so this is not a claim that the config route was live-verified.
+// storageConfigNotFoundRE matches the cluster CONFIG endpoint's not-found
+// message, "storage '<id>' does not exist" (optional trailing period), as a
+// bounded clause anywhere in a typed PVE answer. It is anchored on the exact
+// shape "storage '<quoted-name>' does not exist" — a word boundary before
+// `storage`, a single-quoted name, then the phrase — NOT a bare
+// strings.Contains(answer, "does not exist"), which PVE also emits for users,
+// VMs, pools and the like. "No such storage pool 'x'" and "storage ID 'x'
+// already defined" both fail it (no quoted name immediately after `storage `,
+// or no "does not exist").
+var storageConfigNotFoundRE = regexp.MustCompile(`(?i)\bstorage '[^']*' does not exist\b`)
+
+// IsStorageNotFoundError reports whether err is PVE's own answer that a storage
+// id does not exist. It accepts BOTH of PVE's missing-storage shapes — the two
+// endpoints word it differently — and only a typed PVE answer (a *StatusError
+// or *proxmox.StatusError anywhere in err's chain, via pveAnswer); an untyped
+// error or a transport failure is never read as absent.
 //
-// Anchored, not a whole-answer substring: it is true ONLY when a typed PVE
-// answer (a *StatusError or *proxmox.StatusError anywhere in err's chain)
-// carries a parameter-verification map whose `storage` entry equals
-// "No such storage." (case-insensitive, optional trailing period), via the
-// same parameterErrors decode notfound.go uses. Fails CLOSED both ways: an
-// untyped error, a transport failure, a duplicate-id 500, or a privilege 403
-// whose prose merely contains the phrase "no such storage pool" is NOT read as
-// absent — only PVE's exact absence answer is, so a read that failed for some
-// other reason is never mistaken for "the storage isn't there".
+//   - The per-node STATUS endpoint, GET /nodes/{node}/storage/{name}/status,
+//     answers 400 with a parameter-verification map whose errors.storage entry
+//     is exactly "No such storage." (verified live, nested pvh 2026-10-23,
+//     evidence ~/.config/pveforge/harness-evidence/batch-a/, item
+//     storage-missing). Matched structurally via parameterErrors.
+//   - The cluster CONFIG endpoint, GET /storage/{id} (what GetStorageConfigRaw
+//     and so StorageCreate.Read call), answers HTTP 500 with the message
+//     "storage '<id>' does not exist" (verified live, qa-pve-07 2026-10-24:
+//     `pvesh get /storage/does-not-exist-xyz` → "storage '…' does not exist",
+//     surfaced over REST as a 500 carrying that message). Matched by the
+//     anchored storageConfigNotFoundRE, not a bare "does not exist" substring.
+//
+// Fails CLOSED: a duplicate-id 500 ("storage ID 'x' already defined"), a
+// privilege 403, a "No such storage pool 'x'", or an unrelated "user 'x' does
+// not exist" is NOT read as absent — so a read that failed for some other
+// reason is never mistaken for "the storage isn't there".
 func IsStorageNotFoundError(err error) bool {
 	answer, ok := pveAnswer(err)
 	if !ok {
 		return false
 	}
-	entries, structured := parameterErrors(answer)
-	if !structured {
-		return false
+	// Shape 1: the STATUS endpoint's structured 400 "No such storage.".
+	if entries, structured := parameterErrors(answer); structured {
+		entry := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(entries["storage"])), ".")
+		if entry == "no such storage" {
+			return true
+		}
 	}
-	entry := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(entries["storage"])), ".")
-	return entry == "no such storage"
+	// Shape 2: the CONFIG endpoint's 500 "storage '<id>' does not exist".
+	return storageConfigNotFoundRE.MatchString(answer)
 }
 
 // GetStorageVolumes lists the content (volumes: disks, ISOs, backups,

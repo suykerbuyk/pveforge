@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	proxmox "github.com/suykerbuyk/go-proxmox"
+
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 )
@@ -80,12 +82,14 @@ func (f *fakeStorageCreateClient) WaitForTask(_ context.Context, node, upid stri
 	return f.waitErr
 }
 
-// storageNotFoundErr is the typed PVE answer GET /storage/{id} gives for a
-// missing id — 400 "No such storage." in errors.storage (verified live, nested
-// pvh 2026-10-23, batch-a) — built the way RawRequest/go-proxmox build it, so
-// pve.IsStorageNotFoundError classifies it as absent.
+// storageNotFoundErr is the typed PVE answer the CONFIG endpoint
+// GET /storage/{id} actually gives for a missing id — observed live on
+// qa-pve-07 2026-10-24: HTTP 500 carrying "storage '<id>' does not exist",
+// built as go-proxmox's c.pc.Get builds it (*proxmox.StatusError). This is the
+// shape StorageCreate.Read hits; modelling it faithfully is the whole point
+// (the original fake served the /status 400 shape, which hid the live bug).
 func storageNotFoundErr() error {
-	return pve.NewStatusError("get storage config", 400, "400 Parameter verification failed.", []byte(`{"errors":{"storage":"No such storage."}}`))
+	return &proxmox.StatusError{StatusCode: 500, Status: "500 storage 'pveforge-harness' does not exist", Body: []byte(`{"data":null}`)}
 }
 
 func zfspoolParams() url.Values {
@@ -132,6 +136,28 @@ func TestStorageCreate_Absent_Creates(t *testing.T) {
 	// Anti-vacuity for the clean path: the created config was re-read.
 	if res.AfterErr != nil || res.After == "" || res.Before != "" {
 		t.Errorf("Before %q, After %q, AfterErr %v; want a clean re-read of the created storage", res.Before, res.After, res.AfterErr)
+	}
+}
+
+// TestStorageCreate_Read_ConfigEndpointNotFoundIsAbsent is the live-dogfood
+// regression (qa-pve-07, 2026-10-24): the CONFIG endpoint GET /storage/{id}
+// answers a MISSING storage with HTTP 500 "storage '<id>' does not exist", NOT
+// the /status endpoint's 400 "No such storage.". Read must classify that as
+// absent ("") so Apply proceeds to create — before the fix the Op failed at
+// Read and could not create an absent storage at all.
+func TestStorageCreate_Read_ConfigEndpointNotFoundIsAbsent(t *testing.T) {
+	client := &fakeStorageCreateClient{node: "qa-pve-07", getConfigErr: storageNotFoundErr()}
+	op := &StorageCreate{Client: client, Name: "pveforge-harness", Params: zfspoolParams()}
+
+	current, err := op.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read must treat the config-endpoint 500 not-found as absent, got error: %v", err)
+	}
+	if current != "" {
+		t.Errorf("current = %q, want \"\" (absent) for a missing storage", current)
+	}
+	if op.Satisfied(current) {
+		t.Error("an absent storage must not be Satisfied")
 	}
 }
 

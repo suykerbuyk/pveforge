@@ -31,6 +31,28 @@ func TestIsStorageNotFoundError(t *testing.T) {
 			want: true,
 		},
 		{
+			// The CONFIG endpoint GET /storage/{id} shape, observed live on
+			// qa-pve-07 2026-10-24: HTTP 500 carrying "storage '<id>' does not
+			// exist" in the status line. This is the shape StorageCreate.Read
+			// actually hits (go-proxmox c.pc.Get -> *proxmox.StatusError).
+			name: "config endpoint 500, message in the status line (proxmox.StatusError)",
+			err:  &proxmox.StatusError{StatusCode: 500, Status: "500 storage 'pveforge-harness' does not exist", Body: []byte(`{"data":null}`)},
+			want: true,
+		},
+		{
+			// Robustness: same message carried in the BODY instead of the status
+			// line (e.g. if a transport erases the reason phrase). pveAnswer
+			// concatenates status and body, so the matcher still fires.
+			name: "config endpoint 500, message in the body (pve.StatusError)",
+			err:  NewStatusError("get storage config", 500, "500 Internal Server Error", []byte(`storage 'pveforge-harness' does not exist`)),
+			want: true,
+		},
+		{
+			name: "unrelated 500 'user does not exist' is NOT storage-not-found",
+			err:  NewStatusError("some call", 500, "500 user 'ops@pve' does not exist", []byte(`{"data":null}`)),
+			want: false,
+		},
+		{
 			name: "untyped error carrying the phrase",
 			err:  errors.New("No such storage."),
 			want: false,
