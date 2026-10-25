@@ -243,7 +243,7 @@ func TestCluster_Full(t *testing.T) {
 	if join.stdin != nestedPw+"\n" {
 		t.Errorf("the join's stdin %q", join.stdin)
 	}
-	for _, w := range []string{"--hostname 192.0.2.90 --fingerprint " + n1Fingerprint + ` --password "$pw" --link0 192.0.2.91`, "IFS= read -r pw", "pvesh create /cluster/config/join", "echo JOIN_ATTEMPT"} {
+	for _, w := range []string{"--hostname 192.0.2.90 --fingerprint " + n1Fingerprint + ` --password "$pw" --link0 192.0.2.91`, "IFS= read -r pw", "pvesh create /cluster/config/join", "echo JOIN_ATTEMPT", "Cluster join aborted!", "finishing setup locally", "n=$((n + 1))", "sleep 5"} {
 		if !strings.Contains(remoteScript(t, join), w) {
 			t.Errorf("the join lacks %q:\n%s", w, join.cmd)
 		}

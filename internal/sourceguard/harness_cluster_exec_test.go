@@ -35,6 +35,9 @@ exit 2`,
 	// pvecm status: stub/pvecm-status; anything else: logged only.
 	"pvecm": `if [ "$1" = status ]; then cat "$R/stub/pvecm-status" 2>/dev/null; exit 0; fi`,
 	"pvesh": `:`,
+	// sleep: a no-op, so the join retry loop's node-side backoff does not actually
+	// delay the exec tests (the sandbox PATH otherwise has no sleep).
+	"sleep": `:`,
 	// pvesm status --storage X: status stub/pvesm.rc (default 1: no such storage).
 	"pvesm": `if [ "$1" = status ]; then exit "$(cat "$R/stub/pvesm.rc" 2>/dev/null || echo 1)"; fi`,
 }
@@ -365,6 +368,106 @@ func TestCluster_ReadyProbeScriptExecuted(t *testing.T) {
 		}
 		if r := runRemote(t, root, script, nil, ""); r.code == 0 {
 			t.Errorf("exit 0 on pvesh failure, want nonzero\n%s", r.out)
+		}
+	})
+}
+
+// X6: the join RETRY loop, EXECUTED. The fake-ssh byte-pin returns resp verbatim
+// and never runs the loop, so this pins the loop's behavior: retry ONLY on a clean
+// abort, bounded, no retry once n2 began local setup, and tolerate a non-zero pvesh
+// (|| true). in_pvh is neutralized via the X2 rewrite with no file, so the loop is
+// reached. The pvesh stub counts calls (one pw line per call in pvesh.pw) and
+// records the --password it saw; `sleep` is the no-op remoteStubs entry.
+const pveshRetryStub = `c=$(cat "$R/pvesh.n" 2>/dev/null || echo 0); c=$((c + 1)); printf '%s' "$c" >"$R/pvesh.n"
+p=""; a=("$@"); i=0; while [ "$i" -lt "${#a[@]}" ]; do [ "${a[$i]}" = --password ] && p="${a[$((i + 1))]}"; i=$((i + 1)); done
+printf '%s\n' "$p" >>"$R/pvesh.pw"
+case "$(cat "$R/pvesh.mode")" in
+abort-then-succeed) if [ "$c" -ge 2 ]; then echo "successfully added node 'pvh-n2' to cluster."; else echo "cluster not ready - no quorum?"; echo "Cluster join aborted!"; fi ;;
+always-abort) if [ "$c" -ge 4 ]; then echo "successfully added node 'pvh-n2' to cluster."; else echo "cluster not ready - no quorum?"; echo "Cluster join aborted!"; fi ;;
+partial) echo "Join request OK, finishing setup locally"; echo "stopping pve-cluster service"; echo "Cluster join aborted!" ;;
+hardfail) echo "pvesh: transport error" >&2; echo "pvesh: transport error"; exit 1 ;;
+esac
+exit 0
+`
+
+func TestCluster_JoinRetryScriptExecuted(t *testing.T) {
+	script := clusterScripts(t)[cN2+" cluster-join"]
+	if script == "" {
+		t.Fatal("no cluster-join script captured")
+	}
+	// Neutralize in_pvh (the X2 rewrite, with NO file created) so the loop is reached.
+	rw := [][2]string{{"/etc/pve/corosync.conf", "$R/corosync.conf"}}
+	setup := func(t *testing.T, mode string) string {
+		root := newRemoteRoot(t)
+		if err := os.WriteFile(filepath.Join(root, "pvesh.mode"), []byte(mode), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "bin", "pvesh"), []byte("#!"+filepath.Join(root, "bin", "bash")+"\n"+pveshRetryStub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	pws := func(root string) []string {
+		b, _ := os.ReadFile(filepath.Join(root, "pvesh.pw"))
+		s := strings.TrimSuffix(string(b), "\n")
+		if s == "" {
+			return nil
+		}
+		return strings.Split(s, "\n")
+	}
+
+	// sub-1: clean abort then success -> retries once, ends success; stdout carries
+	// only the FINAL attempt (no abort line); the password is read once and reused.
+	t.Run("abort-then-succeed", func(t *testing.T) {
+		root := setup(t, "abort-then-succeed")
+		r := runRemote(t, root, script, rw, "testpw123\n")
+		if n := len(pws(root)); n != 2 {
+			t.Errorf("pvesh called %d, want 2 (retry once then succeed)\n%s", n, r.out)
+		}
+		if !strings.Contains(r.out, "successfully added node") {
+			t.Errorf("stdout lacks the success token:\n%s", r.out)
+		}
+		if strings.Contains(r.out, "Cluster join aborted!") {
+			t.Errorf("stdout contains the abort text (emit-final-only violated):\n%s", r.out)
+		}
+		if p := pws(root); len(p) != 2 || p[0] != "testpw123" || p[1] != "testpw123" {
+			t.Errorf("pvesh passwords %q, want both \"testpw123\" (single-read-pw)", p)
+		}
+	})
+
+	// sub-2: always a clean abort -> bounded at 3 attempts. The stub self-caps at
+	// call 4 (returns success) so a removed bound fails pvesh==3 fast, not by hang.
+	t.Run("always-clean-abort", func(t *testing.T) {
+		root := setup(t, "always-abort")
+		r := runRemote(t, root, script, rw, "testpw123\n")
+		if n := len(pws(root)); n != 3 {
+			t.Errorf("pvesh called %d, want 3 (bounded)\n%s", n, r.out)
+		}
+		if !strings.Contains(r.out, "Cluster join aborted!") {
+			t.Errorf("stdout lacks the abort text:\n%s", r.out)
+		}
+	})
+
+	// sub-3: an abort WITH both partial-setup markers -> n2 began local setup, so
+	// it must NOT retry (one call), even though an abort marker is present.
+	t.Run("abort-with-partial", func(t *testing.T) {
+		root := setup(t, "partial")
+		r := runRemote(t, root, script, rw, "testpw123\n")
+		if n := len(pws(root)); n != 1 {
+			t.Errorf("pvesh called %d, want 1 (no retry once local setup began)\n%s", n, r.out)
+		}
+	})
+
+	// sub-4 (obligation g): a non-zero pvesh with no marker -> || true must let the
+	// loop break and the script complete (exit 0), one call, no retry.
+	t.Run("non-marker-hard-failure", func(t *testing.T) {
+		root := setup(t, "hardfail")
+		r := runRemote(t, root, script, rw, "testpw123\n")
+		if r.code != 0 {
+			t.Errorf("remote script exit %d, want 0 (|| true must tolerate a non-zero pvesh)\n%s", r.code, r.out)
+		}
+		if n := len(pws(root)); n != 1 {
+			t.Errorf("pvesh called %d, want 1\n%s", n, r.out)
 		}
 	})
 }

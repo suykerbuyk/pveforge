@@ -266,16 +266,33 @@ harness_evidence_note "PASS step cert-info (n1): $fp"
 # printf is a builtin: the password is on no workstation argv; the remote
 # script reads it from its stdin. On n2 it is pvesh's argument (E1's
 # accepted risk, operator ruling 2).
-# One join attempt, no retry: a re-run of cluster.sh, gated by in_pvh, is the
-# operator's retry. The remote script echoes JOIN_ATTEMPT before pvesh so the
-# workstation can tell an in_pvh skip from a real attempt (an empty/failed ssh
-# must red, not PASS). jrc is initialized first (set -u is on); the pipeline's
-# status is captured with || so set -e does not swallow it.
+# The remote script echoes JOIN_ATTEMPT before pvesh so the workstation can tell
+# an in_pvh skip from a real attempt (an empty/failed ssh must red, not PASS).
+# jrc is initialized first (set -u is on); the pipeline's status is captured with
+# || so set -e does not swallow it. The remote join loops up to 3 times, retrying
+# ONLY on a clean abort (n1 not yet join-ready: "Cluster join aborted!" /
+# "cluster not ready - no quorum?" with NO local-setup marker), with a short
+# node-side backoff, so a fresh create->join greens in one pass; it emits only the
+# FINAL attempt, leaving the workstation parse below unchanged. The clean-abort and
+# partial-setup markers are ATTESTED (2026-10-25 captures), not an exhaustive list.
 jrc=0
 printf '%s\n' "$pw" | rx_stdin n2 cluster-join "$in_pvh
 echo JOIN_ATTEMPT
 IFS= read -r pw
-pvesh create /cluster/config/join --hostname $N1 --fingerprint $fp --password \"\$pw\" --link0 $N2
+n=0; out=
+while :; do
+	n=\$((n + 1))
+	out=\$(pvesh create /cluster/config/join --hostname $N1 --fingerprint $fp --password \"\$pw\" --link0 $N2 2>&1) || true
+	case \"\$out\" in *\"successfully added node\"*) break ;; esac
+	if [ \"\$n\" -lt 3 ] \\
+		&& printf '%s\n' \"\$out\" | grep -qE 'Cluster join aborted!|cluster not ready - no quorum?' \\
+		&& ! printf '%s\n' \"\$out\" | grep -qE 'finishing setup locally|stopping pve-cluster service'; then
+		sleep 5
+		continue
+	fi
+	break
+done
+printf '%s\n' \"\$out\"
 " >"$EVID/cluster-join.out" 2>&1 || jrc=$?
 pw=
 unset pw
