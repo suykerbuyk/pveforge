@@ -86,10 +86,12 @@ func (c *Client) storageContentWithType(ctx context.Context, node, storage strin
 // shorter list, and nothing in this function (or its caller) can detect
 // that after the fact. The target's token needs full node-scoped audit
 // rights (VM.Audit at minimum) for the result to be trustworthy. This
-// permission-scoped short-list hazard is NOT yet live-verified — Batch C's
-// C3 (item 76, token-short-list) is still owed, its OQ-3 view-restricted
-// token not provisioned — so treat this precondition as
-// unverified-against-a-live-host.
+// permission-scoped short-list hazard is LIVE-VERIFIED (nested pvh
+// 2026-10-25, PVE 9.2, Batch C item 76/C3, VMID 690, capture exit 0): a
+// token holding Datastore.Allocate but NO VM.Audit got a plain 200 with the
+// owning VM absent from the list, and that VM's live disk then read as a
+// false orphan under it but not under a full VM.Audit token. See
+// OrphanVolumes for the exact dangerous vs too-weak token shapes.
 //
 // Linked-clone volid identity — live on nested lvmthin (pvh 2026-10-23,
 // Batch C item 74); UNVERIFIED on ZFS (deferred item 79). Live-verified facts:
@@ -203,13 +205,25 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 // storage's ObjectKey for the duration of this call; OrphanVolumes does
 // not lock anything itself.
 //
-// Trust precondition: see ClaimedVolumes — this function inherits GetVMs'
-// and ClaimedVolumes' exposure to permission-scoped short lists. A token
+// Trust precondition (LIVE-VERIFIED, nested pvh 2026-10-25, PVE 9.2, Batch
+// C item 76/C3): see ClaimedVolumes — this function inherits GetVMs' and
+// ClaimedVolumes' exposure to permission-scoped short lists. A token
 // missing view rights on even one VM makes every volume that VM
 // legitimately owns look orphaned, silently, with no error anywhere in
-// this call. Requires a full node-scoped audit-rights token; do not call
-// this with a narrowly-scoped token and trust the result for a
-// destructive follow-up action.
+// this call. The dangerous token shape is precise: /content reveals a
+// VM-owned image to a token holding Datastore.Allocate (on the storage) OR
+// VM.Config.Disk (on the VM) — NEITHER grants VM.Audit, so the owning VM
+// stays out of GET /nodes/{node}/qemu. The Allocate shape was then run
+// through this function and the live disk read as a false orphan; the
+// VM.Config.Disk shape was measured only as that visibility split (disk
+// present, VM absent), not as an OrphanVolumes result. A Datastore.Audit-only
+// token is too weak to see the disk in /content at all (safe by accident,
+// not by design). Adding Datastore.AllocateSpace on top of Datastore.Audit
+// was also measured and still hid the disk; AllocateSpace alone was not
+// isolated. So /content visibility is NOT a subset of VM-list
+// visibility. Requires a full node-scoped VM.Audit token (every VM on
+// the node); do not call this with a storage-operator token and trust
+// the result for a destructive follow-up action.
 //
 // Shared-storage refusal: a shared storage's content listing reflects
 // volumes claimed by VMs on OTHER cluster nodes too, invisible to this
@@ -296,7 +310,16 @@ func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*pr
 // else in this file: pveforge-storage-volume-tracking's VolumeFreeOrphans
 // calls this to decide what to DELETE. A permission-scoped short claimed
 // set does not just mis-report — it frees a volume that is still in
-// active use. See vault task pveforge-storage-orphan-scan's "Unverified
+// active use, and this is LIVE-VERIFIED (nested pvh 2026-10-25, PVE 9.2,
+// Batch C item 76/C3, VMID 690): under a storage-operator token
+// (Datastore.Allocate + Datastore.Audit on the storage, no VM.Audit) a
+// live VM's disk read as a false orphan here and would have been freed.
+// VolumeFreeOrphans MUST refuse a destructive free unless its token
+// holds VM.Audit on every VM that can own a volume in that content
+// listing (measured: node-scoped GET /nodes/{node}/qemu; a VM.Audit
+// grant on /vms/690 was enough to un-hide that one VM). A cluster-wide
+// grant is sufficient if it implies that, and was not itself measured.
+// See vault task pveforge-storage-orphan-scan's "Unverified
 // assumptions" section.
 //
 // Linked-clone caveat — live on nested lvmthin (pvh 2026-10-23, Batch C
