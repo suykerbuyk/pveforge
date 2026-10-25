@@ -28,6 +28,20 @@ const (
 	pvecmOK   = "Cluster information\n-------------------\nName:             pvh\n\nQuorum information\n------------------\nNodes:            2\nQuorate:          Yes\n\nVotequorum information\n----------------------\nExpected votes:   3\nHighest expected: 3\nTotal votes:      3\nQuorum:           2  \nFlags:            Quorate Qdevice \n"
 	exportsOK = "/srv/pvh      \t192.0.2.90(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,no_root_squash,no_all_squash)\n" +
 		"/srv/pvh      \t192.0.2.91(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,no_root_squash,no_all_squash)\n"
+
+	// cluster-join outcomes. The remote join script echoes JOIN_ATTEMPT before
+	// pvesh, so the workstation tells an in_pvh skip from a real attempt.
+	// Happy path: a real attempt that reports success.
+	clusterJoinOK = "JOIN_ATTEMPT\nwaiting for quorum...OK\nsuccessfully added node 'pvh-n2' to cluster.\n" +
+		"UPID:pvh-n2:00001234:00005678:6ADE0000:clusterjoin::root@pam:\n"
+	// The real 2026-10-25 abort body (its three lines), after JOIN_ATTEMPT: pvesh
+	// exited 0 but the join aborted — the attested lie-green.
+	clusterJoinAbort = "JOIN_ATTEMPT\nAn error occurred on the cluster node: cluster not ready - no quorum?\n" +
+		"Cluster join aborted!\nUPID:pvh-n2:00001234:00005678:6ADE0000:clusterjoin::root@pam:\n"
+	// A real attempt that reached quorum-wait but printed NO success sentence:
+	// isolates the positive-success check (no abort line here).
+	clusterJoinNoSuccess = "JOIN_ATTEMPT\nwaiting for quorum...OK\n" +
+		"UPID:pvh-n2:00001234:00005678:6ADE0000:clusterjoin::root@pam:\n"
 )
 
 // clusterSpec: a world in which every step succeeds and the join is seen on
@@ -43,7 +57,7 @@ type clusterSpec struct {
 func clusterWorld() clusterSpec {
 	return clusterSpec{
 		resp: map[string]string{
-			"reach": "", "nfs-server": "", "node-packages": "", "cluster-create": "", "cluster-join": "",
+			"reach": "", "nfs-server": "", "node-packages": "", "cluster-create": "", "cluster-ready": pvecmOK, "cluster-join": clusterJoinOK,
 			"qdevice-keys": "", "qdevice-known": "", "qdevice-setup": "", "storage": "",
 			"cert-info":             `[{"filename":"pve-root-ca.pem","fingerprint":"11:22"},{"filename":"pve-ssl.pem","fingerprint":"` + n1Fingerprint + `"}]`,
 			"cluster-status":        strings.Replace(clusterOK, `"online":1,"nodeid":2`, `"online":0,"nodeid":2`, 1),
@@ -156,7 +170,7 @@ var clusterSteps = []string{
 	cN1 + " reach", cN2 + " reach", cNFS + " reach",
 	cNFS + " nfs-server",
 	cN1 + " node-packages", cN2 + " node-packages",
-	cN1 + " cluster-create", cN1 + " cert-info", cN2 + " cluster-join",
+	cN1 + " cluster-create", cN1 + " cluster-ready", cN1 + " cert-info", cN2 + " cluster-join",
 	cN1 + " cluster-status", cN1 + " cluster-status",
 	cN1 + " root-key", cN2 + " root-key",
 	cNFS + " qdevice-keys", cN1 + " qdevice-known", cN2 + " qdevice-known", cN1 + " qdevice-setup",
@@ -229,7 +243,7 @@ func TestCluster_Full(t *testing.T) {
 	if join.stdin != nestedPw+"\n" {
 		t.Errorf("the join's stdin %q", join.stdin)
 	}
-	for _, w := range []string{"--hostname 192.0.2.90 --fingerprint " + n1Fingerprint + ` --password "$pw" --link0 192.0.2.91`, "IFS= read -r pw", "pvesh create /cluster/config/join"} {
+	for _, w := range []string{"--hostname 192.0.2.90 --fingerprint " + n1Fingerprint + ` --password "$pw" --link0 192.0.2.91`, "IFS= read -r pw", "pvesh create /cluster/config/join", "echo JOIN_ATTEMPT"} {
 		if !strings.Contains(remoteScript(t, join), w) {
 			t.Errorf("the join lacks %q:\n%s", w, join.cmd)
 		}
@@ -253,6 +267,7 @@ func TestCluster_Full(t *testing.T) {
 		byKey[c.dest+" "+c.key] = remoteScript(t, c)
 	}
 	for step, wants := range map[string][]string{
+		cN1 + " cluster-ready": {"Quorate", "pvesh get /cluster/status"},
 		cNFS + " nfs-server": {"apt-get install -y --no-install-recommends nfs-kernel-server corosync-qnetd", "dev=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1",
 			`if [ "$rc" = 2 ]; then`, "mkfs.ext4 -q -L pvh-export", "/srv/pvh 192.0.2.90(rw,sync,no_subtree_check,no_root_squash) 192.0.2.91(rw,sync,no_subtree_check,no_root_squash)", "exportfs -ra"},
 		cN1 + " node-packages":  {"Components: pve-no-subscription", "apt-get install -y corosync-qdevice", "pve-enterprise.sources"},
@@ -272,7 +287,7 @@ func TestCluster_Full(t *testing.T) {
 		t.Errorf("slept %d times, want 1 (the join is seen on the second look)", r.sleeps)
 	}
 	res := r.clusterEvidence(t, "result.txt")
-	if strings.Contains(res, "RED") || strings.Count(res, "PASS ") != 27 || !strings.Contains(res, "RESULT phase=cluster fail=0") {
+	if strings.Contains(res, "RED") || strings.Count(res, "PASS ") != 28 || !strings.Contains(res, "RESULT phase=cluster fail=0") {
 		t.Errorf("result.txt:\n%s", res)
 	}
 	r.clusterEvidence(t, "MANIFEST.sha256")
@@ -396,8 +411,73 @@ func TestCluster_JoinWaitBounded(t *testing.T) {
 	if r.code != 1 || r.sleeps != 20 || !strings.Contains(r.clusterEvidence(t, "result.txt"), "RED after 300s, n1 does not see two nodes online") {
 		t.Fatalf("exit %d sleeps %d\n%s", r.code, r.sleeps, r.stdout)
 	}
-	if got := steps(sshCalls(t, r)); got[len(got)-1] != cN1+" cluster-status" || len(got) != 9+21 {
+	if got := steps(sshCalls(t, r)); got[len(got)-1] != cN1+" cluster-status" || len(got) != 10+21 {
 		t.Errorf("steps %d, last %q", len(got), got[len(got)-1])
+	}
+}
+
+// C6: the join OUTCOME is parsed, not just pvesh's exit. rc==0 with an abort
+// body reds (the attested 2026-10-25 lie-green); rc==0 with no success token
+// reds (pins the positive-success check); an in_pvh skip PASSes (no lie-RED,
+// so the Part-6 re-run smoke stays green).
+func TestCluster_JoinOutcomeParse(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want string // required substring of result.txt
+		red  bool
+	}{
+		"rc0 abort body reds": {clusterJoinAbort, "RED step cluster-join (n2): join reported failure in output", true},
+		"rc0 no success reds": {clusterJoinNoSuccess, "RED step cluster-join (n2): join did not report success", true},
+		"in_pvh skip passes":  {"already in cluster pvh\n", "PASS step cluster-join (n2): already in cluster pvh", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := clusterWorld()
+			c.resp["cluster-join"] = tc.body // rc defaults to 0
+			r := runProbe(t, c.spec(t))
+			res := r.clusterEvidence(t, "result.txt")
+			if !strings.Contains(res, tc.want) {
+				t.Errorf("result.txt lacks %q:\n%s", tc.want, res)
+			}
+			if tc.red {
+				if r.code != 1 || !strings.Contains(res, "RESULT phase=cluster fail=1") {
+					t.Errorf("exit %d, want 1 and fail=1:\n%s", r.code, res)
+				}
+				if got := steps(sshCalls(t, r)); got[len(got)-1] != cN2+" cluster-join" {
+					t.Errorf("last step %q, want cluster-join (the run stops at the bad join)", got[len(got)-1])
+				}
+			} else if r.code != 0 || strings.Contains(res, "RED") {
+				t.Errorf("exit %d, want 0 and no RED:\n%s", r.code, res)
+			}
+		})
+	}
+}
+
+// C7: the quorum-ready wait is bounded by CREATE_READY_FOR and runs BEFORE the
+// join (order pin). When n1 never becomes ready the run reds naming
+// CREATE_READY_FOR (not the join-wait's 300s), the last ssh step is
+// cluster-ready, the join is never attempted, and the sleep count is finite.
+func TestCluster_ReadyWaitBounded(t *testing.T) {
+	c := clusterWorld()
+	delete(c.resp, "cluster-ready") // no answer -> fake-ssh exit 99 -> never ready
+	r := runProbe(t, c.spec(t))
+	res := r.clusterEvidence(t, "result.txt")
+	if r.code != 1 || !strings.Contains(res, "RED step cluster-ready (n1)") || !strings.Contains(res, "180") {
+		t.Fatalf("exit %d, want 1 and a cluster-ready red naming 180:\n%s", r.code, res)
+	}
+	if strings.Contains(res, "300s") {
+		t.Errorf("the ready-wait red reused the join-wait's 300s bound:\n%s", res)
+	}
+	got := steps(sshCalls(t, r))
+	if got[len(got)-1] != cN1+" cluster-ready" {
+		t.Errorf("last step %q, want cluster-ready", got[len(got)-1])
+	}
+	for _, s := range got {
+		if s == cN2+" cluster-join" {
+			t.Errorf("cluster-join was attempted before the ready wait passed:\n%q", got)
+		}
+	}
+	if r.sleeps != 12 {
+		t.Errorf("ready-wait sleeps = %d, want 12 (observed: bound 180, 15s per look from clock 70)", r.sleeps)
 	}
 }
 
@@ -454,8 +534,8 @@ func TestCluster_VerifyReds(t *testing.T) {
 				t.Errorf("%d reds, want %d:\n%s", n, len(tc.reds), res)
 			}
 			// Every check ran: 5 fetches and 6 checks after the 16 steps.
-			if n := strings.Count(res, "PASS ") + strings.Count(res, "RED "); n != 27 {
-				t.Errorf("%d results, want 27:\n%s", n, res)
+			if n := strings.Count(res, "PASS ") + strings.Count(res, "RED "); n != 28 {
+				t.Errorf("%d results, want 28:\n%s", n, res)
 			}
 		})
 	}

@@ -93,6 +93,7 @@ readonly KNOWN=$CFG/harness-nested.known_hosts
 readonly N1=${HB[N1_IP]} N2=${HB[N2_IP]} NFS=${HB[NFS_IP]}
 readonly JOIN_EVERY=5
 readonly JOIN_FOR=300
+readonly CREATE_READY_FOR=180
 
 # ---- Preflight: local only. ----
 exec {lock_fd}>>"$CFG/harness.lock" || hb_die 2 "cannot open $CFG/harness.lock"
@@ -166,6 +167,15 @@ red() { # message: a step that failed on the workstation's side
 	HARNESS_EVIDENCE_FAIL=1
 	harness_evidence_finish
 }
+# now prints the wall clock in unix seconds; a clock read failure is a red,
+# never swallowed. Defined here (after red) because both the quorum-ready wait
+# before the join and the join-wait after it use it.
+now() {
+	local t
+	t=$("$HB_TOOL_DATE" +%s) || red "cannot read the clock"
+	[[ $t =~ ^[0-9]+$ ]] || red "the clock read '$t'"
+	printf '%s' "$t"
+}
 
 step n1 reach 'true'
 step n2 reach 'true'
@@ -224,6 +234,30 @@ fi
 step n1 cluster-create "$in_pvh
 pvecm create pvh --link0 $N1
 "
+# Quorum-ready wait: narrow the create->join race window. `pvecm create` can
+# return before n1's corosync/pmxcfs is quorum-ready, and the n2 join then hits
+# an n1 that rejects it (attested 2026-10-25: cluster-join.out
+# "cluster not ready - no quorum?"). Poll n1, bounded, until corosync reports
+# Quorate AND the API serves a GET. This is a MITIGATION ONLY: a GET of
+# /cluster/status can succeed while a join is still rejected (in that same run
+# n1 served /cluster/status "quorate":1 for the whole 300s after n2 was
+# refused). It does NOT prove pmxcfs is writable or that the join will be
+# accepted; the cluster-join outcome parse below is the guarantee. Use rx (not
+# step) so a not-ready look loops instead of ending the run; the only hard stop
+# is the bounded red.
+t=$(now)
+deadline=$((t + CREATE_READY_FOR))
+i=0
+while :; do
+	if rx n1 cluster-ready "pvecm status 2>/dev/null | grep -qE '^Quorate:[[:space:]]+Yes\$' && pvesh get /cluster/status --output-format json >/dev/null" >>"$EVID/cluster-ready.out" 2>&1; then
+		break
+	fi
+	t=$(now)
+	[ "$t" -lt "$deadline" ] || red "step cluster-ready (n1): n1 not quorum-ready ${CREATE_READY_FOR}s after pvecm create — the readiness probe did not pass: see cluster-ready.out"
+	i=$((i + 1))
+	"$HB_TOOL_SLEEP" "$JOIN_EVERY"
+done
+harness_evidence_note "PASS step cluster-ready (n1): readiness probe passed after $i polls"
 certs=$(rx n1 cert-info 'pvenode cert info --output-format json' 2>"$EVID/cert-info.stderr") || red "step cert-info (n1): see cert-info.stderr"
 printf '%s\n' "$certs" >"$EVID/cert-info.json"
 fp=$("$HB_TOOL_JQ" -r '[.[] | select(.filename == "pve-ssl.pem") | .fingerprint] | if length == 1 then .[0] else "" end' <<<"$certs" 2>/dev/null) || fp=
@@ -232,24 +266,40 @@ harness_evidence_note "PASS step cert-info (n1): $fp"
 # printf is a builtin: the password is on no workstation argv; the remote
 # script reads it from its stdin. On n2 it is pvesh's argument (E1's
 # accepted risk, operator ruling 2).
-if printf '%s\n' "$pw" | rx_stdin n2 cluster-join "$in_pvh
+# One join attempt, no retry: a re-run of cluster.sh, gated by in_pvh, is the
+# operator's retry. The remote script echoes JOIN_ATTEMPT before pvesh so the
+# workstation can tell an in_pvh skip from a real attempt (an empty/failed ssh
+# must red, not PASS). jrc is initialized first (set -u is on); the pipeline's
+# status is captured with || so set -e does not swallow it.
+jrc=0
+printf '%s\n' "$pw" | rx_stdin n2 cluster-join "$in_pvh
+echo JOIN_ATTEMPT
 IFS= read -r pw
 pvesh create /cluster/config/join --hostname $N1 --fingerprint $fp --password \"\$pw\" --link0 $N2
-" >"$EVID/cluster-join.out" 2>&1; then
-	harness_evidence_note "PASS step cluster-join (n2)"
-else
-	red "step cluster-join (n2): see cluster-join.out"
-fi
+" >"$EVID/cluster-join.out" 2>&1 || jrc=$?
 pw=
 unset pw
+if [ "$jrc" != 0 ]; then
+	red "step cluster-join (n2): see cluster-join.out"
+fi
+if "$HB_TOOL_GREP" -qx 'already in cluster pvh' "$EVID/cluster-join.out"; then
+	harness_evidence_note "PASS step cluster-join (n2): already in cluster pvh"
+elif "$HB_TOOL_GREP" -qx 'JOIN_ATTEMPT' "$EVID/cluster-join.out"; then
+	# A real join attempt: parse the outcome. Attested 2026-10-25 abort and
+	# 2026-10-09 success. Do NOT match bare abort/error/timeout/quorum: success
+	# prints "waiting for quorum...OK" and both outcomes print a UPID line.
+	if "$HB_TOOL_GREP" -qE 'Cluster join aborted!|cluster not ready - no quorum\?' "$EVID/cluster-join.out"; then
+		red "step cluster-join (n2): join reported failure in output: see cluster-join.out"
+	fi
+	if ! "$HB_TOOL_GREP" -q "successfully added node" "$EVID/cluster-join.out"; then
+		red "step cluster-join (n2): join did not report success: see cluster-join.out"
+	fi
+	harness_evidence_note "PASS step cluster-join (n2)"
+else
+	red "step cluster-join (n2): join reported neither skip nor attempt: see cluster-join.out"
+fi
 # The join runs as a task on n2: wait, bounded by the clock (each look is an
 # ssh round trip on top of the sleep), until n1 sees both nodes.
-now() {
-	local t
-	t=$("$HB_TOOL_DATE" +%s) || red "cannot read the clock"
-	[[ $t =~ ^[0-9]+$ ]] || red "the clock read '$t'"
-	printf '%s' "$t"
-}
 t=$(now)
 deadline=$((t + JOIN_FOR))
 i=0

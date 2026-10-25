@@ -331,3 +331,40 @@ func TestCluster_QdeviceAndStorageScriptsExecuted(t *testing.T) {
 		})
 	}
 }
+
+// X5: the quorum-ready probe (cluster-ready), EXECUTED under stubbed pvecm/pvesh.
+// The fake-ssh byte-pin never runs remote scripts, so this is what pins the
+// probe's BEHAVIOR: green only when corosync is Quorate AND the API GET
+// succeeds. Dropping the "&& pvesh" half or weakening the Quorate grep is caught
+// here (see the mutation obligations).
+func TestCluster_ReadyProbeScriptExecuted(t *testing.T) {
+	script := clusterScripts(t)[cN1+" cluster-ready"]
+	if script == "" {
+		t.Fatal("no cluster-ready script captured")
+	}
+	t.Run("quorate and api ok -> exit 0", func(t *testing.T) {
+		root := newRemoteRoot(t)
+		stubFile(t, root, "pvecm-status", pvecmOK)
+		if r := runRemote(t, root, script, nil, ""); r.code != 0 {
+			t.Errorf("exit %d, want 0\n%s", r.code, r.out)
+		}
+	})
+	t.Run("not quorate -> nonzero", func(t *testing.T) {
+		root := newRemoteRoot(t)
+		stubFile(t, root, "pvecm-status", strings.Replace(pvecmOK, "Yes\n\nVotequorum", "No\n\nVotequorum", 1))
+		if r := runRemote(t, root, script, nil, ""); r.code == 0 {
+			t.Errorf("exit 0 on Quorate: No, want nonzero\n%s", r.out)
+		}
+	})
+	t.Run("pvesh fails -> nonzero", func(t *testing.T) {
+		root := newRemoteRoot(t)
+		stubFile(t, root, "pvecm-status", pvecmOK)
+		// Override the pvesh stub to fail: the API-GET half must gate.
+		if err := os.WriteFile(filepath.Join(root, "bin", "pvesh"), []byte("#!"+filepath.Join(root, "bin", "bash")+"\nexit 1\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if r := runRemote(t, root, script, nil, ""); r.code == 0 {
+			t.Errorf("exit 0 on pvesh failure, want nonzero\n%s", r.out)
+		}
+	})
+}
