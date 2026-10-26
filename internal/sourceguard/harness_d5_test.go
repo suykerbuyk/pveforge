@@ -33,7 +33,7 @@ const (
 	d5SSHArgs = "-o BatchMode=yes -o ConnectTimeout=15 root@qa-pve-07.lab.quantum.com "
 )
 
-var d5V4Paths = []string{"/", "/vms", "/vms/105", "/vms/101", "/vms/600", "/nodes", "/nodes/qa-pve-07", "/storage", "/storage/local-lvm", "/storage/qa-dev-01-image-pool", "/sdn/zones/localnetwork/vmbr0/100", "/access", "/pool"}
+var d5V4Paths = []string{"/", "/vms", "/vms/105", "/vms/101", "/vms/600", "/nodes", "/nodes/qa-pve-07", "/storage", "/storage/local-lvm", "/sdn/zones/localnetwork/vmbr0/100", "/access", "/pool"}
 
 type d5Row struct {
 	Path      string `json:"path"`
@@ -251,6 +251,7 @@ type d5Case struct {
 	noP0, p0Exists      bool
 	evidenceExists      bool
 	noEvidenceVar       bool
+	outerEnv            string // the harness-outer.env body; "" = the committed example; "missing" = none
 	umask               string // when set, the umask the script inherits
 
 	wantCode int
@@ -348,8 +349,15 @@ func runD5(t *testing.T, c d5Case) d5Result {
 	if !c.noPinRoster {
 		write(pinRoster, d5PinRoster(pin), 0o600)
 	}
-	write(filepath.Join(cfg, "harness-outer.toml"), "# test roster\n", 0o600)
-	p0 := filepath.Join(cfg, "harness-outer.p0")
+	switch c.outerEnv {
+	case "missing":
+	case "":
+		write(filepath.Join(cfg, "harness-outer.env"), exampleOuterEnv(t), 0o600)
+	default:
+		write(filepath.Join(cfg, "harness-outer.env"), c.outerEnv, 0o600)
+	}
+	write(filepath.Join(cfg, outerRosterName), "# test roster\n", 0o600)
+	p0 := filepath.Join(cfg, "harness-qa-pve-07-outer.p0")
 	if (c.phase != "p0" && !c.noP0) || c.p0Exists {
 		if err := os.Mkdir(p0, 0o700); err != nil {
 			t.Fatal(err)
@@ -526,6 +534,63 @@ func TestD5Verify_Green(t *testing.T) {
 				if first := strings.SplitN(r.sshLog, "\n", 2)[0]; first != d5SSHArgs+"true" {
 					t.Errorf("the first ssh call was %q; the BatchMode check must come first", first)
 				}
+			}
+		})
+	}
+}
+
+// TestD5_OuterIdentityRefusesBeforeAnySsh is the verify-root.sh leg of the (b)
+// invariant: read_outer_identity (sourced via evidence.sh, before any ssh — this
+// script runs no harness_init) refuses a bad outer site file with exit 2 and
+// ZERO ssh calls. A lib-only test would lie-green this script, so it is driven
+// against verify-root.sh directly.
+// TestD5_P6TagFollowsOuterTag pins Fix 1: P6 verifies the tag the SITE FILE
+// names (D5_TAG=$HARNESS_TAG), not a baked-in literal, so a tag retarget is
+// actually checked. Only OUTER_TAG varies between the two cases: a datacenter
+// user-tag-access allow-list that names the retargeted tag passes P6; one that
+// omits it (while still naming the OLD literal pveforge-harness) fails — which a
+// reverted literal `--arg t pveforge-harness` on verify-root.sh:90 false-greens.
+func TestD5_P6TagFollowsOuterTag(t *testing.T) {
+	const retag = "harness-alt"
+	env := exampleOuterEnv(t, "OUTER_TAG="+retag)
+	t.Run("allow-list names the retargeted tag: P6 passes", func(t *testing.T) {
+		c := d5Case{
+			name: "p6 green", script: "verify-root.sh", phase: "p0", outerEnv: env,
+			world:    d5WithOptions(t, `{"user-tag-access":{"user-allow":"list","user-allow-list":["other","`+retag+`"]}}`),
+			wantCode: 0, wantPass: 16,
+		}
+		checkD5(t, c, runD5(t, c))
+	})
+	t.Run("allow-list omits the retargeted tag (names only the old literal): P6 RED", func(t *testing.T) {
+		c := d5Case{
+			name: "p6 red", script: "verify-root.sh", phase: "p0", outerEnv: env,
+			world:    d5WithOptions(t, `{"user-tag-access":{"user-allow":"list","user-allow-list":["other","pveforge-harness"]}}`),
+			wantCode: 1, wantPass: 15, wantRed: []string{"P6"},
+		}
+		checkD5(t, c, runD5(t, c))
+	})
+}
+
+func TestD5_OuterIdentityRefusesBeforeAnySsh(t *testing.T) {
+	good := exampleOuterEnv(t)
+	for _, tc := range []struct{ name, outerEnv, wantErr string }{
+		{"env missing", "missing", "harness-outer.env does not exist"},
+		{"unknown key", good + "\nOUTER_BOGUS=x\n", "unknown key OUTER_BOGUS"},
+		{"OUTER_NODE missing", strings.Replace(good, "OUTER_NODE=qa-pve-07\n", "", 1), "OUTER_NODE is missing"},
+		{"VMID band inverted", exampleOuterEnv(t, "VMID_LOW=700", "VMID_HIGH=699"), "must be VMID_LOW + 9"},
+		{"VMID not a decade", exampleOuterEnv(t, "VMID_LOW=695", "VMID_HIGH=704"), "not decade-aligned"},
+		{"FQDN not under node", exampleOuterEnv(t, "OUTER_FQDN=other.lab.quantum.com"), "does not begin with OUTER_NODE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runD5(t, d5Case{name: tc.name, script: "verify-root.sh", phase: "p0", world: d5WorldAt(t, "p0"), outerEnv: tc.outerEnv})
+			if r.code != 2 {
+				t.Errorf("exit %d, want 2 (refuse before any ssh)\nstderr:\n%s", r.code, r.stderr)
+			}
+			if !strings.Contains(r.stderr, tc.wantErr) {
+				t.Errorf("stderr lacks %q:\nstderr:\n%s", tc.wantErr, r.stderr)
+			}
+			if s := strings.TrimSpace(r.sshLog); s != "" {
+				t.Errorf("verify-root.sh made ssh calls on a bad outer env (want zero):\n%s", s)
 			}
 		})
 	}

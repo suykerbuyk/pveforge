@@ -26,7 +26,20 @@
 #
 # It does NOT run under unlock.sh; it wraps each secret-gated step in
 # `unlock.sh run --` itself and SSHes to n2 with the plaintext nested key.
-set -uo pipefail
+#
+# It sources lib.sh ONLY for the outer identity: read_outer_identity validates
+# the outer target (HARNESS_TARGET/HARNESS_NODE and the VMID band) from the
+# mode-600 harness-outer.env BEFORE any apiget/ssh, so a bad site file refuses
+# with exit 2 and zero pveforge/unlock.sh calls — this script reaches the outer
+# API with NO harness_init, so a reader deferred to harness_init would leave the
+# identity mutable in exactly this destructive path. lib.sh's set -euo pipefail
+# is then dropped back to this script's own fail-open model (set -uo pipefail):
+# A1 and the break loop deliberately inspect exit codes and node STATE, so
+# errexit must stay off; lib.sh's other hygiene (LC_ALL=C, resolved tools, no
+# inherited functions/traps) stays in force.
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+read_outer_identity
+set +e
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 die2() { echo "stage14: $*" >&2; exit 2; }  # usage/precondition failure, before evidence exists
@@ -35,9 +48,8 @@ die2() { echo "stage14: $*" >&2; exit 2; }  # usage/precondition failure, before
 NODE=pvh-n2                       # the node whose network is broken
 NODE_IP=10.20.247.91              # its management address (dropped by the break)
 BRIDGE=vmbr0                      # its management bridge (also --management-bridge)
-VMIDS=(690 691 692)               # pvh-n1, pvh-n2, pvh-nfs
-OUTER_TARGET=qa-pve-07-harness    # outer pool-token roster target
-OUTER_NODE=qa-pve-07              # outer node hosting the nested VMs
+# The three nested guests, from the validated VMID band (LOW, LOW+1, LOW+2).
+VMIDS=("$HARNESS_VMID_LOW" "$((HARNESS_VMID_LOW + 1))" "$((HARNESS_VMID_LOW + 2))")  # pvh-n1, pvh-n2, pvh-nfs
 GOLDEN_SNAP=pvh-golden
 KEY=${PVEFORGE_HARNESS_NESTED_KEY:-$HOME/.config/pveforge/harness-nested_ed25519}
 KNOWN=${PVEFORGE_HARNESS_NESTED_KNOWN_HOSTS:-$HOME/.config/pveforge/harness-nested.known_hosts}
@@ -51,7 +63,9 @@ while [ "$#" -gt 0 ]; do
 	*) die2 "unknown argument '$1' (usage: stage14-destructive-proof.sh --storage <id> [--iters N])" ;;
 	esac
 done
-[ -n "$storage" ] || die2 "the outer storage is required (--storage or HARNESS_STORAGE)"
+# With no --storage flag, default to the site file's OUTER_STORAGE (resolved by
+# read_outer_identity above); reset.sh then readonlys HARNESS_STORAGE from it (R4).
+[ -n "$storage" ] || storage=$HARNESS_OUTER_STORAGE
 [[ $iters =~ ^[1-9][0-9]*$ ]] || die2 "--iters must be a positive integer, got '$iters'"
 : "${PVEFORGE_BIN:?set PVEFORGE_BIN to the pveforge CLI}"
 : "${HARNESS_ACCEPT_BIN:?set HARNESS_ACCEPT_BIN to a pveforge-harness-accept binary}"
@@ -88,7 +102,7 @@ ssh_n2() { # runs stdin as a script on n2 over the pinned nested key; args after
 golden_stamp() {
 	local v snap stamp first=""
 	for v in "${VMIDS[@]}"; do
-		snap=$(apiget "/nodes/$OUTER_NODE/qemu/$v/snapshot" "$OUTER_TARGET" "$PVEFORGE_HARNESS_OUTER_ROSTERS") \
+		snap=$(apiget "/nodes/$HARNESS_NODE/qemu/$v/snapshot" "$HARNESS_TARGET" "$PVEFORGE_HARNESS_OUTER_ROSTERS") \
 			|| die "snapshot read for $v failed"
 		stamp=$(echo "$snap" | jq -r '.[] | select(.name=="'"$GOLDEN_SNAP"'" and (.vmstate // 0)==0) | .description' \
 			| sed -n 's/.*\([0-9]\{8\}T[0-9]\{6\}Z\).*/\1/p' | head -1)
@@ -104,9 +118,9 @@ g4_check() {
 	local label=$1 golden=$2 v cfg snap
 	log "## G4 ($label)"
 	for v in "${VMIDS[@]}"; do
-		cfg=$(apiget "/nodes/$OUTER_NODE/qemu/$v/config" "$OUTER_TARGET" "$PVEFORGE_HARNESS_OUTER_ROSTERS") || die "$label: cfg $v failed"
+		cfg=$(apiget "/nodes/$HARNESS_NODE/qemu/$v/config" "$HARNESS_TARGET" "$PVEFORGE_HARNESS_OUTER_ROSTERS") || die "$label: cfg $v failed"
 		echo "$cfg" | jq -e 'has("lock")|not' >/dev/null || die "$label: VM $v is LOCKED"
-		snap=$(apiget "/nodes/$OUTER_NODE/qemu/$v/snapshot" "$OUTER_TARGET" "$PVEFORGE_HARNESS_OUTER_ROSTERS") || die "$label: snap $v failed"
+		snap=$(apiget "/nodes/$HARNESS_NODE/qemu/$v/snapshot" "$HARNESS_TARGET" "$PVEFORGE_HARNESS_OUTER_ROSTERS") || die "$label: snap $v failed"
 		echo "$snap" | jq -e --arg g "$golden" \
 			'any(.[]; .name=="'"$GOLDEN_SNAP"'" and (.vmstate // 0)==0 and (.description|contains($g))) and ((map(select(.name!="current" and .name!="'"$GOLDEN_SNAP"'")))|length==0)' \
 			>/dev/null || die "$label: VM $v not clean-at-golden"

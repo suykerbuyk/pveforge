@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # hack/harness/d5/verify-root.sh: D5's ROOT-side checks, read-only. Each PVE
-# read is one `ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com '<pveum or
-# pvesh read>'`; jq runs on the workstation. Nothing here writes to any host.
+# read is one `ssh -o BatchMode=yes root@<OUTER_FQDN> '<pveum or pvesh read>'`
+# (the outer identity from harness-outer.env, via evidence.sh — this script runs
+# no harness_init); jq runs on the workstation. Nothing here writes to any host.
 #
 # Usage: HARNESS_EVIDENCE=<new dir> verify-root.sh <phase>
 #   p0       step 0: non-interactive root ssh works (checked FIRST; steps 1-10
@@ -25,11 +26,13 @@
 source "$(dirname "$0")/../lib.sh"
 source "$(dirname "$0")/evidence.sh"
 
-readonly D5_HOST=root@qa-pve-07.lab.quantum.com
-readonly D5_HOSTNAME=qa-pve-07.lab.quantum.com
-# ACL paths the harness owns. The shared /storage/local and the vmbr0 SDN
-# path are deliberately not here: others may hold rows there.
-readonly D5_HARNESS_PATHS='^/(pool/pveforge-harness|storage/pveforge-harness|vms/69[0-9])($|/)'
+readonly D5_HOST=root@$HARNESS_FQDN
+readonly D5_HOSTNAME=$HARNESS_FQDN
+# ACL paths the harness owns, built from the validated (and '.'-rejecting)
+# pool/storage and the VMID decade, each ERE-escaped so a value can never inject
+# a regex metacharacter into the ownership test (R7). The shared /storage/local
+# and the vmbr0 SDN path are deliberately not here: others may hold rows there.
+readonly D5_HARNESS_PATHS="^/(pool/$(d5_ere_escape "$D5_POOL")|storage/$(d5_ere_escape "$D5_STORAGE")|vms/${HARNESS_VMID_LOW%?}[0-9])(\$|/)"
 
 phase=${1:-}
 case "$phase" in
@@ -38,7 +41,7 @@ p0 | roles | owner | granted | token | pre | post | reverted) ;;
 esac
 if [ "$phase" = p0 ]; then
 	[ ! -e "$D5_P0" ] || _harness_die 2 "the P0 baseline $D5_P0 already exists; it is written once and never overwritten"
-	[ -r "${D5_PIN_ROSTER:-}" ] || _harness_die 2 "p0 needs D5_PIN_ROSTER: the roster whose qa-pve-07 target pins the host key"
+	[ -r "${D5_PIN_ROSTER:-}" ] || _harness_die 2 "p0 needs D5_PIN_ROSTER: the roster whose $D5_NODE target pins the host key"
 else
 	[ -d "$D5_P0" ] || _harness_die 2 "the P0 baseline $D5_P0 does not exist; run phase p0 first"
 fi
@@ -84,7 +87,7 @@ storage_active() { jq -e '.active == 1' "$(ev storage)"; }
 # user-allow is 'free' (the default) or, unless 'none', lists the tag.
 # 'existing' cannot hold here: no VM carries the tag before the build.
 tag_allowed() {
-	jq -e --arg t pveforge-harness '
+	jq -e --arg t "$D5_TAG" '
 		((.["registered-tags"] // []) | any(.[]; . == $t) | not)
 		and ((.["user-tag-access"] // {}) as $u | ($u["user-allow"] // "free") as $a
 			| $a == "free" or ($a != "none" and (($u["user-allow-list"] // []) | any(.[]; . == $t))))' "$(ev options)"
@@ -170,9 +173,9 @@ p0)
 	d5_check "P3 no user $D5_USER" no_harness_user
 	d5_check "P4 no ACL row for $D5_USER or its token" no_harness_rows
 	d5_check "P5 storage $D5_STORAGE active on $D5_NODE" storage_active
-	d5_check "P6 the token may set tag pveforge-harness (datacenter user-tag-access)" tag_allowed
+	d5_check "P6 the token may set tag $D5_TAG (datacenter user-tag-access)" tag_allowed
 	d5_check "fetch keyscan" keyscan
-	d5_check "K1 the pinned host key is one qa-pve-07 serves" k1
+	d5_check "K1 the pinned host key is one $D5_NODE serves" k1
 	# G4 passes this exact value to bootstrap --host-key-fingerprint, so the
 	# password never goes to a host K1 did not verify. Printed only once K1
 	# has verified it.
@@ -212,7 +215,7 @@ granted)
 token | pre | post)
 	tree=$D5_FIXTURES/d5r3-expected-tree-pre-build.json members='[]'
 	if [ "$phase" = post ]; then
-		tree=$D5_FIXTURES/d5r3-expected-tree-post-build.json members='[690,691,692]'
+		tree=$D5_FIXTURES/d5r3-expected-tree-post-build.json members="[$HARNESS_VMID_LOW,$((HARNESS_VMID_LOW + 1)),$((HARNESS_VMID_LOW + 2))]"
 	fi
 	fetch roles 'pveum role list --output-format json'
 	fetch acl 'pveum acl list --output-format json'
@@ -232,7 +235,11 @@ token | pre | post)
 	d5_check "V2b $D5_USER is in no group" v2b_no_group
 	d5_check "V3 the token's tree equals the expected tree" tree_is ttree "$tree"
 	d5_check "V5 the user's tree equals the expected tree" tree_is utree "$tree"
-	for p in / /vms /vms/105 /vms/101 /vms/600 /nodes /nodes/$D5_NODE /storage /storage/local-lvm /storage/qa-dev-01-image-pool /sdn/zones/localnetwork/vmbr0/100 /access /pool; do
+	# /storage/local-lvm (D5_ZERO_PATH) is the kept storage negative; a second
+	# foreign-storage decoy was dropped here because its literal name was a
+	# specific host's storage that need not exist under a retarget, and it adds
+	# no coverage the parent /storage and /storage/local-lvm negatives lack.
+	for p in / /vms /vms/105 /vms/101 /vms/600 /nodes /nodes/$D5_NODE /storage /storage/local-lvm /sdn/zones/localnetwork/vmbr0/100 /access /pool; do
 		fetch "v4$(printf '%s' "$p" | tr '/' '_')" "pveum user token permissions $D5_USER $D5_TOKENID --path $p --output-format json"
 		d5_check "V4 the token holds nothing at $p" v4_nothing_at "$p"
 	done

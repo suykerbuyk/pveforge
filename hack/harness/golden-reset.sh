@@ -4,11 +4,16 @@
 # own. The VMs are 690 pvh-n1, 691 pvh-n2, 692 pvh-nfs (D1); D11's reset
 # authority covers exactly these three. Nothing here destroys a VM.
 
+# golden.sh and reset.sh source this BEFORE harness_init, so read the outer
+# identity here to derive the VMID band (idempotent; a pure file parse — no
+# lock, no network — so it is safe this early and refuses a bad site file before
+# gr_probe).
+read_outer_identity
 readonly GR_GOLDEN=pvh-golden
-readonly GR_VMIDS=(690 691 692)
+readonly GR_VMIDS=("$HARNESS_VMID_LOW" "$((HARNESS_VMID_LOW + 1))" "$((HARNESS_VMID_LOW + 2))")
 # Stop the nodes before the storage they mount, start the storage first.
-readonly GR_STOP_ORDER=(691 690 692)
-readonly GR_START_ORDER=(692 690 691)
+readonly GR_STOP_ORDER=("${GR_VMIDS[1]}" "${GR_VMIDS[0]}" "${GR_VMIDS[2]}")
+readonly GR_START_ORDER=("${GR_VMIDS[2]}" "${GR_VMIDS[0]}" "${GR_VMIDS[1]}")
 
 # The external tools these scripts run, resolved once, as lib's are.
 for gr_tool in date go; do

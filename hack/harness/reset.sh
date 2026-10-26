@@ -35,7 +35,10 @@ while [ "$#" -gt 0 ]; do
 	*) _harness_die 2 "unknown argument '$1' (usage: reset.sh --storage <id>)" ;;
 	esac
 done
-[ -n "$storage" ] || _harness_die 2 "the outer storage is required (--storage or HARNESS_STORAGE); there is no default"
+# With no --storage flag, default to the site file's OUTER_STORAGE (resolved by
+# read_outer_identity at golden-reset.sh source time); harness_require_storage
+# still sets and readonlys HARNESS_STORAGE from the resolved value (R4).
+[ -n "$storage" ] || storage=$HARNESS_OUTER_STORAGE
 
 gr_probe "$storage"
 harness_init

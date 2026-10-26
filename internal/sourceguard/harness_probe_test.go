@@ -68,6 +68,8 @@ type probeSpec struct {
 	kill map[string]map[int]string // key -> call number -> signal sent to the probe
 	args []string
 	env  map[string]string
+	// outerEnv is the harness-outer.env body; "" = the committed example.
+	outerEnv string
 	// script is the harness script run, relative to hack/harness (default
 	// probe.sh); bashArgs go to bash before it.
 	script   string
@@ -233,7 +235,14 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(cfg, "harness-outer.toml"), []byte("# test roster\n"), 0o600); err != nil {
+	oenv := s.outerEnv
+	if oenv == "" {
+		oenv = exampleOuterEnv(t)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "harness-outer.env"), []byte(oenv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, outerRosterName), []byte("# test roster\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// sleep and `date +%s` share a fake clock (clockStubs), so a poll bounded
@@ -463,7 +472,7 @@ func runProbe(t *testing.T, s probeSpec) probeResult {
 		t.Fatalf("run the probe: %v", err)
 	}
 	res.stdout, res.stderr = out.String(), errOut.String()
-	roster := filepath.Join(cfg, "harness-outer.toml")
+	roster := filepath.Join(cfg, outerRosterName)
 	if b, err := os.ReadFile(filepath.Join(fakeDir, "argv.log")); err == nil {
 		for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
 			if l != "" {
@@ -623,10 +632,13 @@ func TestProbe_StaticRefusals(t *testing.T) {
 	if r := runProbe(t, s); r.code != 0 {
 		t.Errorf("exactly 520 GiB free: exit %d\n%s", r.code, r.stderr)
 	}
-	// No storage: lib's own refusal, nothing sent.
+	// No storage anywhere: no --storage flag and no OUTER_STORAGE in the site
+	// file, so the outer reader refuses before any network (the --storage
+	// default now comes from OUTER_STORAGE).
 	s = zfsWorld()
 	s.args = nil
-	if r := runProbe(t, s); r.code != 2 || !strings.Contains(r.stderr, "the outer storage is required") || len(r.calls) != 0 {
+	s.outerEnv = outerEnvWithout(t, "OUTER_STORAGE")
+	if r := runProbe(t, s); r.code != 2 || !strings.Contains(r.stderr, "OUTER_STORAGE is missing") || len(r.calls) != 0 {
 		t.Errorf("no storage: exit %d calls %q\n%s", r.code, r.calls, r.stderr)
 	}
 }

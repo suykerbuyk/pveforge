@@ -205,8 +205,10 @@ type harnessCase struct {
 	bashArgs []string
 	resp     map[string]string // fake answers by key, over harnessWorld
 	rc       map[string]int    // fake exit statuses by key
-	roster   string            // "missing", "0644", "env-link", "cwd-link"; "" = a 0600 roster
-	sourced  bool              // run the driver by sourcing it from another script
+	roster     string            // "missing", "0644", "env-link", "cwd-link"; "" = a 0600 roster
+	outerEnv   string            // "missing", a KEY=value body; "" = the committed example
+	plantFiles map[string]string // extra files (name->body) written mode 0600 into ~/.config/pveforge
+	sourced    bool              // run the driver by sourcing it from another script
 	holdLock bool
 	// pathWithout, when set, runs the case with a PATH of links to every
 	// tool but this one.
@@ -280,7 +282,7 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 			t.Fatal(err)
 		}
 	}
-	roster := filepath.Join(cfg, "harness-outer.toml")
+	roster := filepath.Join(cfg, outerRosterName)
 	env := map[string]string{
 		"PATH":                       harnessPATH(t),
 		"HOME":                       home,
@@ -288,6 +290,25 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 		"PVEFORGE_ROSTER_PASSPHRASE": "not-a-secret",
 		"FAKE_PVEFORGE_DIR":          fakeDir,
 		"HARNESS_LIB":                lib,
+	}
+	// The OUTER-identity site file read_outer_identity reads. "" = the committed
+	// example; "missing" = do not write it; anything else = that body verbatim
+	// (the invariant tests drive a bad key / a different node this way).
+	switch c.outerEnv {
+	case "missing":
+	case "":
+		if err := os.WriteFile(filepath.Join(cfg, "harness-outer.env"), []byte(exampleOuterEnv(t)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		if err := os.WriteFile(filepath.Join(cfg, "harness-outer.env"), []byte(c.outerEnv), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range c.plantFiles {
+		if err := os.WriteFile(filepath.Join(cfg, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if c.roster != "missing" {
 		mode := os.FileMode(0o600)
@@ -833,8 +854,86 @@ func ifNotCases() []harnessCase {
 	return cs
 }
 
+// outerInvariantCases pins read_outer_identity's guarantees from a lib driver
+// (one of the three (b) contexts; verify-root.sh and stage14 are the other two,
+// in their own tests — a lib-only test would lie-green the two scripts):
+//   - (a) the outer identity is readonly the instant it validates;
+//   - (b) a bad/missing key refuses with exit 2 and ZERO pveforge calls, before
+//     the lock and any request (missing/unknown key, inverted/non-decade/
+//     oversized VMID band, an FQDN not under the node);
+//   - (R2) an exported HARNESS_* never wins over the file's value;
+//   - (c) the roster is host-keyed with NO un-keyed fallback (an old un-keyed
+//     harness-outer.toml is planted, so a fallback would wrongly succeed).
+func outerInvariantCases(t *testing.T) []harnessCase {
+	t.Helper()
+	good := exampleOuterEnv(t)
+	drop := func(key string) string {
+		var keep []string
+		for _, l := range strings.Split(good, "\n") {
+			if !strings.HasPrefix(l, key+"=") {
+				keep = append(keep, l)
+			}
+		}
+		return strings.Join(keep, "\n")
+	}
+	return []harnessCase{
+		// (a) readonly after validation: a bug reassigning the identity dies,
+		// and no write goes out after it.
+		{name: "outer identity readonly after the reader", body: stdInit + "HARNESS_NODE=evil\nharness_vm_post 690 status/stop\necho REACHED >&2\n",
+			wantCode: 1, wantErr: "readonly variable", wantNotErr: "REACHED", wantCalls: []string{}},
+		{name: "outer VMID_RE readonly after the reader", body: stdInit + "HARNESS_VMID_RE='^[0-9]+$'\nharness_declare_vmids 700\n",
+			wantCode: 1, wantErr: "readonly variable", wantCalls: []string{}},
+		// (b) refuse before any network, exit 2, zero calls.
+		{name: "outer env missing", outerEnv: "missing", body: stdInit, wantCode: 2, wantErr: "harness-outer.env does not exist", wantCalls: []string{}},
+		{name: "outer OUTER_NODE missing", outerEnv: drop("OUTER_NODE"), body: stdInit, wantCode: 2, wantErr: "OUTER_NODE is missing", wantCalls: []string{}},
+		{name: "outer unknown key", outerEnv: good + "\nOUTER_BOGUS=x\n", body: stdInit, wantCode: 2, wantErr: "unknown key OUTER_BOGUS", wantCalls: []string{}},
+		{name: "outer repeated key", outerEnv: good + "\nOUTER_TAG=again\n", body: stdInit, wantCode: 2, wantErr: "OUTER_TAG is set twice", wantCalls: []string{}},
+		{name: "outer VMID band inverted", outerEnv: exampleOuterEnv(t, "VMID_LOW=700", "VMID_HIGH=699"), body: stdInit, wantCode: 2, wantErr: "must be VMID_LOW + 9", wantCalls: []string{}},
+		{name: "outer VMID band not a decade", outerEnv: exampleOuterEnv(t, "VMID_LOW=695", "VMID_HIGH=704"), body: stdInit, wantCode: 2, wantErr: "not decade-aligned", wantCalls: []string{}},
+		{name: "outer VMID oversized", outerEnv: exampleOuterEnv(t, "VMID_LOW=6900000000", "VMID_HIGH=6900000009"), body: stdInit, wantCode: 2, wantErr: "is not a valid value", wantCalls: []string{}},
+		{name: "outer FQDN not under node", outerEnv: exampleOuterEnv(t, "OUTER_FQDN=other.lab.quantum.com"), body: stdInit, wantCode: 2, wantErr: "does not begin with OUTER_NODE", wantCalls: []string{}},
+		// (R2) the environment never wins over the file.
+		{name: "exported HARNESS_TARGET does not win", env: map[string]string{"HARNESS_TARGET": "evil"}, resp: map[string]string{"get /cluster/resources": "[]"},
+			body: stdInit + "harness_get /cluster/resources >/dev/null\n", wantCalls: []string{"api get /cluster/resources qa-pve-07-harness --roster R -o json"}},
+		{name: "exported HARNESS_NODE does not win", env: map[string]string{"HARNESS_NODE": "evil"}, resp: map[string]string{"get /nodes/qa-pve-07/version": "{}"},
+			body: stdInit + "harness_get \"/nodes/$HARNESS_NODE/version\" >/dev/null\n", wantCalls: []string{"api get /nodes/qa-pve-07/version qa-pve-07-harness --roster R -o json"}},
+		// (R7) layer 1 — the per-key pattern rejects '.' in the values that become
+		// path/regex segments, so a '.' cannot reach the D5 ownership regex.
+		{name: "outer OUTER_POOL rejects a dot", outerEnv: exampleOuterEnv(t, "OUTER_POOL=a.b"), body: stdInit, wantCode: 2, wantErr: "OUTER_POOL='a.b' is not a valid value", wantCalls: []string{}},
+		{name: "outer OUTER_TARGET rejects a dot", outerEnv: exampleOuterEnv(t, "OUTER_TARGET=a.b"), body: stdInit, wantCode: 2, wantErr: "OUTER_TARGET='a.b' is not a valid value", wantCalls: []string{}},
+		// (R7) layer 2 — d5_ere_escape makes a metacharacter literal, so even a
+		// value the pattern DOES allow (a storage id may contain '.') cannot
+		// inject a regex wildcard into the ownership test: /storage/axb must NOT
+		// match storage/a.b. (OUTER_STORAGE=a.b is a legal storage id.)
+		{name: "D5 ownership regex escapes a dot", outerEnv: exampleOuterEnv(t, "OUTER_STORAGE=a.b"),
+			body: "source \"$(dirname \"$HARNESS_LIB\")/d5/evidence.sh\"\n" +
+				"[ \"$(d5_ere_escape 'a.b')\" = 'a\\.b' ] || { echo \"BAD-ESCAPE $(d5_ere_escape 'a.b')\" >&2; exit 1; }\n" +
+				"re=\"^/(storage/$(d5_ere_escape \"$D5_STORAGE\"))(\\$|/)\"\n" +
+				"[[ /storage/a.b =~ $re ]] || { echo R7-NOMATCH >&2; exit 1; }\n" +
+				"if [[ /storage/axb =~ $re ]]; then echo R7-LEAK >&2; exit 1; fi\n" +
+				"echo R7-OK >&2\n",
+			wantErr: "R7-OK", wantNotErr: "R7-LEAK", wantCalls: []string{}},
+		// (R6) the VMID band retargets the match regex, so every script's
+		// harness_declare_vmids (built from the band) follows it: with a 700
+		// band, 700-702 are declarable and the old 690 decade is refused. This
+		// backstops the destructive VMID lists in golden-reset/probe/build/
+		// stage14/verify-token, which all go through this match site.
+		{name: "outer band retargets the VMID regex", outerEnv: exampleOuterEnv(t, "VMID_LOW=700", "VMID_HIGH=709"),
+			body: "harness_init\nharness_declare_vmids 700 701 702\n[ \"$HARNESS_VMID_RE\" = '^70[0-9]$' ] || { echo BAD-RE >&2; exit 1; }\n", wantCalls: []string{}},
+		{name: "outer band refuses the old decade", outerEnv: exampleOuterEnv(t, "VMID_LOW=700", "VMID_HIGH=709"),
+			body: "harness_init\nharness_declare_vmids 690\n", wantCode: 2, wantErr: "is not one of 700-709", wantCalls: []string{}},
+		// (c) host-keyed roster, NO un-keyed fallback. OUTER_NODE=qa-pve-08 makes
+		// harness_init look for harness-qa-pve-08-outer.toml (absent); we plant
+		// the OLD un-keyed harness-outer.toml so a silent fallback would succeed
+		// and this would NOT refuse.
+		{name: "roster is host-keyed with no fallback", outerEnv: exampleOuterEnv(t, "OUTER_NODE=qa-pve-08", "OUTER_FQDN=qa-pve-08.lab.quantum.com"),
+			plantFiles: map[string]string{"harness-outer.toml": "# planted un-keyed roster\n"},
+			body:       stdInit, wantCode: 2, wantErr: "harness-qa-pve-08-outer.toml does not exist", wantCalls: []string{}},
+	}
+}
+
 func TestHarnessLib_Offline(t *testing.T) {
-	cases := harnessCases()
+	cases := append(harnessCases(), outerInvariantCases(t)...)
 	// Anti-vacuity: the positive control and the refusals are all here.
 	if len(cases) < 150 {
 		t.Fatalf("%d harness cases, want at least 150", len(cases))

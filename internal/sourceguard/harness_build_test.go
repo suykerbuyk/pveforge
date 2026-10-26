@@ -83,6 +83,50 @@ func exampleEnv(t *testing.T, replace ...string) string {
 	return strings.Join(lines, "\n")
 }
 
+// exampleOuterEnv is the committed harness-outer.env.example (the OUTER-target
+// identity read by read_outer_identity), with each of replace's KEY=value lines
+// put in place of that key's. It is SEPARATE from exampleEnv (harness-build.env)
+// on purpose — the two site files are disjoint namespaces (R3).
+func exampleOuterEnv(t *testing.T, replace ...string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(harnessDir, "harness-outer.env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	for _, r := range replace {
+		key, _, _ := strings.Cut(r, "=")
+		found := false
+		for i, l := range lines {
+			if strings.HasPrefix(l, key+"=") {
+				lines[i], found = r, true
+			}
+		}
+		if !found {
+			t.Fatalf("the outer example has no %s", key)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// outerEnvWithout returns the committed outer example with the given key's line
+// removed, so a test can exercise the reader's "missing key" refusal.
+func outerEnvWithout(t *testing.T, key string) string {
+	t.Helper()
+	var keep []string
+	for _, l := range strings.Split(exampleOuterEnv(t), "\n") {
+		if !strings.HasPrefix(l, key+"=") {
+			keep = append(keep, l)
+		}
+	}
+	return strings.Join(keep, "\n")
+}
+
+// outerRosterName is the host-keyed outer roster harness_init reads, for the
+// example's OUTER_NODE=qa-pve-07. N hosts coexist because the name carries the
+// node; there is no un-keyed fallback.
+const outerRosterName = "harness-qa-pve-07-outer.toml"
+
 func fakeBody(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(harnessDir, "test", name))
@@ -108,8 +152,9 @@ func writeFile(t *testing.T, p, body string, mode os.FileMode) {
 // buildHome is what the operator has before build.sh: the site file and the
 // nested key; keyscan answers each address with one host key.
 type buildHome struct {
-	env     string // the site file ("" = the example as committed)
-	noKey   bool
+	env      string // the build site file ("" = the example as committed)
+	outerEnv string // the outer-identity site file ("" = the example as committed)
+	noKey    bool
 	known   string // an existing known_hosts ("" = none)
 	knownM  os.FileMode
 	keyscan map[string]string // vmid -> the scan's output, replacing hostKey
@@ -129,6 +174,12 @@ func (b buildHome) setup(t *testing.T, home string) {
 		env = exampleEnv(t)
 	}
 	writeFile(t, filepath.Join(cfg, "harness-build.env"), env, 0o600)
+	// The OUTER-target identity site file harness_init now reads (read_outer_identity).
+	oenv := b.outerEnv
+	if oenv == "" {
+		oenv = exampleOuterEnv(t)
+	}
+	writeFile(t, filepath.Join(cfg, "harness-outer.env"), oenv, 0o600)
 	outer := b.outer
 	if outer == "" {
 		outer = "198.51.100.20"
@@ -141,7 +192,7 @@ func (b buildHome) setup(t *testing.T, home string) {
 		}
 		roster = outerRoster(host)
 	}
-	writeFile(t, filepath.Join(cfg, "harness-outer.toml"), roster, 0o600)
+	writeFile(t, filepath.Join(cfg, outerRosterName), roster, 0o600)
 	if !b.noKey {
 		writeFile(t, filepath.Join(cfg, "harness-nested_ed25519"), "fake private key\n", 0o600)
 		writeFile(t, filepath.Join(cfg, "harness-nested_ed25519.pub"), nestedPub+"\n", 0o644)
@@ -1122,7 +1173,7 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 		"unresolvable": {buildHome{outer: "nowhere.example.invalid"}, "cannot resolve the outer host nowhere.example.invalid"},
 		// pveforge's loader refuses a target without a host.
 		"no host":        {buildHome{outer: "-"}, "cannot read " + outerRosterTail},
-		"no such target": {buildHome{roster: strings.Replace(outerRoster("host = \"198.51.100.20\"\n"), `"qa-pve-07-harness"`, `"qa-pve-07-other"`, 1)}, "harness-outer.toml names no target qa-pve-07-harness"},
+		"no such target": {buildHome{roster: strings.Replace(outerRoster("host = \"198.51.100.20\"\n"), `"qa-pve-07-harness"`, `"qa-pve-07-other"`, 1)}, outerRosterName + " names no target qa-pve-07-harness"},
 		// A roster pveforge would not load is never read another way: here
 		// a host key inside [targets.ssh], which no roster has.
 		"not a roster pveforge loads": {buildHome{roster: outerRoster("host = \"198.51.100.20\"\n") + "\n  [targets.ssh]\n  user = \"root\"\n  host = \"192.0.2.90\"\n"}, "cannot read " + outerRosterTail},
@@ -1163,7 +1214,7 @@ func TestBuild_PreflightAddresses(t *testing.T) {
 }
 
 // outerRosterTail is the harness roster, ~ for $HOME.
-const outerRosterTail = "~/.config/pveforge/harness-outer.toml\n"
+const outerRosterTail = "~/.config/pveforge/" + outerRosterName + "\n"
 
 // B14b: the outer host is read with pveforge's own roster loader (R3 of
 // pveforge-harness-shell-scoping), so TOML a line parser misreads names the

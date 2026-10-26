@@ -72,10 +72,14 @@ done
 unset probe_tool probe_tool_path
 
 harness_init
-harness_declare_vmids 690
+harness_declare_vmids "$HARNESS_VMID_LOW"
+# With no --storage flag, default to the site file's OUTER_STORAGE (resolved by
+# read_outer_identity inside harness_init); harness_require_storage still sets
+# and readonlys HARNESS_STORAGE from the resolved value (R4).
+[ -n "$storage" ] || storage=$HARNESS_OUTER_STORAGE
 harness_require_storage "$storage"
 
-readonly VMID=690
+readonly VMID=$HARNESS_VMID_LOW
 readonly S=$HARNESS_STORAGE
 readonly STATUS_PATH=/nodes/$HARNESS_NODE/storage/$S/status
 readonly CONTENT_PATH=/nodes/$HARNESS_NODE/storage/$S/content

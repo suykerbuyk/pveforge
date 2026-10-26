@@ -21,9 +21,13 @@ d5_open_evidence "token-$phase"
 
 tree=$D5_FIXTURES/d5r3-expected-tree-pre-build.json members='[]'
 if [ "$phase" = post ]; then
-	tree=$D5_FIXTURES/d5r3-expected-tree-post-build.json members='[690,691,692]'
+	tree=$D5_FIXTURES/d5r3-expected-tree-post-build.json members="[$HARNESS_VMID_LOW,$((HARNESS_VMID_LOW + 1)),$((HARNESS_VMID_LOW + 2))]"
 fi
 # The zero-privilege answer owed live at D5: a path the token holds nothing on.
+# D5_ZERO_PATH stays FIXED (not an OUTER_* key): it is a convenient zero-
+# privilege probe target — qa-pve-07's non-harness storage — NOT a per-host
+# fact. Promote it to an OUTER_* key only if a host is found to lack local-lvm
+# (Chair, 2026-10-26).
 readonly D5_ZERO_PATH=/storage/local-lvm
 
 tget() { # name path [field=value ...]: the raw answer goes to t.<name>.json

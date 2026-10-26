@@ -65,17 +65,22 @@ readonly keep repin
 hb_resolve stat mv chmod date sleep timeout ssh-keyscan getent
 hb_pins
 harness_init
-harness_declare_vmids 690 691 692
+# The three nested guests, derived from the VMID band (LOW, LOW+1, LOW+2).
+readonly VMIDS=("$HARNESS_VMID_LOW" "$((HARNESS_VMID_LOW + 1))" "$((HARNESS_VMID_LOW + 2))")
+harness_declare_vmids "${VMIDS[@]}"
+# With no --storage flag, default to the site file's OUTER_STORAGE (resolved by
+# read_outer_identity inside harness_init); harness_require_storage still sets
+# and readonlys HARNESS_STORAGE from the resolved value (R4).
+[ -n "$storage" ] || storage=$HARNESS_OUTER_STORAGE
 harness_require_storage "$storage"
 hb_read_env
 
 readonly S=$HARNESS_STORAGE
-readonly VMIDS=(690 691 692)
-declare -Ar NAME=([690]=pvh-n1 [691]=pvh-n2 [692]=pvh-nfs)
-declare -Ar IP=([690]=${HB[N1_IP]} [691]=${HB[N2_IP]} [692]=${HB[NFS_IP]})
-declare -Ar MAC=([690]=${HB[N1_MAC]} [691]=${HB[N2_MAC]} [692]=${HB[NFS_MAC]})
+declare -Ar NAME=([${VMIDS[0]}]=pvh-n1 [${VMIDS[1]}]=pvh-n2 [${VMIDS[2]}]=pvh-nfs)
+declare -Ar IP=([${VMIDS[0]}]=${HB[N1_IP]} [${VMIDS[1]}]=${HB[N2_IP]} [${VMIDS[2]}]=${HB[NFS_IP]})
+declare -Ar MAC=([${VMIDS[0]}]=${HB[N1_MAC]} [${VMIDS[1]}]=${HB[N2_MAC]} [${VMIDS[2]}]=${HB[NFS_MAC]})
 # The ports that say each VM's installed system is up.
-declare -Ar PORTS=([690]="22 8006" [691]="22 8006" [692]=22)
+declare -Ar PORTS=([${VMIDS[0]}]="22 8006" [${VMIDS[1]}]="22 8006" [${VMIDS[2]}]=22)
 readonly CFG=$HOME/.config/pveforge
 readonly KEY=$CFG/harness-nested_ed25519
 readonly KNOWN=$CFG/harness-nested.known_hosts
@@ -228,14 +233,14 @@ jqe "$pool" '.[0].members | length == 0' || refuse "pool $HARNESS_POOL is not em
 harness_storage_baseline || refuse "$HARNESS_NOT_FREE"
 isos=$(harness_get "/nodes/$HARNESS_NODE/storage/local/content" content=iso)
 evidence local-iso.json "$isos"
-for v in 690 691; do
+for v in "${VMIDS[0]}" "${VMIDS[1]}"; do
 	jqe "$isos" --arg id "local:iso/${NAME[$v]}-auto.iso" 'type == "array" and any(.[]; .volid == $id)' ||
-		refuse "local:iso/${NAME[$v]}-auto.iso is not on qa-pve-07: upload prepare-iso.sh's output first"
+		refuse "local:iso/${NAME[$v]}-auto.iso is not on $HARNESS_NODE: upload prepare-iso.sh's output first"
 done
 imports=$(harness_get "/nodes/$HARNESS_NODE/storage/local/content" content=import)
 evidence local-import.json "$imports"
 jqe "$imports" --arg id "local:import/${HB[NFS_IMAGE]}" 'type == "array" and any(.[]; .volid == $id)' ||
-	refuse "local:import/${HB[NFS_IMAGE]} is not on qa-pve-07: upload the Debian 13 genericcloud image first"
+	refuse "local:import/${HB[NFS_IMAGE]} is not on $HARNESS_NODE: upload the Debian 13 genericcloud image first"
 step "PASS preflight"
 
 # ---- Cleanup: on any exit that is not a complete build. ----
@@ -370,10 +375,10 @@ node_params() { # vmid
 		net0: $net, boot: "order=scsi0;ide2"}'
 }
 nfs_params() {
-	"$HARNESS_TOOL_JQ" -cn --arg name "${NAME[692]}" --arg cores "${HB[NFS_CORES]}" --arg mem "${HB[NFS_MEMORY_MIB]}" \
+	"$HARNESS_TOOL_JQ" -cn --arg name "${NAME[${VMIDS[2]}]}" --arg cores "${HB[NFS_CORES]}" --arg mem "${HB[NFS_MEMORY_MIB]}" \
 		--arg os "$S:0,import-from=local:import/${HB[NFS_IMAGE]}" --arg data "$S:${HB[NFS_DATA_GIB]}" \
-		--arg ci "$S:cloudinit" --arg net "virtio=${MAC[692]},bridge=vmbr0,firewall=0" \
-		--arg ip "ip=${IP[692]}/${HB[PREFIX]},gw=${HB[GATEWAY]}" --arg dns "${HB[DNS]}" --arg dom "${HB[DOMAIN]}" \
+		--arg ci "$S:cloudinit" --arg net "virtio=${MAC[${VMIDS[2]}]},bridge=vmbr0,firewall=0" \
+		--arg ip "ip=${IP[${VMIDS[2]}]}/${HB[PREFIX]},gw=${HB[GATEWAY]}" --arg dns "${HB[DNS]}" --arg dom "${HB[DOMAIN]}" \
 		--arg keys "$sshkeys" --arg user "${HB[NFS_USER]}" '{
 		name: $name, ostype: "l26", cpu: "host", cores: $cores, memory: $mem,
 		bios: "seabios", scsihw: "virtio-scsi-single", scsi0: $os, scsi1: $data, ide2: $ci,
@@ -382,7 +387,7 @@ nfs_params() {
 }
 creating=1
 for v in "${VMIDS[@]}"; do
-	if [ "$v" = 692 ]; then
+	if [ "$v" = "${VMIDS[2]}" ]; then
 		params=$(nfs_params) || _harness_die 2 "cannot build VM $v's parameters"
 	else
 		params=$(node_params "$v") || _harness_die 2 "cannot build VM $v's parameters"
@@ -433,7 +438,7 @@ done
 step "PASS up after $i polls"
 
 # ---- Eject each node's ISO; boot from its disk. ----
-for v in 690 691; do
+for v in "${VMIDS[0]}" "${VMIDS[1]}"; do
 	harness_vm_put "$v" config ide2=none,media=cdrom boot=order=scsi0 >"$EVID/eject-$v.out"
 	step "PASS eject $v"
 done
@@ -458,7 +463,7 @@ done
 kept=
 if [ -n "$known" ]; then
 	while IFS= read -r l; do
-		case "${l%% *}" in "${IP[690]}" | "${IP[691]}" | "${IP[692]}") continue ;; esac
+		case "${l%% *}" in "${IP[${VMIDS[0]}]}" | "${IP[${VMIDS[1]}]}" | "${IP[${VMIDS[2]}]}") continue ;; esac
 		kept+=$l$'\n'
 	done <<<"$known"
 fi
@@ -474,10 +479,10 @@ if [ -f "$KNOWN" ] && [ ! -L "$KNOWN" ]; then
 fi
 [ "$got" = "${want%$'\n'}" ] || fail "$KNOWN is not a regular file holding the pins after the write"
 evidence known_hosts "$want"
-step "PASS pinned ${IP[690]} ${IP[691]} ${IP[692]}$([ "$repin" = 1 ] && echo " (repinned)")"
+step "PASS pinned ${IP[${VMIDS[0]}]} ${IP[${VMIDS[1]}]} ${IP[${VMIDS[2]}]}$([ "$repin" = 1 ] && echo " (repinned)")"
 
 done_ok=1
 step "RESULT built ${VMIDS[*]} evidence=$EVID"
 (cd -- "$EVID" && "$HARNESS_TOOL_SHA256SUM" -- * >MANIFEST.sha256) || say "build: cannot write MANIFEST.sha256"
-say "build: 690 pvh-n1 ${IP[690]}, 691 pvh-n2 ${IP[691]}, 692 pvh-nfs ${IP[692]} are up; host keys pinned in $KNOWN"
-printf 'built=690,691,692 storage=%s known_hosts=%s\n' "$S" "$KNOWN"
+say "build: ${VMIDS[0]} ${NAME[${VMIDS[0]}]} ${IP[${VMIDS[0]}]}, ${VMIDS[1]} ${NAME[${VMIDS[1]}]} ${IP[${VMIDS[1]}]}, ${VMIDS[2]} ${NAME[${VMIDS[2]}]} ${IP[${VMIDS[2]}]} are up; host keys pinned in $KNOWN"
+printf 'built=%s,%s,%s storage=%s known_hosts=%s\n' "${VMIDS[0]}" "${VMIDS[1]}" "${VMIDS[2]}" "$S" "$KNOWN"

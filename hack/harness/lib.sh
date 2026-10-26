@@ -22,15 +22,26 @@
 # into a named refusal before any request is sent, not to contain a hostile
 # caller.
 #
-# What is fixed here, never taken from the environment: the roster target
-# qa-pve-07-harness, the node qa-pve-07, the pool and tag pveforge-harness, and
-# the VMIDs 690-699 (operator ruling 2026-09-24 (3)). A script declares the
-# VMIDs it may touch (harness_declare_vmids); every VM operation must name one
-# of them. Before changing an existing VM, lib reads that it is a qemu member
-# of the pool, on qa-pve-07, and carries the tag. It destroys only a VM this
-# run created. What a change may do is an allow-list, of endpoints
-# (_harness_allow_endpoint) and, per endpoint, of fields
-# (_harness_config_field, _harness_field_allowed); anything not named is
+# The outer identity — the roster target, the node, its FQDN, the pool, the tag
+# and the VMID band — is READ from the operator-local mode-600 site file
+# ~/.config/pveforge/harness-outer.env by read_outer_identity, validated against
+# a strict per-key pattern, and made readonly the instant it validates, before
+# any network call (operator ruling 2026-09-24 (3), RELAXED 2026-10-26 at the
+# operator's request so one workstation can target N hypervisors). This
+# PRESERVES the ruling against an errant SCRIPT: the identity is immutable
+# in-shell once read, a bug cannot redirect a write to another host/pool/VMID,
+# and it is never taken from the environment (the HARNESS_* vars are cleared at
+# source and assigned only from the file). It RELAXES the ruling against an
+# errant EDIT of that mode-600 file: a value that validates but names a
+# production host is no longer impossible — the roster token's pool-scoped ACL
+# (above) is the backstop for that. It is NOT "exactly preserved".
+#
+# A script declares the VMIDs it may touch (harness_declare_vmids), all within
+# the band; every VM operation must name one of them. Before changing an
+# existing VM, lib reads that it is a qemu member of the pool, on the node, and
+# carries the tag. It destroys only a VM this run created. What a change may do
+# is an allow-list, of endpoints (_harness_allow_endpoint) and, per endpoint, of
+# fields (_harness_config_field, _harness_field_allowed); anything not named is
 # refused. A disk may be set only on a VM this run created, and only on the
 # storage the script required.
 #
@@ -123,14 +134,101 @@ for harness_tool in jq grep flock sha256sum stat mktemp mkdir sleep date; do
 done
 unset harness_tool harness_tool_path
 
-# ---- Fixed values. ----
-readonly HARNESS_TARGET=qa-pve-07-harness
-readonly HARNESS_NODE=qa-pve-07
-readonly HARNESS_POOL=pveforge-harness
-readonly HARNESS_TAG=pveforge-harness
-# 690-699, matched as a string: no arithmetic, so no leading zero, sign or
-# oversized number can slip through.
-readonly HARNESS_VMID_RE='^69[0-9]$'
+# ---- Outer identity: read from the site file, never the environment. ----
+# A bare X= clears any inherited value (operator ruling 2026-09-24 (3)'s "never
+# taken from the environment"): read_outer_identity assigns these only from
+# ~/.config/pveforge/harness-outer.env, and makes them readonly the instant they
+# validate. HARNESS_STORAGE stays runtime-declared (harness_require_storage);
+# HARNESS_OUTER_STORAGE feeds D5 and the --storage default a caller may pass.
+HARNESS_TARGET=
+HARNESS_NODE=
+HARNESS_FQDN=
+HARNESS_POOL=
+HARNESS_TAG=
+HARNESS_OUTER_STORAGE=
+HARNESS_VMID_LOW=
+HARNESS_VMID_HIGH=
+# Built from the band as the no-arithmetic string regex ^<decade>[0-9]$, so no
+# leading zero, sign or oversized number can slip through at match time.
+HARNESS_VMID_RE=
+
+# read_outer_identity validates the outer identity from the mode-600 site file
+# and makes each HARNESS_* var readonly the instant it validates — BEFORE any
+# network call, and in EVERY caller (harness_init for the lib scripts,
+# d5/evidence.sh at source for the verify scripts, golden-reset.sh for the band,
+# stage14 directly) — because verify-root.sh and stage14 reach the network with
+# NO harness_init: a readonly deferred to harness_init would leave the identity
+# mutable in exactly the destructive-proof paths. It is SEPARATE from
+# build/env.sh's hb_read_env / HB_PATTERN ON PURPOSE: hb_read_env refuses
+# unknown keys and is called by prepare-iso.sh / build.sh / cluster.sh /
+# nested.sh, which must NOT gain an outer-identity dependency — do NOT merge the
+# two. It is a PURE file parse: it opens no roster, no lock and no socket (D5's
+# p0 phase runs before the pool and roster exist). It is idempotent, and refuses
+# with _harness_die (never return).
+readonly HARNESS_OUTER_ENV=$HOME/.config/pveforge/harness-outer.env
+# key -> the pattern its value must match. SEPARATE from env.sh's HB_PATTERN.
+declare -A HARNESS_OUTER_PATTERN=(
+	[OUTER_NODE]='^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+	[OUTER_FQDN]='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+	[OUTER_TARGET]='^[A-Za-z0-9][A-Za-z0-9_-]*$'
+	[OUTER_POOL]='^[A-Za-z0-9][A-Za-z0-9_-]*$'
+	[OUTER_TAG]='^[a-z0-9_][a-z0-9_-]*$'
+	[OUTER_STORAGE]='^[a-z][a-z0-9._-]*[a-z0-9]$'
+	[VMID_LOW]='^[1-9][0-9]{1,8}$'
+	[VMID_HIGH]='^[1-9][0-9]{1,8}$'
+)
+readonly -A HARNESS_OUTER_PATTERN
+
+read_outer_identity() {
+	# Idempotent: evidence.sh calls it at source, then harness_init again. The
+	# sentinel is HARNESS_TARGET's own readonly-ness (set by lib only on
+	# success), which the environment cannot forge.
+	! _harness_set_by_lib HARNESS_TARGET || return 0
+	local f=$HARNESS_OUTER_ENV line key value pat mode n=0
+	declare -A outer=()
+	[ -f "$f" ] && [ ! -L "$f" ] || _harness_die 2 "the outer site file $f does not exist (copy hack/harness/harness-outer.env.example there, mode 0600, and fill it in)"
+	mode=$("$HARNESS_TOOL_STAT" -c %a -- "$f") || _harness_die 2 "cannot read the mode of $f"
+	[ "$mode" = 600 ] || _harness_die 2 "the outer site file $f has mode $mode, want 600"
+	while IFS= read -r line || [ -n "$line" ]; do
+		n=$((n + 1))
+		case "$line" in '' | '#'*) continue ;; esac
+		[[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || _harness_die 2 "$f:$n: not KEY=value"
+		key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+		[ -n "${HARNESS_OUTER_PATTERN[$key]+set}" ] || _harness_die 2 "$f:$n: unknown key $key"
+		[ -z "${outer[$key]+set}" ] || _harness_die 2 "$f:$n: $key is set twice"
+		pat=${HARNESS_OUTER_PATTERN[$key]}
+		[[ $value =~ $pat ]] || _harness_die 2 "$f:$n: $key='$value' is not a valid value"
+		outer[$key]=$value
+	done <"$f"
+	for key in "${!HARNESS_OUTER_PATTERN[@]}"; do
+		[ -n "${outer[$key]+set}" ] || _harness_die 2 "$f: $key is missing"
+	done
+	# OUTER_NODE is one host/path segment, at most 63 characters.
+	[ "${#outer[OUTER_NODE]}" -le 63 ] || _harness_die 2 "$f: OUTER_NODE '${outer[OUTER_NODE]}' is longer than 63 characters"
+	# OUTER_FQDN names this node: it begins with OUTER_NODE. (a case glob; the
+	# node has no regex metacharacters, its pattern rejected '.').
+	case "${outer[OUTER_FQDN]}" in
+	"${outer[OUTER_NODE]}".*) ;;
+	*) _harness_die 2 "$f: OUTER_FQDN '${outer[OUTER_FQDN]}' does not begin with OUTER_NODE '${outer[OUTER_NODE]}.'" ;;
+	esac
+	# A decade-aligned 10-band: LOW ends in 0, HIGH is LOW+9. This keeps ruling
+	# 2026-09-24 (3)'s string-regex property (^<decade>[0-9]$, no match-time
+	# arithmetic) while capping a host at 10 harness VMIDs.
+	[ $((outer[VMID_LOW] % 10)) -eq 0 ] || _harness_die 2 "$f: VMID_LOW '${outer[VMID_LOW]}' is not decade-aligned (must end in 0)"
+	[ "${outer[VMID_HIGH]}" -eq $((outer[VMID_LOW] + 9)) ] || _harness_die 2 "$f: VMID_HIGH '${outer[VMID_HIGH]}' must be VMID_LOW + 9 (${outer[VMID_LOW]}..$((outer[VMID_LOW] + 9)))"
+	HARNESS_NODE=${outer[OUTER_NODE]}
+	HARNESS_FQDN=${outer[OUTER_FQDN]}
+	HARNESS_TARGET=${outer[OUTER_TARGET]}
+	HARNESS_POOL=${outer[OUTER_POOL]}
+	HARNESS_TAG=${outer[OUTER_TAG]}
+	HARNESS_OUTER_STORAGE=${outer[OUTER_STORAGE]}
+	HARNESS_VMID_LOW=${outer[VMID_LOW]}
+	HARNESS_VMID_HIGH=${outer[VMID_HIGH]}
+	HARNESS_VMID_RE="^${outer[VMID_LOW]%?}[0-9]$"
+	readonly HARNESS_NODE HARNESS_FQDN HARNESS_TARGET HARNESS_POOL HARNESS_TAG \
+		HARNESS_OUTER_STORAGE HARNESS_VMID_LOW HARNESS_VMID_HIGH HARNESS_VMID_RE
+}
+
 readonly HARNESS_SNAPNAME_RE='[A-Za-z][A-Za-z0-9_-]*'
 # The bridges a harness VM's NIC may join. U4's topology puts every outer NIC
 # (pvh-n1, pvh-n2, pvh-nfs) on vmbr0 (decision D4); the nested guests' pvhbr1
@@ -166,6 +264,10 @@ _harness_require_args() { # function-name minimum given
 # run's record of created VMs. It must run before anything reaches PVE.
 harness_init() {
 	[ "$HARNESS_INITIALIZED" = 0 ] || _harness_die 2 "harness_init ran twice"
+	# Read and validate the outer identity first: a bad site file refuses here,
+	# before the lock and before anything reaches PVE (idempotent — evidence.sh
+	# / golden-reset.sh may already have run it).
+	read_outer_identity
 	local bin=${PVEFORGE_BIN:-}
 	case "$bin" in
 	/*) ;;
@@ -177,7 +279,9 @@ harness_init() {
 	[ -z "${PVEFORGE_PVE_PASSWORD+set}" ] || _harness_die 2 "PVEFORGE_PVE_PASSWORD is set: no harness script needs root's password"
 
 	local dir=$HOME/.config/pveforge
-	local roster=$dir/harness-outer.toml
+	# Host-keyed so N hypervisors coexist on one workstation (no un-keyed
+	# fallback: that collision is what the keying closes).
+	local roster=$dir/harness-${HARNESS_NODE}-outer.toml
 	[ -f "$roster" ] || _harness_die 2 "the harness roster $roster does not exist"
 	local mode
 	mode=$("$HARNESS_TOOL_STAT" -c %a "$roster") || _harness_die 2 "cannot read the mode of $roster"
@@ -215,7 +319,7 @@ harness_declare_vmids() {
 	[ "$#" -gt 0 ] || _harness_die 2 "harness_declare_vmids needs at least one VMID"
 	local id
 	for id in "$@"; do
-		[[ $id =~ $HARNESS_VMID_RE ]] || _harness_die 2 "VMID '$id' is not one of 690-699"
+		[[ $id =~ $HARNESS_VMID_RE ]] || _harness_die 2 "VMID '$id' is not one of $HARNESS_VMID_LOW-$HARNESS_VMID_HIGH"
 		HARNESS_DECLARED[$id]=1
 	done
 	readonly -A HARNESS_DECLARED
@@ -234,7 +338,7 @@ harness_require_storage() {
 }
 
 _harness_require_declared() {
-	[[ ${1:-} =~ $HARNESS_VMID_RE ]] || _harness_die 2 "VMID '${1:-}' is not one of 690-699"
+	[[ ${1:-} =~ $HARNESS_VMID_RE ]] || _harness_die 2 "VMID '${1:-}' is not one of $HARNESS_VMID_LOW-$HARNESS_VMID_HIGH"
 	_harness_set_by_lib HARNESS_DECLARED || _harness_die 2 "harness_declare_vmids has not run"
 	[ "${HARNESS_DECLARED[$1]:-}" = 1 ] || _harness_die 2 "VMID $1 was not declared by this script"
 }

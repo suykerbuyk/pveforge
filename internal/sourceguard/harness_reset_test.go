@@ -55,6 +55,7 @@ type grSpec struct {
 	noAccept  bool   // HARNESS_ACCEPT_BIN unset
 	noRosters bool   // the nested and outer harness rosters unset
 	umask     string // when set, the umask the script inherits
+	outerEnv  string // the harness-outer.env body; "" = the committed example
 }
 
 type grResult struct {
@@ -128,7 +129,12 @@ func runGR(t *testing.T, script string, s grSpec) grResult {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(cfg, "harness-outer.toml"), "# test roster\n", 0o600)
+	oenv := s.outerEnv
+	if oenv == "" {
+		oenv = exampleOuterEnv(t)
+	}
+	write(filepath.Join(cfg, "harness-outer.env"), oenv, 0o600)
+	write(filepath.Join(cfg, outerRosterName), "# test roster\n", 0o600)
 	put := func(dir, key string, n int, v string) {
 		name := fakeKey(key)
 		if n > 0 {
@@ -186,7 +192,7 @@ exec `+realDate+` "$@"
 		"PATH": pathVar, "HOME": home, "PVEFORGE_BIN": fake, "FAKE_PVEFORGE_DIR": fakeDir,
 		"PVEFORGE_ROSTER_PASSPHRASE":     "not-a-secret",
 		"PVEFORGE_HARNESS_ROSTER":        filepath.Join(cfg, "harness-nested.toml"),
-		"PVEFORGE_HARNESS_OUTER_ROSTERS": filepath.Join(cfg, "harness-outer.toml"),
+		"PVEFORGE_HARNESS_OUTER_ROSTERS": filepath.Join(cfg, outerRosterName),
 		"HARNESS_ACCEPT_BIN":             accept,
 	}
 	if s.noAccept {
@@ -318,6 +324,67 @@ func resetWritesCascade(cascade []string, stopped ...int) []string {
 	return w
 }
 
+// TestGoldenReset_VMIDBandFollowsOuterEnv pins R6 for the DESTRUCTIVE reset:
+// golden-reset.sh derives GR_VMIDS / GR_STOP_ORDER / GR_START_ORDER from the
+// outer VMID band, so a retarget actually moves them. A hardcoded 690/691/692
+// list makes this RED. (The lib-driver band cases in harness_scripts_test.go
+// backstop every script's harness_declare_vmids.)
+func TestGoldenReset_VMIDBandFollowsOuterEnv(t *testing.T) {
+	lib, err := filepath.Abs(filepath.Join(harnessDir, "lib.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ low, want string }{
+		{"690", "690 691 692|691 690 692|692 690 691"},
+		{"700", "700 701 702|701 700 702|702 700 701"},
+	} {
+		t.Run("VMID_LOW="+tc.low, func(t *testing.T) {
+			home := t.TempDir()
+			cfg := filepath.Join(home, ".config", "pveforge")
+			if err := os.MkdirAll(cfg, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			high := tc.low[:len(tc.low)-1] + "9"
+			oenv := exampleOuterEnv(t, "VMID_LOW="+tc.low, "VMID_HIGH="+high)
+			if err := os.WriteFile(filepath.Join(cfg, "harness-outer.env"), []byte(oenv), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// lib.sh must be sourced by an EXECUTED script, so write the driver
+			// to a file rather than `bash -c`.
+			driverPath := filepath.Join(home, "driver.sh")
+			if err := os.WriteFile(driverPath, []byte(`source "$LIB"
+source "$(dirname "$LIB")/golden-reset.sh"
+printf '%s|%s|%s\n' "${GR_VMIDS[*]}" "${GR_STOP_ORDER[*]}" "${GR_START_ORDER[*]}"
+`), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// A PATH with bash and every tool lib.sh + golden-reset.sh resolve
+			// (golden-reset resolves go and date).
+			seen := map[string]bool{}
+			var dirs []string
+			for _, tool := range []string{"bash", "jq", "flock", "stat", "sha256sum", "tr", "cat", "grep", "mktemp", "mkdir", "sleep", "date", "go"} {
+				p, err := exec.LookPath(tool)
+				if err != nil {
+					t.Fatalf("%s is required: %v", tool, err)
+				}
+				if d := filepath.Dir(p); !seen[d] {
+					seen[d] = true
+					dirs = append(dirs, d)
+				}
+			}
+			cmd := exec.Command("bash", driverPath)
+			cmd.Env = []string{"PATH=" + strings.Join(dirs, ":"), "HOME=" + home, "LIB=" + lib, "PVEFORGE_ROSTER_PASSPHRASE=x"}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("driver failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Errorf("GR arrays = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReset_TheFullReset(t *testing.T) {
 	r := runGR(t, "reset.sh", grWorld())
 	grExpect(t, r, 0, resetWrites(), []string{"-deadline 15m"}, "")
@@ -329,6 +396,40 @@ func TestReset_TheFullReset(t *testing.T) {
 	if len(r.calls) == 0 || r.calls[0] != "api get /nodes/qa-pve-07/storage/pveforge-harness/status qa-pve-07-harness --roster "+regexp.MustCompile(`--roster (\S+)`).FindStringSubmatch(r.calls[0])[1]+" -o json" {
 		t.Errorf("first call %q, want the probe's storage status read", r.calls)
 	}
+}
+
+// TestReset_StorageDefaultsToOuterStorage pins Fix 2: with no --storage flag the
+// entry point defaults the storage to the site file's OUTER_STORAGE (so a
+// site-file retarget needs no flag), and an explicit --storage still wins. The
+// reset runs to completion against the RESOLVED storage either way.
+func TestReset_StorageDefaultsToOuterStorage(t *testing.T) {
+	first := func(r grResult) string {
+		if len(r.calls) == 0 {
+			return ""
+		}
+		return r.calls[0]
+	}
+	t.Run("no --storage falls back to OUTER_STORAGE", func(t *testing.T) {
+		s := grWorld()
+		s.args = nil // no --storage; the example's OUTER_STORAGE=pveforge-harness supplies it
+		r := runGR(t, "reset.sh", s)
+		grExpect(t, r, 0, resetWrites(), []string{"-deadline 15m"}, "")
+		if c := first(r); !strings.Contains(c, "/storage/pveforge-harness/status") {
+			t.Errorf("first call %q, want the storage read on the OUTER_STORAGE default", r.calls)
+		}
+	})
+	t.Run("explicit --storage wins over OUTER_STORAGE", func(t *testing.T) {
+		s := grWorld()
+		// OUTER_STORAGE names a storage with NO fixtures; only the explicit
+		// --storage pveforge-harness has them, so a clean reset proves the flag won.
+		s.outerEnv = exampleOuterEnv(t, "OUTER_STORAGE=zpool-unused")
+		s.args = []string{"--storage", "pveforge-harness"}
+		r := runGR(t, "reset.sh", s)
+		grExpect(t, r, 0, resetWrites(), []string{"-deadline 15m"}, "")
+		if c := first(r); !strings.Contains(c, "/storage/pveforge-harness/status") {
+			t.Errorf("first call %q, want the explicit --storage to win", r.calls)
+		}
+	})
 }
 
 func TestReset_AnAlreadyStoppedVMIsNotStoppedAgain(t *testing.T) {
@@ -366,6 +467,19 @@ func TestReset_TheCascadeIsByTimeNotName(t *testing.T) {
 }
 
 func TestReset_RefusedBeforeAnyChange(t *testing.T) {
+	// A site file with no OUTER_STORAGE: with no --storage flag either, the
+	// outer reader refuses "OUTER_STORAGE is missing" at source time, before
+	// any change (the --storage default now comes from OUTER_STORAGE, so the
+	// genuine "no storage anywhere" refusal is the reader's missing-key one).
+	noStorageEnv := func() string {
+		var keep []string
+		for _, l := range strings.Split(exampleOuterEnv(t), "\n") {
+			if !strings.HasPrefix(l, "OUTER_STORAGE=") {
+				keep = append(keep, l)
+			}
+		}
+		return strings.Join(keep, "\n")
+	}()
 	cases := []struct {
 		name   string
 		mutate func(*grSpec)
@@ -432,7 +546,7 @@ func TestReset_RefusedBeforeAnyChange(t *testing.T) {
 			s.resp[grKey("get", 690, "snapshot")] = `[` + grGolden(1000, "20260101T000000Z trailing", "") + `,{"name":"current"}]`
 		}, 2, "carry golden.sh's run stamp"},
 		{"no nested roster", func(s *grSpec) { s.noRosters = true }, 2, "PVEFORGE_HARNESS_ROSTER"},
-		{"no storage", func(s *grSpec) { s.args = nil }, 2, "there is no default"},
+		{"no storage: no --storage and no OUTER_STORAGE", func(s *grSpec) { s.args = nil; s.outerEnv = noStorageEnv }, 2, "OUTER_STORAGE is missing"},
 		{"an unknown argument", func(s *grSpec) { s.args = append(s.args, "--force") }, 2, "unknown argument"},
 	}
 	for _, c := range cases {
