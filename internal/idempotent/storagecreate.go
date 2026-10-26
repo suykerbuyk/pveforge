@@ -88,7 +88,6 @@ var requiredKeysByType = map[string][]string{
 // against each other; the TOCTOU between Read and Apply fails CLOSED anyway —
 // POST /storage refuses a duplicate id with PVE's "storage ID already defined"
 // verbatim, never a silent overwrite.
-//
 type StorageCreate struct {
 	Client StorageCreateClient
 	Name   string
