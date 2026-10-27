@@ -200,16 +200,16 @@ type harnessCase struct {
 	pre  string // lines before `source lib.sh`
 	body string // lines after it
 	// env is added to the base environment; a value "-" removes the key.
-	env      map[string]string
-	bashEnv  string // when set, written to a file BASH_ENV names
-	bashArgs []string
-	resp     map[string]string // fake answers by key, over harnessWorld
-	rc       map[string]int    // fake exit statuses by key
+	env        map[string]string
+	bashEnv    string // when set, written to a file BASH_ENV names
+	bashArgs   []string
+	resp       map[string]string // fake answers by key, over harnessWorld
+	rc         map[string]int    // fake exit statuses by key
 	roster     string            // "missing", "0644", "env-link", "cwd-link"; "" = a 0600 roster
 	outerEnv   string            // "missing", a KEY=value body; "" = the committed example
 	plantFiles map[string]string // extra files (name->body) written mode 0600 into ~/.config/pveforge
 	sourced    bool              // run the driver by sourcing it from another script
-	holdLock bool
+	holdLock   bool
 	// pathWithout, when set, runs the case with a PATH of links to every
 	// tool but this one.
 	pathWithout string

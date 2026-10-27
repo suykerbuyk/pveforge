@@ -155,15 +155,15 @@ type buildHome struct {
 	env      string // the build site file ("" = the example as committed)
 	outerEnv string // the outer-identity site file ("" = the example as committed)
 	noKey    bool
-	known   string // an existing known_hosts ("" = none)
-	knownM  os.FileMode
-	keyscan map[string]string // vmid -> the scan's output, replacing hostKey
-	tcp     map[string]string // "ip_port" -> attempts that fail first (default 1: the preflight's), or "never"
-	outer   string            // the harness roster's host for qa-pve-07-harness ("" = 198.51.100.20; "-" = none)
-	roster  string            // the whole harness roster, replacing the one outer builds
-	pins    string            // a stand-in pins tool's body ("" = the real cmd/pveforge-harness-pins)
-	getent  map[string]string // host -> getent ahostsv4's answer
-	extra   func(t *testing.T, home string)
+	known    string // an existing known_hosts ("" = none)
+	knownM   os.FileMode
+	keyscan  map[string]string // vmid -> the scan's output, replacing hostKey
+	tcp      map[string]string // "ip_port" -> attempts that fail first (default 1: the preflight's), or "never"
+	outer    string            // the harness roster's host for qa-pve-07-harness ("" = 198.51.100.20; "-" = none)
+	roster   string            // the whole harness roster, replacing the one outer builds
+	pins     string            // a stand-in pins tool's body ("" = the real cmd/pveforge-harness-pins)
+	getent   map[string]string // host -> getent ahostsv4's answer
+	extra    func(t *testing.T, home string)
 }
 
 func (b buildHome) setup(t *testing.T, home string) {
