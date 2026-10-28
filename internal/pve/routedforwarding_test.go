@@ -1156,7 +1156,12 @@ func (f *fwdPVE) serve(w http.ResponseWriter, r *http.Request) {
 		writeData(w, `{"status":"running"}`)
 	case len(parts) == 4 && parts[2] == "network":
 		writeData(w, `{"type":"bridge"}`)
-	case strings.HasSuffix(p, "/config"), len(parts) == 3 && parts[2] == "status":
+	case strings.HasSuffix(p, "/config"):
+		// A real config always carries a digest (vms.go:35-41); ClaimedVolumes'
+		// live-config guard refuses one without it. A disk slot keeps the body a
+		// plausible config; the node-binding rows assert only the wire sequence.
+		writeData(w, `{"digest":"fwd","scsi0":"local:vm-1-disk-0,size=1G"}`)
+	case len(parts) == 3 && parts[2] == "status":
 		writeData(w, `{}`)
 	case len(parts) == 3:
 		writeData(w, `[]`)
@@ -1286,11 +1291,11 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				_, err := rc.ClaimedVolumes(ctx, fwdCallerNode, fwdVMID)
 				return err
-			}, []string{"GET /nodes/qa-pve-02/qemu/4242/status/current", "GET /nodes/qa-pve-02/qemu/4242/config"}},
+			}, []string{"GET /nodes/qa-pve-02/qemu/4242/config", "GET /nodes/qa-pve-02/qemu/4242/config?current=1", "GET /nodes/qa-pve-02/qemu/4242/snapshot"}},
 			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				_, err := rc.ClaimedVolumes(ctx, fwdCallerNode2, fwdVMID2)
 				return err
-			}, []string{"GET /nodes/qa-pve-05/qemu/5151/status/current", "GET /nodes/qa-pve-05/qemu/5151/config"}},
+			}, []string{"GET /nodes/qa-pve-05/qemu/5151/config", "GET /nodes/qa-pve-05/qemu/5151/config?current=1", "GET /nodes/qa-pve-05/qemu/5151/snapshot"}},
 		}},
 		{"OrphanVolumes", []bindingCase{
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {

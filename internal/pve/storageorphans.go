@@ -2,7 +2,9 @@ package pve
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -58,22 +60,172 @@ func (c *Client) storageContentWithType(ctx context.Context, node, storage strin
 	return raw, nil
 }
 
-// ClaimedVolumes returns the set of PVE volids vmid's OWN config
-// currently references — every indexed disk-shaped slot (ide*, scsi*,
-// sata*, virtio*, unused*) plus efidisk0/tpmstate0 — parsed from
-// VirtualMachineConfig via GetVM. A slot holding "none" or a non-storage
-// device (e.g. a physical-passthrough spec with no leading volid) is
-// simply absent from the returned set; this function does no PVE-side
-// existence checking of its own.
+// firstCommaVolid parses a config slot value to the volid the claimed-set
+// scan keeps: everything up to the first comma. A value with no colon is not
+// a storage-resident volid and is returned as "" so a caller never treats
+// "none"/"/dev/sdb" as one. Lifted (with allDigits/isDiskShapedKey and the
+// configVolids reader) from the former harness-only snapshotSectionVolids so
+// one reader and one parser serve both the production claimed-set path and
+// the item-75 capture (pveforge-claimed-volumes-snapshot-vmstate, B2).
+func firstCommaVolid(slotValue string) string {
+	v := slotValue
+	if i := strings.IndexByte(v, ','); i >= 0 {
+		v = v[:i]
+	}
+	if !strings.Contains(v, ":") {
+		return ""
+	}
+	return v
+}
+
+// allDigits reports whether s is non-empty and all ASCII digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isDiskShapedKey reports whether a config/snapshot-section key is one the
+// claimed-set scan walks: an indexed disk map (ide/scsi/sata/virtio/unused +
+// N) or one of the two disk scalars. The reader restricts to these + "vmstate"
+// so a freeform field (e.g. a "description" carrying a ':') never becomes a
+// bogus volid.
 //
-// Live (nested pvh 2026-10-23, Batch C item 75): this current-config-only
-// surface is confirmed to MISS a running VM's snapshot RAM-state volume. A
-// vmstate=1 snapshot creates local-lvm:vm-<vmid>-state-<snap> (PVE naming
-// confirmed), referenced ONLY from the snapshot section — absent here,
-// present in /content, and matching the vm-<vmid>- destroy-time prefix — so
-// today's destroy-time free (OrphanVolumesForVMID) would select and delete a
-// live VM's snapshot state. The claimed set must also include snapshot-section
-// volids before the free is trusted for any VM that has snapshots.
+// This recognizer is the SOLE decider of which config keys count as disks on
+// the destroy path: if a future PVE/go-proxmox release adds a new disk-bearing
+// key family this does not match, a volume in that new slot silently reads as
+// UNCLAIMED and the destroy-time free deletes it. TestIsDiskShapedKey pins the
+// current families and exclusions; re-verify it on every vendored bump.
+func isDiskShapedKey(key string) bool {
+	switch key {
+	case "efidisk0", "tpmstate0":
+		return true
+	}
+	for _, p := range []string{"ide", "scsi", "sata", "virtio", "unused"} {
+		if rest, ok := strings.CutPrefix(key, p); ok && allDigits(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// configRead is the parsed result of one raw /config read — the live config
+// or a frozen snapshot section. A NAMED STRUCT, not adjacent (vmstate, lock)
+// strings: two same-type positional returns would let a swap compile and
+// silently make the vmstate oracle never fire (finding 3.1). Fields are
+// addressed by name at the call site.
+type configRead struct {
+	volids  []string // disk-shaped slot volids (and the vmstate volid when it is one)
+	vmstate string   // the raw "vmstate" key value, or "" — the call-site oracle runs firstCommaVolid on it
+	lock    string   // the "lock" key, or "" — present on a live config and possibly on a frozen snapshot section
+}
+
+// configVolids issues a RAW GET of a VM config endpoint (the live config, or a
+// snapshot section when snapshot != "") and parses every disk-shaped value and
+// any "vmstate" value with firstCommaVolid. It applies the two per-read
+// fail-closed shape guards; the vmstate ORACLE (live lock, snapshot list
+// Vmstate) is applied by the caller, which alone can see those signals:
+//
+//   - snapshot == "" (LIVE): require a "digest" key — a real config always
+//     carries one (vms.go:35-41), so a 200 {"data":{}}/null read is refused.
+//   - snapshot != "" (SNAPSHOT): require a non-empty decode — a frozen snapshot
+//     config has no digest on PVE 9.x, so len(cfg)==0 is the empty-read signal.
+//
+// strict=true (the claimed-set/destroy path): a present disk-shaped-or-"vmstate"
+// key whose value is not a JSON string is refused (ErrUnverifiableRead), never
+// silently dropped — a dropped claim is a freed live volume. strict=false (the
+// item-75 capture) keeps the lenient skip. No node parameter: RawRequest uses
+// baseURL+path.
+func (c *Client) configVolids(ctx context.Context, vmid int, snapshot, path string, params url.Values, strict bool) (configRead, error) {
+	raw, err := c.RawRequest(ctx, http.MethodGet, path, params)
+	if err != nil {
+		return configRead{}, err
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		if snapshot == "" {
+			return configRead{}, fmt.Errorf("config for vmid %d: %w: %w", vmid, ErrUnverifiableRead, err)
+		}
+		return configRead{}, fmt.Errorf("snapshot %q config for vmid %d: %w: %w", snapshot, vmid, ErrUnverifiableRead, err)
+	}
+	if snapshot == "" {
+		if _, ok := cfg["digest"]; !ok {
+			return configRead{}, fmt.Errorf("config for vmid %d: %w: config carries no digest", vmid, ErrUnverifiableRead)
+		}
+	} else if len(cfg) == 0 {
+		return configRead{}, fmt.Errorf("snapshot %q config for vmid %d: %w: empty config decode", snapshot, vmid, ErrUnverifiableRead)
+	}
+
+	var out configRead
+	for key, rawVal := range cfg {
+		if key == "lock" {
+			var s string
+			if json.Unmarshal(rawVal, &s) != nil {
+				// A present-but-non-string lock is unverifiable: the suspend
+				// backstop reads lock, so silently dropping it would fail OPEN
+				// (F2). Refuse on the strict/claimed path, same posture as a
+				// non-string disk/vmstate value.
+				if strict {
+					if snapshot == "" {
+						return configRead{}, fmt.Errorf("config for vmid %d: %w: key \"lock\" is present with a non-string value", vmid, ErrUnverifiableRead)
+					}
+					return configRead{}, fmt.Errorf("snapshot %q config for vmid %d: %w: key \"lock\" is present with a non-string value", snapshot, vmid, ErrUnverifiableRead)
+				}
+			} else {
+				out.lock = s
+			}
+			continue
+		}
+		if !isDiskShapedKey(key) && key != "vmstate" {
+			continue
+		}
+		var s string
+		if json.Unmarshal(rawVal, &s) != nil {
+			if strict {
+				if snapshot == "" {
+					return configRead{}, fmt.Errorf("config for vmid %d: %w: key %q is present with a non-string value", vmid, ErrUnverifiableRead, key)
+				}
+				return configRead{}, fmt.Errorf("snapshot %q config for vmid %d: %w: key %q is present with a non-string value", snapshot, vmid, ErrUnverifiableRead, key)
+			}
+			continue // non-string value (e.g. a nested object) — not a volid slot
+		}
+		if key == "vmstate" {
+			out.vmstate = s
+		}
+		if v := firstCommaVolid(s); v != "" {
+			out.volids = append(out.volids, v)
+		}
+	}
+	sort.Strings(out.volids)
+	return out, nil
+}
+
+// ClaimedVolumes returns the set of PVE volids vmid's config references across
+// its LIVE config (pending ∪ current=1) and EVERY real snapshot section —
+// every indexed disk-shaped slot (ide*, scsi*, sata*, virtio*, unused*),
+// efidisk0/tpmstate0, and the vmstate volid of a hibernated VM or a vmstate=1
+// snapshot. A slot holding "none" or a non-storage device (a physical-
+// passthrough path with no leading volid) is simply absent from the returned
+// set; this function does no PVE-side existence checking of its own.
+//
+// Snapshot and hibernated vmstate inclusion (pveforge-claimed-volumes-snapshot-
+// vmstate): a vmstate=1 snapshot creates local-lvm:vm-<vmid>-state-<snap>,
+// referenced ONLY from that snapshot's section — absent from the current
+// config, present in /content, and matching the vm-<vmid>- destroy-time prefix.
+// Reading only the current config (the former behaviour, live-verified to miss
+// it: nested pvh 2026-10-23, Batch C item 75) let the destroy-time free
+// (OrphanVolumesForVMID -> VolumeFreeOrphans) select and delete a live VM's
+// snapshot RAM state. Both vmstate legs are now backed by PVE's own oracle and
+// fail closed: a live config whose lock reports a suspend-family state but
+// carries no vmstate volid, and a snapshot whose list entry reports vmstate!=0
+// but whose section carries no vmstate volid, are each refused
+// (ErrUnverifiableRead) rather than returned as a short set.
 //
 // Locking: the caller must hold lock.Read or lock.Mutation on this
 // storage's ObjectKey for the duration of this call; ClaimedVolumes does
@@ -113,82 +265,61 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 		return nil, fmt.Errorf("claimed volumes for vmid %d: node is required", vmid)
 	}
 
-	vm, err := c.GetVM(ctx, node, vmid)
+	claimed := make(map[string]bool)
+
+	// Live config, pending ∪ current=1 (B4). A volid present only in the
+	// pending view is a pending ADD (already allocated); one present only in
+	// current=1 is a pending DELETE (still allocated and in use until the
+	// guest's next cold boot) — both must be claimed, so neither view alone is
+	// sufficient. Read the live config FIRST and refuse on its guard before
+	// listing snapshots.
+	livePath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	for _, params := range []url.Values{nil, {"current": {"1"}}} {
+		cr, err := c.configVolids(ctx, vmid, "", livePath, params, true)
+		if err != nil {
+			return nil, fmt.Errorf("claimed volumes for vmid %d: %w", vmid, err)
+		}
+		// Live vmstate backstop (3.2): PVE's lock is its own witness that a
+		// hibernated VM has a resume-state volume. suspended (at rest) and
+		// suspending (mid suspend-to-disk) both prefix "suspend"; every other
+		// lock legitimately has no live vmstate (a rollback's state is the
+		// snapshot's). So refuse ONLY when the lock asserts a suspend-family
+		// state and the config reported no vmstate volid — fail closed, a
+		// refusal never a deletion, and never for a correctly-reporting VM.
+		if strings.HasPrefix(cr.lock, "suspend") && firstCommaVolid(cr.vmstate) == "" {
+			return nil, fmt.Errorf("claimed volumes for vmid %d: %w: lock %q asserts a suspend-family state volume but the config carries no vmstate volid", vmid, ErrUnverifiableRead, cr.lock)
+		}
+		for _, v := range cr.volids {
+			claimed[v] = true
+		}
+	}
+
+	// Every real snapshot's frozen section: its disk slots, efidisk0/tpmstate0,
+	// and vmstate volid. Covers a disk referenced ONLY by an older (since-
+	// detached) snapshot. listSnapshotsVerifiable fails closed on a swallowed
+	// or current-less list; a VM with no snapshots yields only the "current"
+	// pseudo-entry, which realSnapshots drops.
+	snaps, err := c.listSnapshotsVerifiable(ctx, node, vmid)
 	if err != nil {
 		return nil, fmt.Errorf("claimed volumes for vmid %d: %w", vmid, err)
 	}
-
-	claimed := make(map[string]bool)
-	// GetVM already refuses a nil config; kept as a second line of defence,
-	// because an empty claimed set here would report every one of this VM's
-	// disks as an orphan.
-	cfg := vm.VirtualMachineConfig
-	if cfg == nil {
-		return nil, fmt.Errorf("claimed volumes for vmid %d: %w: config payload was null", vmid, ErrUnverifiableRead)
-	}
-
-	add := func(slotValue string) {
-		volid := slotValue
-		if idx := strings.IndexByte(slotValue, ','); idx >= 0 {
-			volid = slotValue[:idx]
+	for _, s := range realSnapshots(snaps) {
+		cr, err := c.configVolids(ctx, vmid, s.Name,
+			fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s/config", url.PathEscape(node), vmid, url.PathEscape(s.Name)), nil, true)
+		if err != nil {
+			return nil, fmt.Errorf("claimed volumes for vmid %d: %w", vmid, err)
 		}
-		// A genuine PVE volid is always "<storage>:<name>". A slot holding
-		// "none" (empty removable media), a bare scalar, or a raw device
-		// path for physical passthrough (e.g. "/dev/sdb") has no colon and
-		// is not a storage-resident volume this scan tracks.
-		//
-		// Linked-clone volid identity — live on nested lvmthin (pvh
-		// 2026-10-23, Batch C item 74); UNVERIFIED on ZFS (item 79). On
-		// lvmthin the clone's own disk-slot volid is byte-identical to its
-		// /content Volid, so this verbatim parse is correct for the clone's
-		// OWN disk, and /content exposes no linked-clone parent. This parser
-		// still does not consult proxmox.StorageContent.Parent; it does not
-		// need to on lvmthin (the base is base-<tpl>-disk-N, outside the
-		// vm-<vmid>- selector). Recheck on a real ZFS host before trusting
-		// destroy-time reconciliation there. See vault task
-		// pveforge-storage-orphan-scan's "Unverified assumptions" section.
-		if !strings.Contains(volid, ":") {
-			return
+		// Snapshot vmstate backstop (NEW-13): the snapshot LIST entry's
+		// Vmstate flag is PVE's own witness (the same oracle CreateSnapshot
+		// gates on, snapshot.go) that a vm-<vmid>-state-<snap> volume exists.
+		// Refuse when it asserts one and the section carries no vmstate volid.
+		if s.Vmstate != 0 && firstCommaVolid(cr.vmstate) == "" {
+			return nil, fmt.Errorf("claimed volumes for vmid %d: %w: snapshot %q list reports vmstate=%d but its section carries no vmstate volid", vmid, ErrUnverifiableRead, s.Name, s.Vmstate)
 		}
-		claimed[volid] = true
-	}
-
-	// Volume-bearing config keys come from TWO different shapes on
-	// VirtualMachineConfig, both handled below: the indexed device maps
-	// (this loop) AND the two plain scalar fields after it (EFIDisk0,
-	// TPMState0 — a UEFI VM's NVRAM store and a vTPM's state volume,
-	// neither part of any indexed map). Reason about both when extending
-	// this function; the indexed-map frame below is not the whole claimed
-	// surface on its own.
-	//
-	// This list is exactly the 5 of go-proxmox's 12 indexed device
-	// maps (types.go:1088-1099) that ever carry a volid — confirmed by
-	// direct source inspection: Nets, Numas, HostPCIs, Serials, USBs,
-	// Parallels, and IPConfigs are all real indexed maps too, but none of
-	// their values are ever a storage-resident volume. This is a MANUAL
-	// enumeration, not derived from go-proxmox's own routing table
-	// (indexedDeviceMaps(), types.go:1128) — that method is unexported and
-	// unreachable from this package. It is NOT automatically kept in sync
-	// with a future go-proxmox release: if a vendored upgrade ever adds a
-	// new disk-bearing indexed map, this list must be updated by hand or a
-	// claimed volume in that new slot silently reads as unclaimed here —
-	// which the downstream OrphanVolumes/VolumeFreeOrphans consumer would
-	// then free. TestClaimedVolumes_OnlyDiskBearingIndexedMapsContribute
-	// pins this exact 5-map set (and the 7-map exclusion) as a named,
-	// walkable list — re-verify it against go-proxmox's own
-	// indexedDeviceMaps() on every vendored version bump.
-	for _, slots := range []map[string]string{cfg.IDEs, cfg.SCSIs, cfg.SATAs, cfg.VirtIOs, cfg.Unuseds} {
-		for _, v := range slots {
-			add(v)
+		for _, v := range cr.volids {
+			claimed[v] = true
 		}
 	}
-	// Both scalars are pinned by TestClaimedVolumes_ParsesEveryDiskShapedSlotAndScalar
-	// (deleting either add() call here fails that test) — dropping either
-	// would report a live VM's EFI or TPM volume as an orphan, and
-	// OrphanVolumes/VolumeFreeOrphans would free it, leaving a VM that no
-	// longer boots.
-	add(cfg.EFIDisk0)
-	add(cfg.TPMState0)
 
 	return claimed, nil
 }

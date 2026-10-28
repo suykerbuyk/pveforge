@@ -35,58 +35,14 @@ import (
 	proxmox "github.com/suykerbuyk/go-proxmox"
 )
 
-// firstCommaVolid parses a config slot value to the volid the orphan scan's
-// ClaimedVolumes.add() keeps: everything up to the first comma
-// (storageorphans.go:109-113). A value with no colon is not a storage-resident
-// volid and is returned as "" so a caller never treats "none"/"/dev/sdb" as one.
-func firstCommaVolid(slotValue string) string {
-	v := slotValue
-	if i := strings.IndexByte(v, ','); i >= 0 {
-		v = v[:i]
-	}
-	if !strings.Contains(v, ":") {
-		return ""
-	}
-	return v
-}
+// firstCommaVolid, allDigits and isDiskShapedKey were lifted into production
+// storageorphans.go (pveforge-claimed-volumes-snapshot-vmstate, B2) so one
+// reader and one parser serve both the claimed-set path and this capture; this
+// file still uses them (same package pve).
 
-// allDigits reports whether s is non-empty and all ASCII digits.
-func allDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// isDiskShapedKey reports whether a config/snapshot-section key is one
-// ClaimedVolumes walks: an indexed disk map (ide/scsi/sata/virtio/unused + N) or
-// one of the two disk scalars. The snapshot-section parser restricts to these +
-// `vmstate` so a freeform field (e.g. a `description` carrying a ':') never
-// becomes a bogus volid (NB4).
-func isDiskShapedKey(key string) bool {
-	switch key {
-	case "efidisk0", "tpmstate0":
-		return true
-	}
-	for _, p := range []string{"ide", "scsi", "sata", "virtio", "unused"} {
-		if rest, ok := strings.CutPrefix(key, p); ok && allDigits(rest) {
-			return true
-		}
-	}
-	return false
-}
-
-// freePrefix is the exact prefix OrphanVolumesForVMID selects on
-// (storageorphans.go:298): "<storage>:vm-<vmid>-". The captures record whether a
-// volid matches it so the write-back can state the hazard→free linkage precisely.
-func freePrefix(storage string, vmid int) string {
-	return fmt.Sprintf("%s:vm-%d-", storage, vmid)
-}
+// freePrefix, SnapshotSectionCapture, snapshotSectionInputs, evalSnapshotSection
+// and Failures were relocated to the untagged snapshotsectiongate.go (F6) so CI
+// runs the item-75 gate test; this harness file still references them.
 
 // diskSlotVolids returns the parsed volids of every disk-shaped slot of cfg, in
 // the SAME surface ClaimedVolumes walks (ide/scsi/sata/virtio/unused +
@@ -264,77 +220,6 @@ func (c *CloneVolidCapture) Failures() []string {
 	}
 	if !c.BaseClaimedByTemplate {
 		f = append(f, fmt.Sprintf("item-74: base volid %q is NOT in the template's ClaimedVolumes(current) — the base-reads-unclaimed input could not be established", c.BaseContentVolid))
-	}
-	return f
-}
-
-// ---- C2 (75): vmstate / snapshot-section claimed-surface gap -------------
-
-// SnapshotSectionCapture records item 75: the snapshot-section volids a running
-// guest's vmstate snapshot creates, and whether at least one reproduces the
-// free-path gap (absent from current ClaimedVolumes ∧ present in /content ∧
-// prefixed vm-<vmid>-).
-type SnapshotSectionCapture struct {
-	Storage       string   `json:"storage"`
-	VMID          int      `json:"vmid"`
-	Snapshot      string   `json:"snapshot"`
-	SectionVolids []string `json:"section_volids"` // ALL disk+vmstate volids parsed from the snapshot section
-	GapVolids     []string `json:"gap_volids"`     // those that satisfy all three sub-conditions
-	HibernateKey  string   `json:"hibernate_key"`  // best-effort current-config vmstate: value (may be empty)
-	ContentMissed []string `json:"content_missed"` // absent-from-current section volids with NO /content row (FAIL)
-}
-
-// snapshotSectionInputs are the read values evalSnapshotSection decides on.
-type snapshotSectionInputs struct {
-	storage       string
-	vmid          int
-	snapshot      string
-	sectionVolids []string
-	currentClaim  map[string]bool // ClaimedVolumes(current)
-	contentVolids map[string]bool // set of /content Volids on the storage
-	hibernateKey  string
-}
-
-// evalSnapshotSection is item 75's decision and mutation target. The gap is
-// reproduced iff a section volid is absent from the current claimed set AND
-// present as a /content Volid AND carries the free prefix.
-func evalSnapshotSection(in snapshotSectionInputs) *SnapshotSectionCapture {
-	cap := &SnapshotSectionCapture{
-		Storage:       in.storage,
-		VMID:          in.vmid,
-		Snapshot:      in.snapshot,
-		SectionVolids: append([]string(nil), in.sectionVolids...),
-		HibernateKey:  in.hibernateKey,
-	}
-	sort.Strings(cap.SectionVolids)
-	prefix := freePrefix(in.storage, in.vmid)
-	for _, v := range in.sectionVolids {
-		if in.currentClaim[v] {
-			continue // claimed by current config — not the gap
-		}
-		if !in.contentVolids[v] {
-			cap.ContentMissed = append(cap.ContentMissed, v)
-			continue
-		}
-		if strings.HasPrefix(v, prefix) {
-			cap.GapVolids = append(cap.GapVolids, v)
-		}
-	}
-	sort.Strings(cap.GapVolids)
-	sort.Strings(cap.ContentMissed)
-	return cap
-}
-
-// Failures gates item 75. No current-config-absent volid ⇒ gap not reproduced
-// (FAIL). A content row missing for an absent volid ⇒ FAIL. Hibernate key stays
-// best-effort and never gates.
-func (c *SnapshotSectionCapture) Failures() []string {
-	var f []string
-	for _, v := range c.ContentMissed {
-		f = append(f, fmt.Sprintf("item-75: snapshot-section volid %q is absent from current config but has NO /content row (FAIL)", v))
-	}
-	if len(c.GapVolids) == 0 {
-		f = append(f, fmt.Sprintf("item-75: no snapshot-section volid reproduced the claimed-surface gap (absent-from-current ∧ in-/content ∧ prefixed %q) — gap NOT reproduced", freePrefix(c.Storage, c.VMID)))
 	}
 	return f
 }
@@ -517,37 +402,19 @@ func (c *Client) startAndConfirmRunning(ctx context.Context, node string, vmid i
 // snapshotSectionVolids issues a RAW GET of the snapshot SECTION config (never
 // the nil-client library VirtualMachineSnapshot.Config) and parses every
 // disk-shaped value and any `vmstate` value with the same first-comma rule as
-// ClaimedVolumes.add(). Returns the parsed volids and the raw vmstate value (if
-// any) for the hibernate best-effort leg.
+// the claimed-set scan. It is a strict=false wrapper over the production
+// configVolids reader (pveforge-claimed-volumes-snapshot-vmstate, B2/NEW-2): the
+// capture is a measurement that never DELETEs, so its output under-reporting a
+// skipped key is caught by Failures()/ContentMissed — the lenient skip is safe
+// here. Returns the parsed volids and the raw vmstate value (if any) for the
+// hibernate best-effort leg.
 func (c *Client) snapshotSectionVolids(ctx context.Context, node string, vmid int, snap string) (volids []string, vmstate string, err error) {
-	raw, err := c.RawRequest(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s/config", url.PathEscape(node), vmid, url.PathEscape(snap)), nil)
+	cr, err := c.configVolids(ctx, vmid, snap,
+		fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s/config", url.PathEscape(node), vmid, url.PathEscape(snap)), nil, false)
 	if err != nil {
 		return nil, "", fmt.Errorf("snapshot %q config on vm %d: %w", snap, vmid, err)
 	}
-	var cfg map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, "", fmt.Errorf("snapshot %q config on vm %d: shape: %w", snap, vmid, err)
-	}
-	for key, rawVal := range cfg {
-		// Only disk-shaped keys + vmstate, as ClaimedVolumes walks — not every
-		// string value (NB4): a freeform `description` with a ':' would become a
-		// bogus volid and a spurious FAIL.
-		if !isDiskShapedKey(key) && key != "vmstate" {
-			continue
-		}
-		var s string
-		if json.Unmarshal(rawVal, &s) != nil {
-			continue // non-string value (e.g. a nested object) — not a volid slot
-		}
-		if key == "vmstate" {
-			vmstate = s
-		}
-		if v := firstCommaVolid(s); v != "" {
-			volids = append(volids, v)
-		}
-	}
-	sort.Strings(volids)
-	return volids, vmstate, nil
+	return cr.volids, cr.vmstate, nil
 }
 
 // volidSet collapses a /content listing to the set of its Volids.
@@ -660,22 +527,53 @@ func (c *Client) CaptureVmstateSection(ctx context.Context, node, storage string
 	if err != nil {
 		return nil, err
 	}
-	currentClaim, err := c.ClaimedVolumes(ctx, node, vmid)
+	// The pre-fix surface: the LIVE config only (pending ∪ current, no
+	// snapshots). Built from the production reader directly so a raw gap is
+	// defined against exactly what ClaimedVolumes read before snapshots existed.
+	currentConfigOnlyClaim := map[string]bool{}
+	livePath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid)
+	for _, params := range []url.Values{nil, {"current": {"1"}}} {
+		cr, err := c.configVolids(ctx, vmid, "", livePath, params, true)
+		if err != nil {
+			return nil, fmt.Errorf("item-75: live config claim(%d): %w", vmid, err)
+		}
+		for _, v := range cr.volids {
+			currentConfigOnlyClaim[v] = true
+		}
+	}
+	fullClaim, err := c.ClaimedVolumes(ctx, node, vmid)
 	if err != nil {
-		return nil, fmt.Errorf("item-75: ClaimedVolumes(current %d): %w", vmid, err)
+		return nil, fmt.Errorf("item-75: ClaimedVolumes(full %d): %w", vmid, err)
+	}
+	// Live-disk witness for leg (c), by SLOT, from an independent typed read —
+	// NOT from either claim set. A real GetVM failure must PROPAGATE (else the
+	// gate's live-leg check silently skips and lies green, F1); only a
+	// legitimately diskless VM — a valid read whose config has no disk slot —
+	// yields an empty witness and skips leg (c) by design (NEW-18).
+	vm, err := c.GetVM(ctx, node, vmid)
+	if err != nil {
+		return nil, fmt.Errorf("item-75: live-disk witness read for vm %d: %w", vmid, err)
+	}
+	var liveWitnessVolid string
+	if vm.VirtualMachineConfig != nil {
+		if _, wv := pickDiskSlot(diskSlotVolids(vm.VirtualMachineConfig)); wv != "" {
+			liveWitnessVolid = wv
+		}
 	}
 	content, err := c.storageContentWithType(ctx, node, storage)
 	if err != nil {
 		return nil, fmt.Errorf("item-75: read %q content: %w", storage, err)
 	}
 	return evalSnapshotSection(snapshotSectionInputs{
-		storage:       storage,
-		vmid:          vmid,
-		snapshot:      snap,
-		sectionVolids: sectionVolids,
-		currentClaim:  currentClaim,
-		contentVolids: volidSet(content),
-		hibernateKey:  hibernateKey,
+		storage:                storage,
+		vmid:                   vmid,
+		snapshot:               snap,
+		sectionVolids:          sectionVolids,
+		currentConfigOnlyClaim: currentConfigOnlyClaim,
+		fullClaim:              fullClaim,
+		contentVolids:          volidSet(content),
+		hibernateKey:           hibernateKey,
+		liveWitnessVolid:       liveWitnessVolid,
 	}), nil
 }
 

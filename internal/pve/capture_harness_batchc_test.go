@@ -4,6 +4,7 @@ package pve
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
@@ -138,82 +139,6 @@ func TestEvalCloneVolid(t *testing.T) {
 			t.Fatal("want a failure when the clone's content row is absent")
 		}
 	})
-}
-
-// ---- C2 (75) ------------------------------------------------------------
-
-func TestEvalSnapshotSection(t *testing.T) {
-	const storage = "local-lvm"
-	const vmid = 905
-	stateVolid := "local-lvm:vm-905-state-snap1"
-	diskVolid := "local-lvm:vm-905-disk-0"
-
-	base := func() snapshotSectionInputs {
-		return snapshotSectionInputs{
-			storage:       storage,
-			vmid:          vmid,
-			snapshot:      "snap1",
-			sectionVolids: []string{diskVolid, stateVolid},
-			currentClaim:  map[string]bool{diskVolid: true}, // disk is in current config; state is NOT
-			contentVolids: map[string]bool{diskVolid: true, stateVolid: true},
-		}
-	}
-
-	t.Run("good: the state volid reproduces the gap", func(t *testing.T) {
-		cap := evalSnapshotSection(base())
-		if len(cap.GapVolids) != 1 || cap.GapVolids[0] != stateVolid {
-			t.Fatalf("GapVolids = %v, want [%s]", cap.GapVolids, stateVolid)
-		}
-		if len(cap.SectionVolids) != 2 {
-			t.Errorf("must record ALL section volids, got %v", cap.SectionVolids)
-		}
-		if f := cap.Failures(); len(f) != 0 {
-			t.Errorf("want no failures, got %v", f)
-		}
-	})
-
-	// ANTI-VACUITY: if the state volid is ALSO in current config, the gap is not
-	// reproduced ⇒ FAIL. (A decider that ignored current-config membership would
-	// wrongly pass here.)
-	t.Run("mutant: section volid in current config ⇒ gap NOT reproduced, FAIL", func(t *testing.T) {
-		in := base()
-		in.currentClaim = map[string]bool{diskVolid: true, stateVolid: true}
-		cap := evalSnapshotSection(in)
-		if len(cap.GapVolids) != 0 {
-			t.Fatalf("GapVolids = %v, want empty (both volids claimed)", cap.GapVolids)
-		}
-		if len(cap.Failures()) == 0 {
-			t.Fatal("want a failure when no section volid is absent-from-current")
-		}
-	})
-
-	// ANTI-VACUITY: an absent-from-current section volid with NO /content row ⇒ FAIL.
-	t.Run("mutant: content row missing ⇒ FAIL", func(t *testing.T) {
-		in := base()
-		in.contentVolids = map[string]bool{diskVolid: true} // state volid NOT in content
-		cap := evalSnapshotSection(in)
-		if len(cap.ContentMissed) != 1 || cap.ContentMissed[0] != stateVolid {
-			t.Fatalf("ContentMissed = %v, want [%s]", cap.ContentMissed, stateVolid)
-		}
-		if len(cap.Failures()) == 0 {
-			t.Fatal("want a failure when the content row is missing")
-		}
-	})
-}
-
-// snapshotSectionVolids parses disk+vmstate values with the first-comma rule.
-func TestSnapshotSectionParse_FirstComma(t *testing.T) {
-	// Not a network test: exercise firstCommaVolid on the shapes the parser feeds.
-	for _, tc := range []struct{ in, want string }{
-		{"local-lvm:vm-905-disk-0,size=32G", "local-lvm:vm-905-disk-0"},
-		{"local-lvm:vm-905-state-snap1", "local-lvm:vm-905-state-snap1"},
-		{"none", ""},
-		{"/dev/sdb", ""},
-	} {
-		if got := firstCommaVolid(tc.in); got != tc.want {
-			t.Errorf("firstCommaVolid(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
 }
 
 // ---- C3 (76) ------------------------------------------------------------
@@ -405,4 +330,61 @@ func TestCaptureCrossNodeCreate_NextidBothDirections(t *testing.T) {
 	if !gotFree {
 		t.Fatal("free VMID must classify as free")
 	}
+}
+
+// ---- C2 (75): CaptureVmstateSection live orchestration ------------------
+
+// vmstateSectionRoutes is a full gap-CLOSED fixture: VM 905 has a live disk and
+// a vmstate snapshot snap1 whose state volume is a raw gap the fix now claims.
+// statusCode lets a test flip the witness GetVM's /status/current read to a 500.
+func vmstateSectionRoutes(statusCode int) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/nodes/n1/qemu/905/config":
+			_, _ = w.Write([]byte(`{"data":{"digest":"d","scsi0":"local-lvm:vm-905-disk-0,size=8G"}}`))
+		case "/nodes/n1/qemu/905/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"},{"name":"snap1","vmstate":1}]}`))
+		case "/nodes/n1/qemu/905/snapshot/snap1/config":
+			_, _ = w.Write([]byte(`{"data":{"scsi0":"local-lvm:vm-905-disk-0,size=8G","vmstate":"local-lvm:vm-905-state-snap1"}}`))
+		case "/nodes/n1/qemu/905/status/current":
+			if statusCode != 0 {
+				w.WriteHeader(statusCode)
+				_, _ = w.Write([]byte("witness status read exploded"))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
+		case "/nodes/n1/storage/local-lvm/content":
+			_, _ = w.Write([]byte(`{"data":[{"volid":"local-lvm:vm-905-disk-0","vmid":905,"content":"images"},{"volid":"local-lvm:vm-905-state-snap1","vmid":905,"content":"images"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}
+}
+
+func TestCaptureVmstateSection(t *testing.T) {
+	t.Run("gap-closed fixture passes with the witness populated", func(t *testing.T) {
+		c := testClient(t, newFakeAPIServer(t, vmstateSectionRoutes(0)))
+		cap, err := c.CaptureVmstateSection(context.Background(), "n1", "local-lvm", 905, "snap1", "")
+		if err != nil {
+			t.Fatalf("CaptureVmstateSection: %v", err)
+		}
+		if cap.LiveWitnessVolid != "local-lvm:vm-905-disk-0" || !cap.WitnessClaimed {
+			t.Errorf("witness not populated/claimed: volid=%q claimed=%v", cap.LiveWitnessVolid, cap.WitnessClaimed)
+		}
+		if f := cap.Failures(); len(f) != 0 {
+			t.Errorf("gap-closed fixture must have no failures, got %v", f)
+		}
+	})
+
+	// F1: a REAL GetVM failure (the witness read) must PROPAGATE, not be swallowed
+	// into an empty witness that silently skips leg (c). Re-introducing the old
+	// `err == nil` swallow reds this: CaptureVmstateSection would return no error.
+	t.Run("witness GetVM error propagates (gate fails, not skips)", func(t *testing.T) {
+		c := testClient(t, newFakeAPIServer(t, vmstateSectionRoutes(http.StatusInternalServerError)))
+		_, err := c.CaptureVmstateSection(context.Background(), "n1", "local-lvm", 905, "snap1", "")
+		if err == nil {
+			t.Fatal("a failed witness GetVM must fail the capture, not be swallowed into an empty witness")
+		}
+	})
 }

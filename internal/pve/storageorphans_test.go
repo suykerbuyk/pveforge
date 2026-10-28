@@ -14,8 +14,6 @@ func TestClaimedVolumes_ParsesEveryDiskShapedSlotAndScalar(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/nodes/qa-pve-01/qemu/105/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
 		case "/nodes/qa-pve-01/qemu/105/config":
 			_, _ = w.Write([]byte(`{"data":{
 				"digest": "abc123",
@@ -29,6 +27,8 @@ func TestClaimedVolumes_ParsesEveryDiskShapedSlotAndScalar(t *testing.T) {
 				"ide2": "none,media=cdrom",
 				"scsihw": "virtio-scsi-pci"
 			}}`))
+		case "/nodes/qa-pve-01/qemu/105/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -83,10 +83,9 @@ func TestClaimedVolumes_OnlyDiskBearingIndexedMapsContribute(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/nodes/qa-pve-01/qemu/110/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
 		case "/nodes/qa-pve-01/qemu/110/config":
 			_, _ = w.Write([]byte(`{"data":{
+				"digest":    "d110",
 				"ide0":      "fake:disk-ide",
 				"scsi0":     "fake:disk-scsi",
 				"sata0":     "fake:disk-sata",
@@ -100,6 +99,8 @@ func TestClaimedVolumes_OnlyDiskBearingIndexedMapsContribute(t *testing.T) {
 				"parallel0": "fake:not-a-disk-parallel",
 				"ipconfig0": "fake:not-a-disk-ipconfig"
 			}}`))
+		case "/nodes/qa-pve-01/qemu/110/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -139,8 +140,6 @@ func TestClaimedVolumes_PropagatesConfigFetchError(t *testing.T) {
 	srv := newFakeAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/nodes/qa-pve-01/qemu/999/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
 		case "/nodes/qa-pve-01/qemu/999/config":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte("config fetch exploded"))
@@ -256,14 +255,14 @@ func orphanScenarioHandler(t *testing.T, contentReversed bool) http.HandlerFunc 
 			_, _ = w.Write([]byte(`{"data":` + content + `}`))
 		case "/nodes/qa-pve-01/qemu":
 			_, _ = w.Write([]byte(`{"data":[{"vmid":100},{"vmid":101}]}`))
-		case "/nodes/qa-pve-01/qemu/100/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
 		case "/nodes/qa-pve-01/qemu/100/config":
-			_, _ = w.Write([]byte(`{"data":{"scsi0":"local-lvm:vm-100-disk-0,size=32G"}}`))
-		case "/nodes/qa-pve-01/qemu/101/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
+			_, _ = w.Write([]byte(`{"data":{"digest":"d100","scsi0":"local-lvm:vm-100-disk-0,size=32G"}}`))
+		case "/nodes/qa-pve-01/qemu/100/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"}]}`))
 		case "/nodes/qa-pve-01/qemu/101/config":
-			_, _ = w.Write([]byte(`{"data":{"ide2":"local-lvm:iso/debian.iso,media=cdrom"}}`))
+			_, _ = w.Write([]byte(`{"data":{"digest":"d101","ide2":"local-lvm:iso/debian.iso,media=cdrom"}}`))
+		case "/nodes/qa-pve-01/qemu/101/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -385,13 +384,13 @@ func TestOrphanVolumes_AbortsWholeCallWhenAnySingleClaimedSetFails(t *testing.T)
 			_, _ = w.Write([]byte(`{"data":[{"volid":"local-lvm:vm-101-disk-0","vmid":101,"content":"images"}]}`))
 		case "/nodes/qa-pve-01/qemu":
 			_, _ = w.Write([]byte(`{"data":[{"vmid":100},{"vmid":101}]}`))
-		case "/nodes/qa-pve-01/qemu/100/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
 		case "/nodes/qa-pve-01/qemu/100/config":
-			_, _ = w.Write([]byte(`{"data":{}}`))
-		case "/nodes/qa-pve-01/qemu/101/status/current":
+			_, _ = w.Write([]byte(`{"data":{"digest":"d100"}}`))
+		case "/nodes/qa-pve-01/qemu/100/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"}]}`))
+		case "/nodes/qa-pve-01/qemu/101/config":
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte("vm 101 status fetch exploded"))
+			_, _ = w.Write([]byte("vm 101 config fetch exploded"))
 		default:
 			http.NotFound(w, r)
 		}

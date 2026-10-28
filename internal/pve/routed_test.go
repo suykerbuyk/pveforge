@@ -562,10 +562,10 @@ func TestRoutedClient_StorageOrphanScan_Forwards(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":[{"volid":"local-lvm:vm-102-disk-0","vmid":102,"content":"images"}]}`))
 		case "/nodes/qa-pve-01/qemu":
 			_, _ = w.Write([]byte(`{"data":[]}`))
-		case "/nodes/qa-pve-01/qemu/100/status/current":
-			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
 		case "/nodes/qa-pve-01/qemu/100/config":
-			_, _ = w.Write([]byte(`{"data":{"scsi0":"local-lvm:vm-100-disk-0,size=32G"}}`))
+			_, _ = w.Write([]byte(`{"data":{"digest":"d100","scsi0":"local-lvm:vm-100-disk-0,size=32G"}}`))
+		case "/nodes/qa-pve-01/qemu/100/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"current"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
