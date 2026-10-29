@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -186,6 +187,96 @@ func (a *RootAccess) ClusterGuests(ctx context.Context) ([]pve.Guest, error) {
 		return nil, fmt.Errorf("list the cluster's guests as root: %w", err)
 	}
 	return pve.ParseClusterGuests([]byte(out))
+}
+
+// NodeQemuCommand is the one command NodeVMIDs runs as root to list node's
+// QEMU VMIDs: a read of that node's qemu index (GET /nodes/{node}/qemu, the
+// ACL-unfiltered form of what Client.GetVMs reads over the token). node is
+// shell-quoted.
+func NodeQemuCommand(node string) string {
+	return "pvesh get /nodes/" + sshexec.ShellQuote(node) + "/qemu --output-format json"
+}
+
+// PeerNodeReadCommand reads the SSH peer's OWN PVE nodename, non-proxying and
+// local: pmxcfs keeps /etc/pve/local a symlink to /etc/pve/nodes/<localnode>,
+// so `readlink` prints the relative target "nodes/<localnode>". It is plain
+// readlink, not `readlink -f`: the canonicalised absolute form is refused by
+// verifyPeerNode (see its strict shape).
+const PeerNodeReadCommand = "readlink /etc/pve/local"
+
+// peerNodeRE matches PeerNodeReadCommand's expected output exactly:
+// "nodes/<segment>", where <segment> is a single path component — no '/'
+// inside it, so a relative-traversal target like "nodes/A/../pvh" and a
+// trailing slash both fail to match, and an absolute target (which does not
+// start with "nodes/") fails too. Deliberately NOT path.Base / "final
+// component", which would accept "nodes/A/../pvh".
+var peerNodeRE = regexp.MustCompile(`^nodes/([^/]+)$`)
+
+// verifyPeerNode refuses (ErrUnverifiableRead) unless the SSH peer's own PVE
+// nodename equals node. It reads /etc/pve/local on the peer (pmxcfs's
+// local-node symlink, read with NO API proxy), parses it strictly, and
+// compares case-sensitively. This is what makes NodeVMIDs safe regardless of
+// the roster target's Host/Node fields (independent, roster/types.go) or
+// pvesh's `proxyto => 'node'` behaviour: a list read for a node that is NOT
+// the peer would be proxied to — and return — a DIFFERENT node's set, which
+// the []int return cannot detect. So a non-local node is refused here, before
+// any list read runs. Undeterminable (empty, malformed, or a non-zero exit)
+// and mismatch all refuse; there is no hostname fallback, because the pmxcfs
+// symlink is the authoritative answer to "which node is this peer's API".
+func (a *RootAccess) verifyPeerNode(ctx context.Context, node string) error {
+	out, err := a.pveum(ctx, PeerNodeReadCommand)
+	if err != nil {
+		return fmt.Errorf("verify the ssh peer's own node: %w: %w", pve.ErrUnverifiableRead, err)
+	}
+	// Trim exactly one trailing newline; any other surrounding junk is a
+	// shape the strict regex then rejects.
+	trimmed := strings.TrimSuffix(out, "\n")
+	m := peerNodeRE.FindStringSubmatch(trimmed)
+	if m == nil {
+		return fmt.Errorf("verify the ssh peer's own node: %w: /etc/pve/local reads %q, not the expected \"nodes/<node>\"", pve.ErrUnverifiableRead, trimmed)
+	}
+	peer := m[1]
+	if peer == "." || peer == ".." {
+		return fmt.Errorf("verify the ssh peer's own node: %w: /etc/pve/local reads %q, not a node name", pve.ErrUnverifiableRead, trimmed)
+	}
+	if peer != node {
+		return fmt.Errorf("verify the ssh peer's own node: %w: the ssh peer is node %q, not %q — refusing to read a different node's qemu list (a proxied read could silently return the wrong node's set)", pve.ErrUnverifiableRead, peer, node)
+	}
+	return nil
+}
+
+// NodeVMIDs lists every QEMU VMID on node, as root@pam — the ACL-UNFILTERED
+// twin of Client.GetVMs over the same index (GET /nodes/{node}/qemu). PVE
+// drops a VM from a token's list unless the token holds VM.Audit on that
+// guest's /vms/<vmid>, and no read a token can make proves none was dropped;
+// root's read is filtered by no ACL.
+//
+// Currency: this endpoint's membership is PVE's pmxcfs REPLICATED guest index
+// (get_vmlist, refreshed by cfs_update at request time) — the SAME class of
+// data as /cluster/resources, NOT a live local conf scan and NOT the pvestatd
+// RRD cache. It therefore carries the quorum-stale caveat the project already
+// records for root's cluster list (cmd/pveforge/vm.go): a guest on an offline
+// node is still listed, but a node WITHOUT QUORUM (or a conf not yet
+// replicated) may serve a SHORT list. A destructive consumer MUST treat a
+// possibly-stale/short list fail-closed. The node choice over /cluster/resources
+// is for SCOPE (this node, qemu-only, no RRD layer), not for lower latency.
+//
+// Before the (possibly proxied) list read, NodeVMIDs verifies the SSH peer IS
+// node (verifyPeerNode), fail-closed. The returned set is then guaranteed to be
+// node's own. Decoded strictly by pve.ParseNodeVMIDs; any failure is an error,
+// never a short list.
+func (a *RootAccess) NodeVMIDs(ctx context.Context, node string) ([]int, error) {
+	if node == "" {
+		return nil, fmt.Errorf("list node qemu VMIDs as root: node is required")
+	}
+	if err := a.verifyPeerNode(ctx, node); err != nil {
+		return nil, fmt.Errorf("list node %q qemu VMIDs as root: %w", node, err)
+	}
+	out, err := a.pveum(ctx, NodeQemuCommand(node))
+	if err != nil {
+		return nil, fmt.Errorf("list node %q qemu VMIDs as root: %w", node, err)
+	}
+	return pve.ParseNodeVMIDs([]byte(out))
 }
 
 // ErrRootWriteOutcomeUnknown: a root write (pveum user, group or acl) ran
