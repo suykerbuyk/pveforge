@@ -66,3 +66,14 @@ var _ StorageCreateClient = (*pve.RoutedClient)(nil)
 // routed.go, this stops compiling rather than leaving VMClone.Apply's
 // linked-clone pre-check silently unreachable.
 var _ VMCloneClient = (*pve.RoutedClient)(nil)
+
+// Compile-time proof that *pve.RoutedClient satisfies the two storage-volume
+// interfaces (storagevolume.go) — VolumeAllocEnsure / VolumeFreeOrphans. Both
+// are met by the EXISTING RoutedClient method set (Node, RawRequest,
+// GetStorageVolumes, WaitForTask, and Unit 2's OrphanVolumesForVMIDWithVMList
+// pass-through): Unit 3 adds no new RoutedClient method, so no routedClientSeam
+// entry is needed.
+var (
+	_ StorageVolumeClient  = (*pve.RoutedClient)(nil)
+	_ StorageOrphanScanner = (*pve.RoutedClient)(nil)
+)

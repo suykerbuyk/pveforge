@@ -14,7 +14,7 @@ import (
 // and the walk are lockguard's (Scan.TaskWaits).
 //
 // The sites are pinned per file, so a new wait, or one the walk stopped
-// seeing, is a deliberate change here: 11 production waits, plus
+// seeing, is a deliberate change here: 12 production waits, plus
 // RoutedClient's pass-through to Client, plus the Batch C harness capture
 // instrument's 4 waits (clone/start/destroy-oracle/cross-node create — all
 // //go:build harness, each given the caller's own ctx).
@@ -39,6 +39,7 @@ func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 		"internal/idempotent/networkbridge.go":   1,
 		"internal/idempotent/networkfields.go":   1,
 		"internal/idempotent/storagecreate.go":   1,
+		"internal/idempotent/storagevolume.go":   1,
 		"internal/idempotent/vmclone.go":         1,
 		"internal/idempotent/vmcreate.go":        1,
 		"internal/idempotent/vmdestroy.go":       2,

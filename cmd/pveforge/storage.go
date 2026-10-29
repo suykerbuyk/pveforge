@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -21,6 +23,180 @@ func newStorageCmd() *cobra.Command {
 	cmd.AddCommand(newStorageGetCmd())
 	cmd.AddCommand(newStorageOrphansCmd())
 	cmd.AddCommand(newStorageCreateCmd())
+	cmd.AddCommand(newStorageAllocCmd())
+	cmd.AddCommand(newStorageFreeOrphansCmd())
+	return cmd
+}
+
+// newStorageAllocCmd wires pveforge-storage-volume-tracking's
+// idempotent.VolumeAllocEnsure: allocate a convention-named raw volume outside
+// qm's own disk schema (POST /nodes/{node}/storage/{storage}/content),
+// idempotently. Absent -> allocated; already present -> no-op. The second
+// signal compares the volid the POST RETURNED against the storage listing, so
+// it is correct for directory storage (volid "<storage>:<vmid>/<name>") as well
+// as lvmthin/ZFS ("<storage>:vm-<id>-…"). Non-destructive of any existing data,
+// but markDestructive like `storage create` (it writes storage).
+func newStorageAllocCmd() *cobra.Command {
+	var format string
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "alloc <target-id> <storage> <filename> <size> <vmid> [--format F]",
+		Short: "Allocate a convention-named raw volume, idempotently",
+		Long: `Allocate a raw volume on a storage by a caller-chosen, deterministic
+filename (POST /nodes/{node}/storage/{storage}/content), idempotently — the
+"pvesm alloc" half of raw-volume lifecycle, for volumes outside qm's own disk
+schema.
+
+The filename is the identity: absent -> allocated; already present with that
+name for that vmid -> no-op (nothing changed). The allocate call is synchronous
+(no task wait); success is confirmed by a dual signal — the volid the POST
+returned is read back from the storage listing.
+
+size is PVE's own size grammar (e.g. 32G), passed through unchanged. --format is
+optional (PVE infers it from the storage type when omitted).`,
+		Args: cobra.ExactArgs(5),
+	}
+	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
+	cmd.Flags().StringVar(&format, "format", "", "the volume format (raw, qcow2, ...); optional, PVE infers from the storage type when omitted")
+	cmd.Flags().BoolVar(&force, "force", false, "re-run Apply even if the volume already exists (PVE then refuses the duplicate)")
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		vmid, err := strconv.Atoi(args[4])
+		if err != nil || vmid < 1 {
+			return fmt.Errorf("storage alloc: vmid %q must be a positive integer", args[4])
+		}
+
+		client, err := resolveRoutedClient(cmd, args[0])
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+
+		op := &idempotent.VolumeAllocEnsure{Client: client, Storage: args[1], Filename: args[2], Size: args[3], VMID: vmid, Format: format}
+		// Explicit, ahead of Run, like `storage create`: Run skips Apply (and
+		// its internal Validate) on the already-satisfied path.
+		if err := op.Validate(); err != nil {
+			return err
+		}
+
+		key := lock.ObjectKey{TargetID: args[0], Kind: "storage", ID: args[1]}
+		res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, force)
+		if err != nil {
+			return err
+		}
+		if !res.Changed {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: volume %s already allocated on %s (%s); nothing to do\n", args[0], args[2], args[1], op.Volid())
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: volume %s allocated on %s as %s\n", args[0], args[2], args[1], op.Volid())
+		return nil
+	}
+	markDestructive(cmd)
+	return cmd
+}
+
+// newStorageFreeOrphansCmd wires pveforge-storage-volume-tracking's DESTRUCTIVE
+// idempotent.VolumeFreeOrphans: free every "<storage>:vm-<vmid>-*" volume the
+// destructive-safe orphan determination reports unclaimed, after a destroyed
+// VM. It is destructive and fail-closed:
+//
+//   - the claimed set's VM enumeration comes from a ROOT, node-scoped VM list
+//     (bootstrap.RootAccess.NodeVMIDs), not the token's silently-short GetVMs —
+//     any error reading it REFUSES the free;
+//   - before any DELETE it checks the node holds corosync quorum
+//     (ClusterStatusQuorate) and REFUSES a non-quorate node (whose pmxcfs view
+//     may be stale). Quorum is NECESSARY, NOT SUFFICIENT: a node that just
+//     regained quorum, or is receiving a migration, may serve a stale list for
+//     a replication window no API read closes — so a warning rides every run
+//     (see the stderr notice). Do not run concurrently with a migration
+//     targeting this node or just after it rejoined the cluster.
+//
+// Needs root SSH (the target's stored key, or --no-ssh-key + the PVE password),
+// as `vm create --unique-tag` and `user ensure` do, plus the roster token's
+// REST view for the per-VM config reads.
+func newStorageFreeOrphansCmd() *cobra.Command {
+	var noSSHKey bool
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "free-orphans <target-id> <storage> <vmid>",
+		Short: "Free orphan volumes matching a destroyed VM's naming convention (DESTRUCTIVE)",
+		Args:  cobra.ExactArgs(3),
+	}
+	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
+	cmd.Flags().BoolVar(&force, "force", false, "re-run Apply even when the determination reports no orphans")
+	cmd.Flags().BoolVar(&noSSHKey, "no-ssh-key", false, noSSHKeyAccessUsage)
+	cmd.Flags().String("host-key-fingerprint", "", hostKeyFingerprintAccessUsage)
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		vmid, err := strconv.Atoi(args[2])
+		if err != nil || vmid < 1 {
+			return fmt.Errorf("storage free-orphans: vmid %q must be a positive integer", args[2])
+		}
+
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+
+		access, t, rc, closeAll, err := openRootAccessAndREST(cmd, args[0], noSSHKey, true)
+		if err != nil {
+			return err
+		}
+		defer closeAll()
+		if rc == nil {
+			return fmt.Errorf("storage free-orphans: target %q holds no API token; the orphan determination needs the token's REST view for the per-VM config reads", args[0])
+		}
+		// Resolve the keyless password (if any) before the storage lock, so a
+		// prompt or slow dial never holds it.
+		if err := access.ResolveCredentials(cmd.Context()); err != nil {
+			return err
+		}
+
+		// RULING 3: read the root VM list FIRST, then the quorum gate, both
+		// before the lock; refuse on either failure. The gate is a precondition,
+		// not a continuous guarantee: a quorum loss AFTER this check is not
+		// caught (a volume DELETE is a storage write, vdisk_free, not a pmxcfs
+		// write, so a read-only pmxcfs does not fail it).
+		completeVMIDs, err := access.NodeVMIDs(cmd.Context(), t.Node)
+		if err != nil {
+			return fmt.Errorf("storage free-orphans: refusing — could not read the complete root VM list for node %q: %w", t.Node, err)
+		}
+		quorate, err := access.ClusterStatusQuorate(cmd.Context())
+		if err != nil {
+			return fmt.Errorf("storage free-orphans: refusing — could not read cluster quorum for node %q: %w", t.Node, err)
+		}
+		if !quorate {
+			return fmt.Errorf("storage free-orphans: refusing — node %q is not quorate; its VM list may be stale and the free could delete a live VM's disk", t.Node)
+		}
+		// Residual (rides the shared free path): quorum is necessary, not
+		// sufficient; the post-quorate pmxcfs replication window is not closable.
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: %s: quorum is a necessary but NOT sufficient freshness check; a node that just regained quorum or is receiving a migration can serve a stale VM list briefly, so do not run free-orphans concurrently with a migration targeting node %q or just after it rejoined the cluster\n",
+			args[0], t.Node)
+
+		op := &idempotent.VolumeFreeOrphans{Client: rc, Scanner: rc, Storage: args[1], VMID: vmid, CompleteVMIDs: completeVMIDs}
+		key := lock.ObjectKey{TargetID: args[0], Kind: "storage", ID: args[1]}
+		res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, force)
+		if err != nil {
+			return err
+		}
+		if !res.Changed || len(op.Applied) == 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: no orphan volumes matching vm-%d-* on %s; nothing freed\n", args[0], vmid, args[1])
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: freed %d orphan volume(s) on %s: %s\n", args[0], len(op.Applied), args[1], strings.Join(op.Applied, ", "))
+		return nil
+	}
+	markDestructive(cmd)
 	return cmd
 }
 

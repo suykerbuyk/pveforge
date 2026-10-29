@@ -279,6 +279,31 @@ func (a *RootAccess) NodeVMIDs(ctx context.Context, node string) ([]int, error) 
 	return pve.ParseNodeVMIDs([]byte(out))
 }
 
+// ClusterStatusCommand is the one command ClusterStatusQuorate runs as root:
+// a read of PVE's cluster status, nothing else.
+const ClusterStatusCommand = "pvesh get /cluster/status --output-format json"
+
+// ClusterStatusQuorate reports whether this node holds corosync quorum (or is
+// a standalone, non-clustered node), read as root@pam (ClusterStatusCommand).
+// It is the NECESSARY-but-NOT-SUFFICIENT precondition a destructive orphan
+// free checks before any DELETE: it closes the no-quorum stale-read, NOT the
+// post-quorate pmxcfs replication window (quorate is corosync's majority bit,
+// set before dcdb config-sync converges — see pve.ParseClusterStatusQuorate).
+// Every caller of the free carries that replication-lag residual as a
+// documented precondition + warning.
+//
+// Read as root because /cluster/status needs Sys.Audit, which a narrow storage
+// token may lack (a 403 would make a genuinely quorate cluster unusable); root
+// always reads it. Decoded strictly by pve.ParseClusterStatusQuorate; any
+// failure is an error, never a silent "assume quorate".
+func (a *RootAccess) ClusterStatusQuorate(ctx context.Context) (bool, error) {
+	out, err := a.pveum(ctx, ClusterStatusCommand)
+	if err != nil {
+		return false, fmt.Errorf("read cluster quorum as root: %w", err)
+	}
+	return pve.ParseClusterStatusQuorate([]byte(out))
+}
+
 // ErrRootWriteOutcomeUnknown: a root write (pveum user, group or acl) ran
 // past its deadline. It may or may not have been applied.
 var ErrRootWriteOutcomeUnknown = errors.New("the root write's outcome is unknown: it may or may not have been applied; re-running is safe, since the command reads PVE's state before it writes and PVE merges a repeated grant")
