@@ -1183,7 +1183,7 @@ type bindingCase struct {
 	want   []string
 }
 
-// TestRoutedForwarding_NodeBinding pins how each of the 30 node-resolving
+// TestRoutedForwarding_NodeBinding pins how each of the 32 node-resolving
 // pass-throughs picks its node. The other 10 take no node at all.
 //
 // Two different node sources exist, and each has its own wrong answer:
@@ -1328,6 +1328,56 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 				volids(t, ids, "stor-y:vm-5151-disk-0")
 				return err
 			}, []string{"GET /nodes/qa-pve-05/storage/stor-y/status", "GET /nodes/qa-pve-05/storage/stor-y/content", "GET /nodes/qa-pve-05/qemu"}},
+		}},
+		// OrphanVolumesWithVMList does its own node/storage check, shared-storage
+		// refusal and content fetch, then enumerates the INJECTED (non-nil) VMID
+		// set — ClaimedVolumes per vmid — so the wire is status + content + the
+		// injected vmid's config/snapshot reads, all carrying the caller's node.
+		// The injected VM (100) claims local:vm-1-disk-0 (fwdPVE's config
+		// fixture), which is not in this storage's content, so all three content
+		// images survive as orphans.
+		{"OrphanVolumesWithVMList", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				got, err := rc.OrphanVolumesWithVMList(ctx, fwdCallerNode, "stor-x", []int{100})
+				var ids []string
+				for _, v := range got {
+					ids = append(ids, v.Volid)
+				}
+				volids(t, ids, "stor-x:vm-4242-disk-0", "stor-x:vm-4243-disk-0", "stor-x:vm-5151-disk-0")
+				return err
+			}, []string{"GET /nodes/qa-pve-02/storage/stor-x/status", "GET /nodes/qa-pve-02/storage/stor-x/content", "GET /nodes/qa-pve-02/qemu/100/config", "GET /nodes/qa-pve-02/qemu/100/config?current=1", "GET /nodes/qa-pve-02/qemu/100/snapshot"}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				got, err := rc.OrphanVolumesWithVMList(ctx, fwdCallerNode2, "stor-y", []int{100})
+				var ids []string
+				for _, v := range got {
+					ids = append(ids, v.Volid)
+				}
+				volids(t, ids, "stor-y:vm-4242-disk-0", "stor-y:vm-4243-disk-0", "stor-y:vm-5151-disk-0")
+				return err
+			}, []string{"GET /nodes/qa-pve-05/storage/stor-y/status", "GET /nodes/qa-pve-05/storage/stor-y/content", "GET /nodes/qa-pve-05/qemu/100/config", "GET /nodes/qa-pve-05/qemu/100/config?current=1", "GET /nodes/qa-pve-05/qemu/100/snapshot"}},
+		}},
+		// OrphanVolumesForVMIDWithVMList applies vmid as a client-side filter atop
+		// OrphanVolumesWithVMList, so only the vmid-narrowed volid survives; the
+		// injected list (100) is still enumerated on the wire.
+		{"OrphanVolumesForVMIDWithVMList", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				got, err := rc.OrphanVolumesForVMIDWithVMList(ctx, fwdCallerNode, "stor-x", fwdVMID, []int{100})
+				var ids []string
+				for _, v := range got {
+					ids = append(ids, v.Volid)
+				}
+				volids(t, ids, "stor-x:vm-4242-disk-0")
+				return err
+			}, []string{"GET /nodes/qa-pve-02/storage/stor-x/status", "GET /nodes/qa-pve-02/storage/stor-x/content", "GET /nodes/qa-pve-02/qemu/100/config", "GET /nodes/qa-pve-02/qemu/100/config?current=1", "GET /nodes/qa-pve-02/qemu/100/snapshot"}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				got, err := rc.OrphanVolumesForVMIDWithVMList(ctx, fwdCallerNode2, "stor-y", fwdVMID2, []int{100})
+				var ids []string
+				for _, v := range got {
+					ids = append(ids, v.Volid)
+				}
+				volids(t, ids, "stor-y:vm-5151-disk-0")
+				return err
+			}, []string{"GET /nodes/qa-pve-05/storage/stor-y/status", "GET /nodes/qa-pve-05/storage/stor-y/content", "GET /nodes/qa-pve-05/qemu/100/config", "GET /nodes/qa-pve-05/qemu/100/config?current=1", "GET /nodes/qa-pve-05/qemu/100/snapshot"}},
 		}},
 		{"GetNetworkInterface", []bindingCase{
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
@@ -1558,8 +1608,8 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 		}},
 	}
 
-	if len(methods) != 30 {
-		t.Fatalf("node-binding table covers %d methods, want all 30 node-resolving pass-throughs", len(methods))
+	if len(methods) != 32 {
+		t.Fatalf("node-binding table covers %d methods, want all 32 node-resolving pass-throughs", len(methods))
 	}
 	for _, m := range methods {
 		t.Run(m.name, func(t *testing.T) {
@@ -1747,53 +1797,55 @@ var routedClientSeam = map[string]seamEntry{
 	"Node":  {exempt: "accessor: returns c.target.Node and forwards nothing"},
 	"Close": {exempt: "lifecycle: closes the lazily dialed SSH connection and forwards nothing"},
 
-	"GetNode":                    {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetNodes":                   {tests: []string{"TestRoutedClient_TypedReadForwarding"}},
-	"FindByTag":                  {tests: []string{"TestRoutedForwarding_FindByTag", "TestRoutedClient_FindByTag_Forwards"}},
-	"GetVM":                      {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetVMs":                     {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetStorage":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetStorages":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetStorageConfig":           {tests: []string{"TestRoutedForwarding_GetStorageConfig"}},
-	"GetStorageConfigRaw":        {tests: []string{"TestRoutedForwarding_GetStorageConfigRaw"}},
-	"CreateStorage":              {tests: []string{"TestRoutedForwarding_CreateStorage"}},
-	"GetStorageVolumes":          {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"ClaimedVolumes":             {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"OrphanVolumes":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"OrphanVolumesForVMID":       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetNetworkInterface":        {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"GetNetworkInterfaces":       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"NextVMID":                   {tests: []string{"TestRoutedForwarding_NextVMID_Exclude", "TestRoutedClient_NextVMID_Forwards"}},
-	"WaitForTask":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"CreateVM":                   {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"StopVM":                     {tests: []string{"TestRoutedForwarding_StopVM", "TestRoutedForwarding_NodeBinding"}},
-	"DestroyVM":                  {tests: []string{"TestRoutedForwarding_DestroyVM", "TestRoutedForwarding_NodeBinding"}},
-	"TagStillClaimed":            {tests: []string{"TestRoutedForwarding_TagStillClaimed"}},
-	"AgentExec":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"AgentExecStatus":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"WaitForAgentExec":           {tests: []string{"TestRoutedForwarding_WaitForAgentExec", "TestRoutedForwarding_NodeBinding"}},
-	"RollbackWitness":            {tests: []string{"TestRoutedForwarding_RollbackWitness", "TestRoutedForwarding_NodeBinding"}},
-	"AgentInterfaces":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"VMNetMACs":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"APIDocTree":                 {tests: []string{"TestRoutedForwarding_APIDocTree"}},
-	"RawRequest":                 {tests: []string{"TestRoutedForwarding_RawRequest"}},
-	"ListUsers":                  {tests: []string{"TestRoutedForwarding_AccessLists"}},
-	"ListGroups":                 {tests: []string{"TestRoutedForwarding_AccessLists"}},
-	"SetVMConfigField":           {tests: []string{"TestRoutedForwarding_SetVMConfigField_REST", "TestRoutedForwarding_SetVMConfigField_SSHRootOnly", "TestRoutedForwarding_SetVMConfigField_SSHFallback", "TestRoutedForwarding_SetVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
-	"SetVMConfigFieldCAS":        {tests: []string{"TestRoutedForwarding_SetVMConfigFieldCAS", "TestRoutedForwarding_NodeBinding"}},
-	"UploadSnippet":              {tests: []string{"TestRoutedForwarding_UploadSnippet"}},
-	"SetVMConfigFieldOverSSH":    {tests: []string{"TestRoutedForwarding_OverSSHMethodsNeverTouchREST"}},
-	"DeleteVMConfigFieldOverSSH": {tests: []string{"TestRoutedForwarding_OverSSHMethodsNeverTouchREST"}},
-	"DeleteVMConfigField":        {tests: []string{"TestRoutedForwarding_DeleteVMConfigField_REST", "TestRoutedForwarding_DeleteVMConfigField_SSHRootOnly", "TestRoutedForwarding_DeleteVMConfigField_SSHFallback", "TestRoutedForwarding_DeleteVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
-	"DeleteVMConfigFieldCAS":     {tests: []string{"TestRoutedForwarding_DeleteVMConfigFieldCAS", "TestRoutedForwarding_DeleteVMConfigFieldCAS_RefusesRootOnly", "TestRoutedForwarding_NodeBinding"}},
-	"TapLinkState":               {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_TapLinkState_Forwards"}},
-	"LinkState":                  {tests: []string{"TestRoutedForwarding_LinkState"}},
-	"SetBridgePortIsolated":      {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_SetBridgePortIsolated_Forwards"}},
-	"ListSnapshots":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
-	"CreateSnapshot":             {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_Snapshot_Forwards"}},
-	"ShutdownVM":                 {tests: []string{"TestRoutedForwarding_NodeBinding", "TestShutdownVM_MakesExactlyOneRequestOnEveryPath"}},
-	"CloneVM":                    {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_CloneVM_Forwards"}},
-	"StorageType":                {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_StorageType_Forwards"}},
+	"GetNode":                        {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetNodes":                       {tests: []string{"TestRoutedClient_TypedReadForwarding"}},
+	"FindByTag":                      {tests: []string{"TestRoutedForwarding_FindByTag", "TestRoutedClient_FindByTag_Forwards"}},
+	"GetVM":                          {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetVMs":                         {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorage":                     {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorages":                    {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetStorageConfig":               {tests: []string{"TestRoutedForwarding_GetStorageConfig"}},
+	"GetStorageConfigRaw":            {tests: []string{"TestRoutedForwarding_GetStorageConfigRaw"}},
+	"CreateStorage":                  {tests: []string{"TestRoutedForwarding_CreateStorage"}},
+	"GetStorageVolumes":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"ClaimedVolumes":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumes":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumesForVMID":           {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumesWithVMList":        {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumesForVMIDWithVMList": {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetNetworkInterface":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"GetNetworkInterfaces":           {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"NextVMID":                       {tests: []string{"TestRoutedForwarding_NextVMID_Exclude", "TestRoutedClient_NextVMID_Forwards"}},
+	"WaitForTask":                    {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"CreateVM":                       {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"StopVM":                         {tests: []string{"TestRoutedForwarding_StopVM", "TestRoutedForwarding_NodeBinding"}},
+	"DestroyVM":                      {tests: []string{"TestRoutedForwarding_DestroyVM", "TestRoutedForwarding_NodeBinding"}},
+	"TagStillClaimed":                {tests: []string{"TestRoutedForwarding_TagStillClaimed"}},
+	"AgentExec":                      {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"AgentExecStatus":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"WaitForAgentExec":               {tests: []string{"TestRoutedForwarding_WaitForAgentExec", "TestRoutedForwarding_NodeBinding"}},
+	"RollbackWitness":                {tests: []string{"TestRoutedForwarding_RollbackWitness", "TestRoutedForwarding_NodeBinding"}},
+	"AgentInterfaces":                {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"VMNetMACs":                      {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"APIDocTree":                     {tests: []string{"TestRoutedForwarding_APIDocTree"}},
+	"RawRequest":                     {tests: []string{"TestRoutedForwarding_RawRequest"}},
+	"ListUsers":                      {tests: []string{"TestRoutedForwarding_AccessLists"}},
+	"ListGroups":                     {tests: []string{"TestRoutedForwarding_AccessLists"}},
+	"SetVMConfigField":               {tests: []string{"TestRoutedForwarding_SetVMConfigField_REST", "TestRoutedForwarding_SetVMConfigField_SSHRootOnly", "TestRoutedForwarding_SetVMConfigField_SSHFallback", "TestRoutedForwarding_SetVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
+	"SetVMConfigFieldCAS":            {tests: []string{"TestRoutedForwarding_SetVMConfigFieldCAS", "TestRoutedForwarding_NodeBinding"}},
+	"UploadSnippet":                  {tests: []string{"TestRoutedForwarding_UploadSnippet"}},
+	"SetVMConfigFieldOverSSH":        {tests: []string{"TestRoutedForwarding_OverSSHMethodsNeverTouchREST"}},
+	"DeleteVMConfigFieldOverSSH":     {tests: []string{"TestRoutedForwarding_OverSSHMethodsNeverTouchREST"}},
+	"DeleteVMConfigField":            {tests: []string{"TestRoutedForwarding_DeleteVMConfigField_REST", "TestRoutedForwarding_DeleteVMConfigField_SSHRootOnly", "TestRoutedForwarding_DeleteVMConfigField_SSHFallback", "TestRoutedForwarding_DeleteVMConfigField_NoFallbackOnOtherErrors", "TestRoutedForwarding_NodeBinding"}},
+	"DeleteVMConfigFieldCAS":         {tests: []string{"TestRoutedForwarding_DeleteVMConfigFieldCAS", "TestRoutedForwarding_DeleteVMConfigFieldCAS_RefusesRootOnly", "TestRoutedForwarding_NodeBinding"}},
+	"TapLinkState":                   {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_TapLinkState_Forwards"}},
+	"LinkState":                      {tests: []string{"TestRoutedForwarding_LinkState"}},
+	"SetBridgePortIsolated":          {tests: []string{"TestRoutedForwarding_TapPortSSH", "TestRoutedClient_SetBridgePortIsolated_Forwards"}},
+	"ListSnapshots":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"CreateSnapshot":                 {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_Snapshot_Forwards"}},
+	"ShutdownVM":                     {tests: []string{"TestRoutedForwarding_NodeBinding", "TestShutdownVM_MakesExactlyOneRequestOnEveryPath"}},
+	"CloneVM":                        {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_CloneVM_Forwards"}},
+	"StorageType":                    {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_StorageType_Forwards"}},
 
 	// Added by unit 5b, with their forwarding test in snapshot_test.go.
 	"NewerSnapshots":         {tests: []string{"TestRoutedClient_SnapshotRollback_Forwards"}},
@@ -1961,7 +2013,7 @@ func TestRoutedForwarding_NodeBindingRowsCallTheirOwnMethod(t *testing.T) {
 		}
 		return false
 	})
-	if rows != 30 {
-		t.Errorf("found %d node-binding rows, want 30", rows)
+	if rows != 32 {
+		t.Errorf("found %d node-binding rows, want 32", rows)
 	}
 }

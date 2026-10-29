@@ -243,7 +243,11 @@ func (c *Client) configVolids(ctx context.Context, vmid int, snapshot, path stri
 // token holding Datastore.Allocate but NO VM.Audit got a plain 200 with the
 // owning VM absent from the list, and that VM's live disk then read as a
 // false orphan under it but not under a full VM.Audit token. See
-// OrphanVolumes for the exact dangerous vs too-weak token shapes.
+// OrphanVolumes for the exact dangerous vs too-weak token shapes. The
+// DESTRUCTIVE consumer enumerates VMs from a COMPLETE root-sourced list (Unit 1
+// NodeVMIDs) via OrphanVolumesForVMIDWithVMList, where a VM whose config the
+// token cannot read is a HARD refusal, not a silent omission; this
+// token-enumeration hazard remains only on the advisory OrphanVolumes path.
 //
 // Linked-clone volid identity — live on nested lvmthin (pvh 2026-10-23,
 // Batch C item 74); UNVERIFIED on ZFS (deferred item 79). Live-verified facts:
@@ -324,6 +328,71 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 	return claimed, nil
 }
 
+// refuseIfShared fails closed on a shared storage, single-sourcing the refusal
+// text the token OrphanVolumes and the destructive OrphanVolumesWithVMList both
+// use. A shared storage's content listing reflects volumes claimed by VMs on
+// OTHER cluster nodes too, invisible to a node-scoped claimed set; refuse rather
+// than return a diff that may be wrong. Also surfaces a GetStorage read error.
+func (c *Client) refuseIfShared(ctx context.Context, node, storage string) error {
+	stg, err := c.GetStorage(ctx, node, storage)
+	if err != nil {
+		return fmt.Errorf("orphan volumes: get storage %q on %q: %w", storage, node, err)
+	}
+	if stg.Shared != 0 {
+		return fmt.Errorf("orphan volumes: storage %q on %q is shared (shared=1): the claimed set this function builds is scoped to node %q alone and cannot see volumes claimed by VMs on other cluster nodes — refusing rather than returning a diff that may falsely report volumes in active use elsewhere as orphaned", storage, node, node)
+	}
+	return nil
+}
+
+// orphanVolumesForVMIDs is the claim-loop + set-difference ONLY: it unions
+// ClaimedVolumes over vmids and diffs the ALREADY-FETCHED content listing. Its
+// caller has already refused shared storage and fetched content; this function
+// never enumerates VMs and never sees a GetVMs error, so a refused qemu list
+// (vms.go's null-list ErrUnverifiableRead) can never degrade into an empty
+// claimed set here. A ClaimedVolumes error — a token 401/403 wrapped as
+// ErrNotAuthorized, or an ErrUnverifiableRead — ABORTS the whole determination;
+// it is never skipped, which would leave a live VM's disk reading as a false
+// orphan on the destructive path.
+func (c *Client) orphanVolumesForVMIDs(ctx context.Context, node string, content []*storageContentEntry, vmids []int) ([]*proxmox.StorageContent, error) {
+	claimed := make(map[string]bool)
+	for _, vmid := range vmids {
+		vmClaimed, err := c.ClaimedVolumes(ctx, node, vmid)
+		if err != nil {
+			return nil, fmt.Errorf("orphan volumes: %w", err)
+		}
+		for volid := range vmClaimed {
+			claimed[volid] = true
+		}
+	}
+
+	var orphans []*proxmox.StorageContent
+	for _, entry := range content {
+		if entry.StorageContent == nil || !claimableContentTypes[entry.Content] {
+			continue
+		}
+		if claimed[entry.Volid] {
+			continue
+		}
+		orphans = append(orphans, entry.StorageContent)
+	}
+	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Volid < orphans[j].Volid })
+	return orphans, nil
+}
+
+// narrowToVMIDPrefix keeps only the orphans whose volid matches vmid's
+// "<storage>:vm-<vmid>-" naming convention — the selector both ForVMID
+// entrypoints share.
+func narrowToVMIDPrefix(orphans []*proxmox.StorageContent, storage string, vmid int) []*proxmox.StorageContent {
+	prefix := fmt.Sprintf("%s:vm-%d-", storage, vmid)
+	var matched []*proxmox.StorageContent
+	for _, o := range orphans {
+		if strings.HasPrefix(o.Volid, prefix) {
+			matched = append(matched, o)
+		}
+	}
+	return matched
+}
+
 // OrphanVolumes returns every volume node/storage's own content listing
 // reports that is NOT claimed by any VM's config on that node — GetVMs +
 // ClaimedVolumes per vmid, unioned, then set-differenced against the
@@ -354,7 +423,11 @@ func (c *Client) ClaimedVolumes(ctx context.Context, node string, vmid int) (map
 // isolated. So /content visibility is NOT a subset of VM-list
 // visibility. Requires a full node-scoped VM.Audit token (every VM on
 // the node); do not call this with a storage-operator token and trust
-// the result for a destructive follow-up action.
+// the result for a destructive follow-up action. This is the ADVISORY,
+// token-sourced path; the destructive-safe variant is OrphanVolumesWithVMList,
+// which enumerates VMs from a complete root-sourced list (pveforge-orphan-scan-
+// vmlist-completeness-root-read, Unit 1) instead of this token GetVMs, and whose
+// closure is conditional (see that function's doc comment).
 //
 // Shared-storage refusal: a shared storage's content listing reflects
 // volumes claimed by VMs on OTHER cluster nodes too, invisible to this
@@ -380,12 +453,8 @@ func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*pr
 		return nil, fmt.Errorf("orphan volumes: node and storage are required")
 	}
 
-	stg, err := c.GetStorage(ctx, node, storage)
-	if err != nil {
-		return nil, fmt.Errorf("orphan volumes: get storage %q on %q: %w", storage, node, err)
-	}
-	if stg.Shared != 0 {
-		return nil, fmt.Errorf("orphan volumes: storage %q on %q is shared (shared=1): the claimed set this function builds is scoped to node %q alone and cannot see volumes claimed by VMs on other cluster nodes — refusing rather than returning a diff that may falsely report volumes in active use elsewhere as orphaned", storage, node, node)
+	if err := c.refuseIfShared(ctx, node, storage); err != nil {
+		return nil, err
 	}
 
 	actual, err := c.storageContentWithType(ctx, node, storage)
@@ -393,35 +462,61 @@ func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*pr
 		return nil, fmt.Errorf("orphan volumes: get storage content on %q/%q: %w", node, storage, err)
 	}
 
+	// Token-sourced enumeration. A GetVMs error — including the null-list
+	// ErrUnverifiableRead (vms.go) — is returned HERE, before the claim-loop,
+	// so the advisory path never degrades a refused list into an empty claimed
+	// set.
 	vms, err := c.GetVMs(ctx, node)
 	if err != nil {
 		return nil, fmt.Errorf("orphan volumes: list vms on %q: %w", node, err)
 	}
-
-	claimed := make(map[string]bool)
+	vmids := make([]int, 0, len(vms))
 	for _, vm := range vms {
-		vmClaimed, err := c.ClaimedVolumes(ctx, node, int(vm.VMID))
-		if err != nil {
-			return nil, fmt.Errorf("orphan volumes: %w", err)
-		}
-		for volid := range vmClaimed {
-			claimed[volid] = true
-		}
+		vmids = append(vmids, int(vm.VMID))
 	}
 
-	var orphans []*proxmox.StorageContent
-	for _, entry := range actual {
-		if entry.StorageContent == nil || !claimableContentTypes[entry.Content] {
-			continue
-		}
-		if claimed[entry.Volid] {
-			continue
-		}
-		orphans = append(orphans, entry.StorageContent)
-	}
-	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Volid < orphans[j].Volid })
+	return c.orphanVolumesForVMIDs(ctx, node, actual, vmids)
+}
 
-	return orphans, nil
+// OrphanVolumesWithVMList is OrphanVolumes' DESTRUCTIVE-safe twin: the caller
+// supplies a COMPLETE, root-sourced VMID set (bootstrap.RootAccess.NodeVMIDs,
+// pveforge-orphan-scan-vmlist-completeness-root-read Unit 1) so the claimed set
+// is not built from the token's silently-short GetVMs. It does its OWN
+// node/storage check, shared-storage refusal and content fetch (it does not call
+// OrphanVolumes), then unions ClaimedVolumes over completeVMIDs and diffs.
+//
+// Closure is CONDITIONAL — this closes the token-ENUMERATION short-list hazard
+// ONLY given: (a) the per-VM-config fail-closed (a token that cannot read a
+// root-listed VM's config aborts the whole call, never a short claimed set —
+// PVE gates the whole vm_config on VM.Audit, so there is no non-error
+// disk-redacted config); (b) a COMPLETE, non-stale injected list — the pmxcfs
+// quorum-short / not-yet-replicated residual is the CALLER's gate (Unit 3), not
+// closed here; (c) the ZFS linked-clone identity caveat (item 79; see
+// OrphanVolumesForVMID) still unverified. It is NOT "C3 closed" unconditionally.
+//
+// completeVMIDs: a nil slice is REFUSED (it is a dropped NodeVMIDs error); a
+// non-nil EMPTY slice is accepted and means a genuinely zero-QEMU node — NO VM
+// claims anything, so every prefix-matching images volume is reported an orphan.
+// A caller that cannot PROVE the node is truly empty (vs a quorum-short list)
+// MUST refuse: that proof is Unit 3's quorum gate, not this function's.
+func (c *Client) OrphanVolumesWithVMList(ctx context.Context, node, storage string, completeVMIDs []int) ([]*proxmox.StorageContent, error) {
+	if node == "" || storage == "" {
+		return nil, fmt.Errorf("orphan volumes: node and storage are required")
+	}
+	if completeVMIDs == nil {
+		return nil, fmt.Errorf("orphan volumes: a nil VM list is refused (a non-nil empty slice is a genuinely zero-QEMU node; nil is a dropped NodeVMIDs error)")
+	}
+
+	if err := c.refuseIfShared(ctx, node, storage); err != nil {
+		return nil, err
+	}
+
+	actual, err := c.storageContentWithType(ctx, node, storage)
+	if err != nil {
+		return nil, fmt.Errorf("orphan volumes: get storage content on %q/%q: %w", node, storage, err)
+	}
+
+	return c.orphanVolumesForVMIDs(ctx, node, actual, completeVMIDs)
 }
 
 // OrphanVolumesForVMID narrows OrphanVolumes to volids matching vmid's own
@@ -465,18 +560,32 @@ func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*pr
 // today's prefix-based free). On ZFS this is still unverified: do not trust
 // destroy-time reconciliation for linked clones there until item 79 checks
 // it on a real ZFS host.
+//
+// This is the ADVISORY, token-sourced variant and keeps the short-list hazard
+// above; the destructive free (pveforge-storage-volume-tracking's
+// VolumeFreeOrphans) must call OrphanVolumesForVMIDWithVMList, which takes a
+// complete root-sourced VM list. Its base/shared-storage error is returned BARE
+// here, unchanged.
 func (c *Client) OrphanVolumesForVMID(ctx context.Context, node, storage string, vmid int) ([]*proxmox.StorageContent, error) {
 	orphans, err := c.OrphanVolumes(ctx, node, storage)
 	if err != nil {
 		return nil, err
 	}
+	return narrowToVMIDPrefix(orphans, storage, vmid), nil
+}
 
-	prefix := fmt.Sprintf("%s:vm-%d-", storage, vmid)
-	var matched []*proxmox.StorageContent
-	for _, o := range orphans {
-		if strings.HasPrefix(o.Volid, prefix) {
-			matched = append(matched, o)
-		}
+// OrphanVolumesForVMIDWithVMList narrows OrphanVolumesWithVMList to vmid's
+// "<storage>:vm-<vmid>-" naming convention — the entrypoint Unit 3's destructive
+// VolumeFreeOrphans calls. The completeVMIDs contract (nil refused, non-nil
+// empty = zero-QEMU node), the CONDITIONAL closure (per-VM fail-closed + a
+// complete non-stale list which is the caller's quorum gate), and the ZFS
+// linked-clone caveat (item 79) are all as documented on OrphanVolumesWithVMList
+// and OrphanVolumesForVMID above. Unlike the token variant, this one wraps the
+// base error with its own vmid context.
+func (c *Client) OrphanVolumesForVMIDWithVMList(ctx context.Context, node, storage string, vmid int, completeVMIDs []int) ([]*proxmox.StorageContent, error) {
+	orphans, err := c.OrphanVolumesWithVMList(ctx, node, storage, completeVMIDs)
+	if err != nil {
+		return nil, fmt.Errorf("orphan volumes for vmid %d: %w", vmid, err)
 	}
-	return matched, nil
+	return narrowToVMIDPrefix(orphans, storage, vmid), nil
 }
