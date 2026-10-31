@@ -412,7 +412,19 @@ func newStorageOrphansCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "orphans <target-id> [storage-name]",
 		Short: "Diff claimed-vs-actual storage volumes for orphans",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: "Diff claimed-vs-actual storage volumes for orphans.\n\n" +
+			"orphans is an advisory read. It diffs this node's storage content against the " +
+			"token VM list, so a vm-<vmid>-* volume whose VM is missing from that list — an " +
+			"in-flight or aborted create/clone, a permission-short token list, or a leftover — " +
+			"is reported as an orphan. Its output is not a list of volumes safe to delete.\n\n" +
+			"storage free-orphans does not consume this list. It names a single VMID and " +
+			"re-derives what is unclaimed at free time from a root-sourced VM list under a " +
+			"quorum gate — stricter than this report — so a volume mis-listed for any other " +
+			"VMID is never freed. The allocate-before-registered and post-quorate residual for " +
+			"the freed VMID itself is a known deferred gap " +
+			"(pveforge-cluster-free-stale-shortlist-completeness), not closed by a lock. Do " +
+			"not feed this list to an external deleter without re-checking.",
+		Args: cobra.RangeArgs(1, 2),
 	}
 	addRosterFlag(cmd)
 	addLockWaitFlag(cmd)

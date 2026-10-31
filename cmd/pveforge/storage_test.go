@@ -277,3 +277,22 @@ func TestNewStorageOrphansCmd_RequiresAtLeastOneArg(t *testing.T) {
 		t.Fatal("expected an error for a missing target-id argument")
 	}
 }
+
+// The orphans help must pin the three adjudicated load-bearing claims: that the
+// report is advisory, that its output is "not a list of volumes safe to delete",
+// and that the free "does not consume this list" (so the report's advisory
+// status is not mistaken for a lock-enforced safety guarantee). This guards the
+// Long against silently losing any of those claims (anti-vacuity: all three
+// sentinels required).
+func TestNewStorageOrphansCmd_LongIsAdvisory(t *testing.T) {
+	long := newStorageOrphansCmd().Long
+	for _, want := range []string{
+		"advisory",
+		"not a list of volumes safe to delete",
+		"does not consume this list",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("storage orphans Long = %q, want it to contain %q", long, want)
+		}
+	}
+}

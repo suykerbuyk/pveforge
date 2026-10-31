@@ -520,6 +520,18 @@ func narrowToVMIDPrefix(orphans []*proxmox.StorageContent, storage string, vmid 
 // (base-<tpl>-disk-N) is outside the vm-<vmid>- selector, and /content
 // exposes no parent link. See that function's own doc comment and vault
 // task pveforge-storage-orphan-scan's "Unverified assumptions" section.
+//
+// Advisory, not an exact set: the claimed set comes from the token VM list
+// (GetVMs), so a vm-<vmid>-* volume whose VM is missing from that list — an
+// in-flight or aborted create/clone, a permission-short token list, or a
+// leftover — is diffed only against the other listed VMs' claimed set and
+// reported here as an orphan. Its output is not a list of volumes safe to
+// delete. The destroy-time free (VolumeFreeOrphans) does not consume this
+// result: it names a single VMID and re-derives the unclaimed set at free time
+// from a root-sourced VM list under a quorum gate. The remaining
+// allocate-before-registered / post-quorate residual for the freed VMID is a
+// known deferred gap (pveforge-cluster-free-stale-shortlist-completeness), not
+// closed by prefix scoping or a lock.
 func (c *Client) OrphanVolumes(ctx context.Context, node, storage string) ([]*proxmox.StorageContent, error) {
 	if node == "" || storage == "" {
 		return nil, fmt.Errorf("orphan volumes: node and storage are required")
