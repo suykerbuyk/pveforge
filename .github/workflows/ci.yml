@@ -19,7 +19,9 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # An explicit image, never ubuntu-latest, which moves silently: moving
+    # to a newer image is its own reviewed change.
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       # Actions are pinned by commit SHA (a tag can be moved); the version
