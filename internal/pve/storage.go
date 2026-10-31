@@ -133,6 +133,36 @@ func (c *Client) CreateStorage(ctx context.Context, name string, params url.Valu
 	return raw, nil
 }
 
+// UpdateStorageConfig updates an existing cluster-wide storage definition —
+// PUT /storage/{name} — writing the parameters in params (e.g.
+// content=<list>&digest=<d>) and returning PVE's raw (envelope-unwrapped)
+// response for the caller to decode. Unlike CreateStorage's POST /storage,
+// which stamps storage=<name> into the body, the name is in the PATH here, so
+// params carries only the fields to change and is never mutated.
+//
+// Goes through RawRequest for the same reasons CreateStorage/CreateVM do (see
+// their doc comments): PVE's own verbatim error text reaches the caller — a
+// digest mismatch comes back as a *StatusError whose body IsDigestConflictError
+// matches, and a 403 satisfies errors.Is(err, ErrNotAuthorized) — rather than
+// HTTP/2 erasing the reason phrase, and the form-encoded body PVE expects.
+//
+// Like POST /storage, PUT /storage/{name} writes the cluster-wide storage.cfg
+// and is SYNCHRONOUS on PVE's side, normally answering with the config object,
+// NOT a bare UPID task-id. NOT live-verified (owed to
+// pveforge-nested-pve-test-harness): the one caller
+// (idempotent.StorageContentEnsure) decodes defensively and waits on a bare
+// UPID if PVE ever returns one, so the design is correct either way.
+func (c *Client) UpdateStorageConfig(ctx context.Context, name string, params url.Values) (json.RawMessage, error) {
+	if name == "" {
+		return nil, fmt.Errorf("update storage config: a storage name is required")
+	}
+	raw, err := c.RawRequest(ctx, http.MethodPut, fmt.Sprintf("/storage/%s", url.PathEscape(name)), params)
+	if err != nil {
+		return nil, fmt.Errorf("update storage config %q: %w", name, err)
+	}
+	return raw, nil
+}
+
 // GetStorageConfig resolves storageID's cluster-wide CONFIG object —
 // GET /storage/{storageID} — carrying type, content, nodes, digest and the
 // rest of the definition PVE holds in storage.cfg. This is the right read-back

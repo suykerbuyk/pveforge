@@ -1735,6 +1735,26 @@ func TestRoutedForwarding_CreateStorage(t *testing.T) {
 		"POST /storage storage=stor-y&type=dir")
 }
 
+// TestRoutedForwarding_UpdateStorageConfig proves RoutedClient.UpdateStorageConfig
+// forwards its name into the cluster-wide PUT /storage/{name} path and its
+// params into the form body (no node): a wrong name changes the path and a
+// wrong param changes the body, which this catches.
+func TestRoutedForwarding_UpdateStorageConfig(t *testing.T) {
+	srv, rec := newFwdServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeData(w, `{"storage":"stor-x","type":"dir"}`)
+	})
+	rc := fwdClient(t, srv)
+	if _, err := rc.UpdateStorageConfig(context.Background(), "stor-x", url.Values{"content": {"snippets"}, "digest": {"d1"}}); err != nil {
+		t.Fatalf("UpdateStorageConfig(stor-x): %v", err)
+	}
+	if _, err := rc.UpdateStorageConfig(context.Background(), "stor-y", url.Values{"content": {"iso"}, "digest": {"d2"}}); err != nil {
+		t.Fatalf("UpdateStorageConfig(stor-y): %v", err)
+	}
+	assertRequests(t, rec.got(),
+		"PUT /storage/stor-x content=snippets&digest=d1",
+		"PUT /storage/stor-y content=iso&digest=d2")
+}
+
 func TestRoutedForwarding_FindByTag(t *testing.T) {
 	srv, rec := newFwdServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeData(w, `[`+
@@ -1847,6 +1867,7 @@ var routedClientSeam = map[string]seamEntry{
 	"GetStorageConfig":               {tests: []string{"TestRoutedForwarding_GetStorageConfig"}},
 	"GetStorageConfigRaw":            {tests: []string{"TestRoutedForwarding_GetStorageConfigRaw"}},
 	"CreateStorage":                  {tests: []string{"TestRoutedForwarding_CreateStorage"}},
+	"UpdateStorageConfig":            {tests: []string{"TestRoutedForwarding_UpdateStorageConfig"}},
 	"GetStorageVolumes":              {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"ClaimedVolumes":                 {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"OrphanVolumes":                  {tests: []string{"TestRoutedForwarding_NodeBinding"}},

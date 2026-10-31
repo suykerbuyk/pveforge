@@ -239,6 +239,7 @@ var lockingCommands = []string{
 	"pveforge storage free-orphans",
 	"pveforge storage get",
 	"pveforge storage orphans",
+	"pveforge storage set-content",
 	"pveforge user ensure",
 	"pveforge vm create",
 	"pveforge vm get",

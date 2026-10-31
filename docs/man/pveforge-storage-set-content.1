@@ -1,0 +1,46 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-storage-set-content - Ensure a storage's content list includes a content type, idempotently
+
+
+.SH SYNOPSIS
+\fBpveforge storage set-content <target-id> <storage> <content-type> [flags]\fP
+
+
+.SH DESCRIPTION
+Ensure a storage's cluster-wide content list includes <content-type>
+(one of: images, rootdir, iso, vztmpl, backup, snippets, import) — an add-only
+toggle.
+
+.PP
+Idempotent: already present -> no-op; absent -> added, preserving the storage's
+existing content types and re-sorting the list. The write is a compare-and-swap
+on PVE's own config digest (PUT /storage/{name}), so a concurrent change to the
+same storage is detected and the write retried rather than clobbering it.
+
+.PP
+set-content does NOT create a storage (it errors if the storage does not exist)
+and does NOT remove a content type.
+
+
+.SH OPTIONS
+\fB--force\fP[=false]
+	re-run the write even when the content type is already present
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for set-content
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-storage(1)\fP

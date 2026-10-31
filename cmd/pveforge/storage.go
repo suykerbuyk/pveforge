@@ -26,6 +26,81 @@ func newStorageCmd() *cobra.Command {
 	cmd.AddCommand(newStorageCreateCmd())
 	cmd.AddCommand(newStorageAllocCmd())
 	cmd.AddCommand(newStorageFreeOrphansCmd())
+	cmd.AddCommand(newStorageSetContentCmd())
+	return cmd
+}
+
+// newStorageSetContentCmd wires pveforge-storage-content-toggle's
+// idempotent.StorageContentEnsure: ensure a storage's cluster-wide content list
+// INCLUDES a content type, idempotently, via a digest-CAS single-field write to
+// storage.cfg (PUT /storage/{name}). Already present -> no-op; absent -> added,
+// preserving the storage's existing content types and re-sorting the list.
+//
+// Mutating, not destructive: it changes one field of an EXISTING storage
+// reversibly and routinely, never creating or destroying a storage and never
+// touching volume data. It is add-only — it never removes a content type
+// (removing e.g. images from a storage holding disks would strand them, a
+// destructive act out of scope here).
+func newStorageSetContentCmd() *cobra.Command {
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "set-content <target-id> <storage> <content-type>",
+		Short: "Ensure a storage's content list includes a content type, idempotently",
+		Long: `Ensure a storage's cluster-wide content list includes <content-type>
+(one of: images, rootdir, iso, vztmpl, backup, snippets, import) — an add-only
+toggle.
+
+Idempotent: already present -> no-op; absent -> added, preserving the storage's
+existing content types and re-sorting the list. The write is a compare-and-swap
+on PVE's own config digest (PUT /storage/{name}), so a concurrent change to the
+same storage is detected and the write retried rather than clobbering it.
+
+set-content does NOT create a storage (it errors if the storage does not exist)
+and does NOT remove a content type.`,
+		Args: cobra.ExactArgs(3),
+	}
+	addRosterFlag(cmd)
+	addLockWaitFlag(cmd)
+	cmd.Flags().BoolVar(&force, "force", false, "re-run the write even when the content type is already present")
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		client, err := resolveRoutedClient(cmd, args[0])
+		if err != nil {
+			return err
+		}
+		defer func() { _ = client.Close() }()
+
+		rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
+		if err != nil {
+			return err
+		}
+
+		op := &idempotent.StorageContentEnsure{Client: client, Storage: args[1], ContentType: args[2]}
+		if err := op.Validate(); err != nil {
+			return err
+		}
+
+		// The same {TargetID, "storage", <name>} key every other storage
+		// subcommand uses, so a content toggle serializes against a concurrent
+		// create, alloc, orphan scan or free of the same storage on this target.
+		key := lock.ObjectKey{TargetID: args[0], Kind: "storage", ID: args[1]}
+
+		res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, force)
+		if err != nil {
+			return err
+		}
+		if !res.Changed {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: storage %s already lists content type %q; nothing to do\n", args[0], args[1], args[2])
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: storage %s now lists content type %q\n", args[0], args[1], args[2])
+		// Advisory, exit 0: the write succeeded but the re-read of the new
+		// config could not be made.
+		warnNotReread(cmd.ErrOrStderr(), args[0], "storage", args[1], res.AfterErr)
+		return nil
+	}
+	markMutating(cmd)
 	return cmd
 }
 

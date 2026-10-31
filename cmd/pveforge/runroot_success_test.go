@@ -300,7 +300,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 		"node", "node/get",
 		"roster", "roster/import-token", "roster/init", "roster/pin-tls", "roster/rekey", "roster/validate",
 		"schema",
-		"storage", "storage/alloc", "storage/create", "storage/free-orphans", "storage/get", "storage/orphans",
+		"storage", "storage/alloc", "storage/create", "storage/free-orphans", "storage/get", "storage/orphans", "storage/set-content",
 		"user", "user/ensure",
 		"vm", "vm/create", "vm/get", "vm/set",
 		"vm/snapshot", "vm/snapshot/create", "vm/snapshot/delete", "vm/snapshot/list", "vm/snapshot/rollback",

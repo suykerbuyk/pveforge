@@ -281,6 +281,16 @@ func (c *RoutedClient) CreateStorage(ctx context.Context, name string, params ur
 	return c.rest.CreateStorage(ctx, name, params)
 }
 
+// UpdateStorageConfig updates a cluster-wide storage definition — see
+// Client.UpdateStorageConfig's own doc comment. A thin pass-through like
+// CreateStorage above, with no node parameter: a storage definition is
+// cluster-wide (datacenter), not scoped to this RoutedClient's target node, and
+// a storage-config write can never hit a root-only field, so there is nothing
+// for RoutedClient to route — this always goes over REST.
+func (c *RoutedClient) UpdateStorageConfig(ctx context.Context, name string, params url.Values) (json.RawMessage, error) {
+	return c.rest.UpdateStorageConfig(ctx, name, params)
+}
+
 // StopVM issues a hard stop for vmid on this target's node — see
 // Client.StopVM's own doc comment, and VMDestroy.Apply
 // (internal/idempotent/vmdestroy.go) for the status-gated, fail-closed way

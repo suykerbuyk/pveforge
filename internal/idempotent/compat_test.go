@@ -59,6 +59,13 @@ var _ VMShutdownClient = (*pve.RoutedClient)(nil)
 // task are what make this hold.
 var _ StorageCreateClient = (*pve.RoutedClient)(nil)
 
+// Compile-time proof that *pve.RoutedClient also satisfies
+// StorageContentClient (storagecontent.go) — a separate narrow interface for
+// the content-toggle Op. The UpdateStorageConfig pass-through added to
+// routed.go in this task (pveforge-storage-content-toggle) is what makes this
+// hold; GetStorageConfigRaw, Node and WaitForTask already existed.
+var _ StorageContentClient = (*pve.RoutedClient)(nil)
+
 // Compile-time proof that *pve.RoutedClient also satisfies VMCloneClient
 // (vmclone.go). Pins BOTH halves of the Chair-review fix this Op depends
 // on: RoutedClient.CloneVM and — the one an earlier design omitted —
