@@ -47,6 +47,7 @@ func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 		"internal/pve/routed.go":                 1,
 		"internal/pve/snapshot.go":               3,
 		"internal/pve/capture_harness_batchc.go": 4,
+		"internal/pve/capture_harness_rbstop.go": 1,
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("WaitForTask calls per file = %v\nwant %v", got, want)

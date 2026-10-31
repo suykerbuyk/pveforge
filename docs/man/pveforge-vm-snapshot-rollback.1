@@ -2,7 +2,7 @@
 .TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
 
 .SH NAME
-pveforge-vm-snapshot-rollback - Roll a VM back to its newest snapshot, then prove the guest is running
+pveforge-vm-snapshot-rollback - Roll a VM back to its newest snapshot, then prove the guest is running when it is expected to be
 
 
 .SH SYNOPSIS
@@ -20,15 +20,24 @@ deletes a snapshot itself.
 
 .PP
 After the rollback, a witness command is run in the guest through the QEMU
-guest agent: by default /bin/echo with a fresh random marker, which assumes
-a POSIX guest. --witness-command (repeatable: one argument each) and
---witness-marker replace it, for example for a Windows guest. The witness
-waits up to --witness-timeout for the agent. --no-witness skips it.
+guest agent ONLY when the guest is expected to be running afterward: either
+the target is a vmstate snapshot (it restores a running guest), or the guest
+was running before a disk-only rollback (which leaves run-state unchanged).
+A rollback to a disk-only (vmstate-absent) snapshot of a stopped guest
+cannot be witnessed in-guest and is reported as success, not a failure.
 
 .PP
-Output: target, vmid, snapshot, rollback=completed and witness=verified (or
-witness=skipped). If the witness fails, the command exits 1 and says that
-the rollback itself completed but could not be proven.
+The witness is by default /bin/echo with a fresh random marker, which assumes
+a POSIX guest. --witness-command (repeatable: one argument each) and
+--witness-marker replace it, for example for a Windows guest. The witness
+waits up to --witness-timeout for the agent. --no-witness skips it entirely.
+
+.PP
+Output: target, vmid, snapshot, rollback=completed and witness=verified,
+witness=not-applicable (rolled back to a stopped guest; nothing to witness)
+or witness=skipped (--no-witness). If the guest is expected running and the
+witness fails, the command exits 1 and says the rollback itself completed
+but could not be proven.
 
 .PP
 Locking: the VM's pveforge lock is held for the whole command (a shared

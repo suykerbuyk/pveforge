@@ -310,6 +310,64 @@ names as newer than its target.` + lockNote,
 	return cmd
 }
 
+// witnessPlan is the decision for whether a post-rollback in-guest witness
+// applies (U-RBSTOP), computed BEFORE the rollback from the target snapshot's
+// vmstate flag alone.
+type witnessPlan int
+
+const (
+	// witnessTargetNotFound: the named snapshot is absent from the list read
+	// just now. The caller ABORTS before rolling back — a missing target must
+	// never be mislabeled "stopped" and, after a TOCTOU-created target that
+	// Rollback then succeeds on (the lock holds off other pveforge processes
+	// only, not the web UI / qm), reported as a bogus not-applicable success.
+	witnessTargetNotFound witnessPlan = iota
+	// witnessRunning: a vmstate snapshot restores a running guest, so the
+	// witness must prove it.
+	witnessRunning
+	// witnessStopped: a disk-only (vmstate-absent) rollback does not leave the
+	// guest running, so no in-guest witness is possible — reported as success,
+	// not a witness failure.
+	witnessStopped
+)
+
+// targetSnapshotWitnessPlan decides, before the rollback, whether to witness,
+// from the target snapshot's Vmstate alone: Vmstate != 0 → witnessRunning
+// (a vmstate snapshot restores the running guest), Vmstate == 0 → witnessStopped
+// (a disk-only rollback — the guest is not running afterward).
+//
+// LIVE-VERIFIED (not proof-gated): on PVE 9.x a disk-only rollback does NOT
+// resume the guest. The nested-pvh §6 finalizing leg (2026-10-30) rolled a
+// RUNNING guest back to a vmstate=0 snapshot and observed it STOPPED afterward
+// (RunningBefore:true → RunningAfter:false). So a vmstate=0 target is (iii)
+// not-applicable UNCONDITIONALLY — the guest's pre-rollback run-state does not
+// matter, which is why there is no wasRunning parameter.
+//
+// RE-VERIFY on a PVE upgrade: if a future PVE resumes a disk-only-rolled-back
+// running guest, Vmstate==0 would no longer imply stopped, reintroducing the
+// silent-pass hazard (a live rollback reported not-applicable). Re-run the §6
+// finalizing leg; if RunningAfter becomes true, this must again distinguish the
+// pre-rollback run-state.
+//
+// Nil-safe: ListSnapshots returns PVE's raw slice, which carries the "current"
+// pseudo-entry and can carry JSON-null entries; this skips both before matching
+// the target by exact name (no case-fold), so it never panics on a [null] entry
+// and never matches the pseudo-entry.
+func targetSnapshotWitnessPlan(snaps []*proxmox.VirtualMachineSnapshot, name string) witnessPlan {
+	for _, s := range snaps {
+		if s == nil || s.Name == "current" {
+			continue
+		}
+		if s.Name == name {
+			if s.Vmstate != 0 {
+				return witnessRunning
+			}
+			return witnessStopped
+		}
+	}
+	return witnessTargetNotFound
+}
+
 func newVMSnapshotRollbackCmd() *cobra.Command {
 	var (
 		noWitness      bool
@@ -319,7 +377,7 @@ func newVMSnapshotRollbackCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "rollback <target-id> <vmid> <name>",
-		Short: "Roll a VM back to its newest snapshot, then prove the guest is running",
+		Short: "Roll a VM back to its newest snapshot, then prove the guest is running when it is expected to be",
 		Long: `Roll a VM back to a snapshot, then prove the rolled-back guest is running.
 
 Only the NEWEST snapshot can be rolled back to: if newer snapshots exist,
@@ -328,14 +386,22 @@ and the vm snapshot delete command that would discard them. Rollback never
 deletes a snapshot itself.
 
 After the rollback, a witness command is run in the guest through the QEMU
-guest agent: by default /bin/echo with a fresh random marker, which assumes
+guest agent ONLY when the guest is expected to be running afterward: either
+the target is a vmstate snapshot (it restores a running guest), or the guest
+was running before a disk-only rollback (which leaves run-state unchanged).
+A rollback to a disk-only (vmstate-absent) snapshot of a stopped guest
+cannot be witnessed in-guest and is reported as success, not a failure.
+
+The witness is by default /bin/echo with a fresh random marker, which assumes
 a POSIX guest. --witness-command (repeatable: one argument each) and
 --witness-marker replace it, for example for a Windows guest. The witness
-waits up to --witness-timeout for the agent. --no-witness skips it.
+waits up to --witness-timeout for the agent. --no-witness skips it entirely.
 
-Output: target, vmid, snapshot, rollback=completed and witness=verified (or
-witness=skipped). If the witness fails, the command exits 1 and says that
-the rollback itself completed but could not be proven.` + lockNote,
+Output: target, vmid, snapshot, rollback=completed and witness=verified,
+witness=not-applicable (rolled back to a stopped guest; nothing to witness)
+or witness=skipped (--no-witness). If the guest is expected running and the
+witness fails, the command exits 1 and says the rollback itself completed
+but could not be proven.` + lockNote,
 		Args: cobra.ExactArgs(3),
 	}
 	addRosterFlag(cmd)
@@ -390,6 +456,24 @@ the rollback itself completed but could not be proven.` + lockNote,
 		}
 		defer func() { _ = unlock() }()
 
+		// Run-state-aware witness decision (U-RBSTOP), computed BEFORE the
+		// rollback, under the lock, and ONLY when the witness could run: the
+		// --no-witness path issues no pre-read and is unchanged. Both reads are
+		// fail-closed (an error, or a target absent from the list, aborts before
+		// any mutation), so a bad read never frees a decision after a completed
+		// rollback.
+		plan := witnessRunning
+		if !noWitness {
+			snaps, err := client.ListSnapshots(cmd.Context(), vmid)
+			if err != nil {
+				return err
+			}
+			plan = targetSnapshotWitnessPlan(snaps, name)
+			if plan == witnessTargetNotFound {
+				return fmt.Errorf("rollback vm %d: snapshot %q is not in the snapshot list; refusing to roll back a target that is not present", vmid, name)
+			}
+		}
+
 		if err := client.Rollback(cmd.Context(), vmid, name); err != nil {
 			var newer *pve.ErrNotNewestSnapshot
 			if errors.As(err, &newer) {
@@ -399,7 +483,18 @@ the rollback itself completed but could not be proven.` + lockNote,
 		}
 
 		res := snapshotResult{Target: args[0], VMID: vmid, Snapshot: name, Rollback: "completed", Witness: "skipped"}
-		if !noWitness {
+		switch {
+		case noWitness:
+			// Witness left "skipped".
+		case plan == witnessStopped:
+			// (iii) Disk-only (vmstate-absent) rollback: the guest is not running
+			// afterward (LIVE-VERIFIED on PVE 9.x — a disk-only rollback does not
+			// resume even a guest that was running). No in-guest witness is
+			// possible; this is SUCCESS, not a witness failure.
+			res.Witness = "not-applicable"
+			fmt.Fprintf(cmd.ErrOrStderr(), "notice: %s: vm %d: rolled back to a disk-only (vmstate-absent) snapshot; the guest is not running after a disk-only rollback, so no in-guest witness is possible\n", args[0], vmid)
+		default:
+			// (i)/(ii) Expected running: prove it, or fail.
 			status, err := client.RollbackWitness(cmd.Context(), vmid, argv, marker, witnessTimeout)
 			if err != nil {
 				return witnessFailure(cmd.ErrOrStderr(), cmd, args[0], vmid, name, status, err)

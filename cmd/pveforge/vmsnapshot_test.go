@@ -19,6 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	proxmox "github.com/suykerbuyk/go-proxmox"
+
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -47,6 +49,14 @@ type snapshotFakePVE struct {
 	taskN      int
 	tasks      map[string]string // upid -> exitstatus
 
+	// status is the guest's run-state the fake's /status/current reports
+	// ("running"/"stopped"); served for completeness. The rollback no longer
+	// reads it (the decider is Vmstate-only, U-RBSTOP finalized).
+	status string
+	// listFail makes the snapshot-list GET answer 500, to exercise the rollback's
+	// ListSnapshots pre-read error return.
+	listFail bool
+
 	// witness scripts the guest agent: "ok" echoes the command's last
 	// argument, "fail" exits 1, "nomarker" exits 0 without it, "truncated"
 	// exits 0 with out-truncated set, "never" refuses every dispatch (500).
@@ -58,7 +68,7 @@ type snapshotFakePVE struct {
 }
 
 func newSnapshotFake(t *testing.T, names ...string) *snapshotFakePVE {
-	f := &snapshotFakePVE{t: t, snaps: map[string]fakeSnap{}, nextTime: 1700000000, deleteFail: map[string]bool{}, taskFail: map[string]bool{}, tasks: map[string]string{}, witness: "ok"}
+	f := &snapshotFakePVE{t: t, snaps: map[string]fakeSnap{}, nextTime: 1700000000, deleteFail: map[string]bool{}, taskFail: map[string]bool{}, tasks: map[string]string{}, witness: "ok", status: "running"}
 	for i, n := range names {
 		f.nextTime += 100
 		f.snaps[n] = fakeSnap{snaptime: f.nextTime, vmstate: 1, desc: "about " + n, seq: i}
@@ -121,6 +131,12 @@ func (f *snapshotFakePVE) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && path == snapBase+"/snapshot":
 		f.mu.Lock()
+		if f.listFail {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("snapshot list read exploded"))
+			return
+		}
 		list := []map[string]any{{"name": "current", "description": "You are here!"}}
 		names := make([]string, 0, len(f.snaps))
 		for n := range f.snaps {
@@ -179,6 +195,15 @@ func (f *snapshotFakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		exit := f.tasks[upid]
 		f.mu.Unlock()
 		writeData(w, map[string]any{"status": "stopped", "exitstatus": exit, "upid": upid, "node": "qa-pve-01"})
+	case r.Method == http.MethodGet && path == snapBase+"/status/current":
+		f.mu.Lock()
+		st := f.status
+		f.mu.Unlock()
+		writeData(w, map[string]any{"status": st})
+	case r.Method == http.MethodGet && path == snapBase+"/config":
+		// GetVM reads status/current then config and refuses a null config; a
+		// minimal non-null config (a digest) satisfies it.
+		writeData(w, map[string]any{"digest": "fwd-digest"})
 	case r.Method == http.MethodPost && path == snapBase+"/agent/exec":
 		_ = r.ParseForm()
 		f.mu.Lock()
@@ -360,6 +385,12 @@ func TestVMSnapshot_S6_NoWitness(t *testing.T) {
 	code, stdout, _ := snap(rp, "rollback", "qa-pve-01", "100", "a", "--no-witness")
 	if code != 0 || !strings.Contains(stdout, "witness=skipped\n") || f.count("POST "+snapBase+"/agent") != 0 {
 		t.Fatalf("exit %d, stdout %q, agent requests %d", code, stdout, f.count("POST "+snapBase+"/agent"))
+	}
+	// The run-state pre-read (GetVM→status/current) is gated behind !noWitness:
+	// a read hoisted out of that guard would show up here. Zero proves the
+	// --no-witness path is genuinely unchanged.
+	if n := f.count("GET " + snapBase + "/status/current"); n != 0 {
+		t.Errorf("status/current GETs on the --no-witness path = %d, want 0 (the pre-read must stay behind !noWitness)", n)
 	}
 }
 
@@ -611,5 +642,129 @@ func TestVMSnapshot_S20_DeleteTiesInListOrder(t *testing.T) {
 	rp := f.start()
 	if code, stdout, stderr := snap(rp, "delete", "qa-pve-01", "100", "p", "q"); code != 0 || !strings.Contains(stdout, `deleted=["q","p"]`) {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+// --- U-RBSTOP: run-state-aware witness decider ---------------------------
+
+// A: a vmstate=1 snapshot restores a running guest, so the witness RUNS.
+// Mutant target: forcing the expected-stopped branch skips the witness →
+// witness=verified and the agent/exec call both disappear → RED.
+func TestVMSnapshot_RBStop_A_VmstateWitnesses(t *testing.T) {
+	f := newSnapshotFake(t, "a") // "a" has vmstate=1; status defaults running
+	rp := f.start()
+	code, stdout, stderr := snap(rp, "rollback", "qa-pve-01", "100", "a")
+	if want := "rollback=completed\nsnapshot=a\ntarget=qa-pve-01\nvmid=100\nwitness=verified\n"; code != 0 || stdout != want || stderr != "" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if n := f.count("POST " + snapBase + "/agent/exec"); n != 1 {
+		t.Fatalf("agent/exec dispatches = %d, want exactly 1 (the witness ran)", n)
+	}
+}
+
+// B: a disk-only (vmstate=0) snapshot of a STOPPED guest cannot be witnessed
+// in-guest; this is SUCCESS, not a witness failure. witness="never" is seeded
+// so an always-witness mutant genuinely 500s every dispatch to a
+// WitnessNeverResponded → exit 1 → RED (exit code AND the agent/exec-count-zero
+// assertion both flip).
+func TestVMSnapshot_RBStop_B_DiskOnlyStoppedNoWitness(t *testing.T) {
+	f := newSnapshotFake(t)
+	f.nextTime += 100
+	f.snaps["d0"] = fakeSnap{snaptime: f.nextTime, vmstate: 0, desc: "disk only"}
+	f.status = "stopped"
+	f.witness = "never"
+	rp := f.start()
+	code, stdout, stderr := snap(rp, "rollback", "qa-pve-01", "100", "d0", "--witness-timeout", "1s")
+	if want := "rollback=completed\nsnapshot=d0\ntarget=qa-pve-01\nvmid=100\nwitness=not-applicable\n"; code != 0 || stdout != want {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "no in-guest witness is possible") {
+		t.Fatalf("stderr = %q, want the not-applicable notice", stderr)
+	}
+	if n := f.count("POST " + snapBase + "/agent/exec"); n != 0 {
+		t.Fatalf("agent/exec dispatches = %d, want 0 (no witness for a stopped guest)", n)
+	}
+}
+
+// C2 (LIVE-VERIFIED): a disk-only (vmstate=0) rollback does NOT witness, even of
+// a guest that was RUNNING — PVE stops it on a disk-only rollback (nested pvh,
+// 2026-10-30), so there is nothing to witness. The guest's pre-rollback state is
+// irrelevant to the decision. Seeded with witness="never" + a short timeout so
+// the mutant fails fast. Mutant target: treating a vmstate=0 target as
+// witnessRunning (re-adding a witness-on-disk-only term) → the never-responding
+// agent → exit 1 → RED. This pins that we do NOT witness a disk-only rollback.
+func TestVMSnapshot_RBStop_C2_DiskOnlyRunningGuest_NotApplicable(t *testing.T) {
+	f := newSnapshotFake(t)
+	f.nextTime += 100
+	f.snaps["d0"] = fakeSnap{snaptime: f.nextTime, vmstate: 0, desc: "disk only"}
+	f.status = "running" // irrelevant to the decider now; set to prove it
+	f.witness = "never"
+	rp := f.start()
+	code, stdout, stderr := snap(rp, "rollback", "qa-pve-01", "100", "d0", "--witness-timeout", "1s")
+	if want := "rollback=completed\nsnapshot=d0\ntarget=qa-pve-01\nvmid=100\nwitness=not-applicable\n"; code != 0 || stdout != want {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if n := f.count("POST " + snapBase + "/agent/exec"); n != 0 {
+		t.Fatalf("agent/exec dispatches = %d, want 0 (a disk-only rollback is never witnessed)", n)
+	}
+}
+
+// D: the pure helper — three-valued, both Vmstate directions (run-state no
+// longer a parameter), not-found, and nil/"current" safety.
+func TestTargetSnapshotWitnessPlan(t *testing.T) {
+	snaps := []*proxmox.VirtualMachineSnapshot{
+		nil, // a JSON-null entry must not panic
+		{Name: "current"},
+		{Name: "vs", Vmstate: 1},
+		{Name: "d0", Vmstate: 0},
+	}
+	cases := []struct {
+		name   string
+		target string
+		want   witnessPlan
+	}{
+		{"vmstate snapshot witnesses", "vs", witnessRunning},
+		{"disk-only snapshot is not-applicable", "d0", witnessStopped},
+		{"absent target is not-found", "gone", witnessTargetNotFound},
+		{"the current pseudo-entry is never a target", "current", witnessTargetNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := targetSnapshotWitnessPlan(snaps, tc.target); got != tc.want {
+				t.Fatalf("targetSnapshotWitnessPlan(%q) = %d, want %d", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
+// RBStop_NotFound: rolling back to a name absent from the snapshot list aborts
+// BEFORE any rollback — exit 1, a clear reason, and ZERO rollback POST (no
+// mutation). Pins the command-level not-found→abort path (F3).
+func TestVMSnapshot_RBStop_NotFoundAbortsBeforeRollback(t *testing.T) {
+	f := newSnapshotFake(t, "a") // "a" exists; "zzz" does not
+	rp := f.start()
+	code, stdout, stderr := snap(rp, "rollback", "qa-pve-01", "100", "zzz")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "is not in the snapshot list") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if n := f.count("POST " + snapBase + "/snapshot/"); n != 0 {
+		t.Fatalf("rollback/snapshot POSTs = %d, want 0 (abort before any mutation)", n)
+	}
+}
+
+// RBStop_PreReadError: a failing pre-witness ListSnapshots read aborts the
+// rollback before any mutation — exit 1, ZERO rollback POST. Covers the
+// remaining pre-read error return (the GetVM read was removed when the decider
+// was finalized to Vmstate-only).
+func TestVMSnapshot_RBStop_PreReadErrorAbortsBeforeRollback(t *testing.T) {
+	f := newSnapshotFake(t, "a")
+	f.listFail = true
+	rp := f.start()
+	code, stdout, _ := snap(rp, "rollback", "qa-pve-01", "100", "a")
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit %d, stdout %q; want a non-zero abort on the failed pre-read", code, stdout)
+	}
+	if n := f.count("POST " + snapBase + "/snapshot/a/rollback"); n != 0 {
+		t.Fatalf("rollback POSTs = %d, want 0 (abort before any mutation)", n)
 	}
 }

@@ -46,6 +46,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/suykerbuyk/pveforge/internal/harness"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -99,6 +100,10 @@ type captureReport struct {
 	// node A's API serve node B's OWN config for /nodes/{B}/qemu/{vmid}/config.
 	CrossNodeProxy *pve.CrossNodeProxyCapture `json:"cross_node_proxy,omitempty"`
 
+	// U-RBSTOP §6: what run-state PVE's rollback leaves the guest in (settles the
+	// run-state-aware witness decider's proof-gated term).
+	RollbackRunState *pve.RollbackRunStateCapture `json:"rollback_run_state,omitempty"`
+
 	// Errors records a per-leg failure without aborting the whole capture.
 	Errors []string `json:"errors,omitempty"`
 }
@@ -122,6 +127,11 @@ func batchcRequested(c1CloneVMID, c2VMID, c4TakenVMID int, c3RestrictedTarget st
 // golden gate: it is folded into amutMode so a cross-node-proxy run does NOT
 // also demand a zero-guest cluster.
 func cwcvRequested(cwcvVMID int) bool { return cwcvVMID != 0 }
+
+// rbstopRequested reports whether the U-RBSTOP §6 rollback run-state proof leg
+// is set. Like the Batch C legs it needs a LIVE guest, so it suppresses the
+// golden gate (folded into amutMode).
+func rbstopRequested(rbstopVMID int) bool { return rbstopVMID != 0 }
 
 // qmcreateSpellingErrors asserts a recovered qmcreate UPID's spelling: type
 // `qmcreate`, id the VMID, and a valid shape.
@@ -212,6 +222,11 @@ func run() int {
 	cwcvVMID := flag.Int("cwcv-vmid", 0, "U-CWCV §2: a VMID that lives on -cwcv-target-node (node B) carrying the B-unique marker (0=skip)")
 	cwcvMarkerField := flag.String("cwcv-marker-field", "", "U-CWCV §2: the config field set to a B-unique value (e.g. scsi0 or description)")
 	cwcvMarkerValue := flag.String("cwcv-marker-value", "", "U-CWCV §2: the exact B-unique value -cwcv-marker-field must carry")
+	// U-RBSTOP §6 rollback run-state proof (A-MUT class; needs a live guest, and
+	// MUTATES it: snapshot + rollback + witness, snapshot cleaned up).
+	rbstopVMID := flag.Int("rbstop-vmid", 0, "U-RBSTOP §6: a disposable live guest VMID (690–699) to snapshot+rollback+witness (0=skip)")
+	rbstopSnap := flag.String("rbstop-snap", "", "U-RBSTOP §6: the snapshot name this proof creates and rolls back to (required with -rbstop-vmid)")
+	rbstopLeg := flag.String("rbstop-leg", "", "U-RBSTOP §6 leg: running (vmstate=1, guest running), stopped (vmstate=0, guest pre-STOPPED), or finalizing (vmstate=0, guest running — observes PVE's run-state)")
 	flag.Parse()
 
 	if *target == "" {
@@ -268,7 +283,8 @@ func run() int {
 	// assertions alone, never a golden refusal.
 	amutMode := amutRequested(*agentVMID, *qmcreateVMID, upids, *vzdumpUPID, *userUPID, *exitstatusUPID) ||
 		batchcRequested(*c1CloneVMID, *c2VMID, *c4TakenVMID, *c3RestrictedTarget) ||
-		cwcvRequested(*cwcvVMID)
+		cwcvRequested(*cwcvVMID) ||
+		rbstopRequested(*rbstopVMID)
 	var gateErr error
 	if !amutMode {
 		shapes, err := c.GoldenGateEmpty(ctx, []string(nodes))
@@ -497,6 +513,56 @@ func run() int {
 			report.CrossNodeProxy = capt
 			if !capt.Proven {
 				report.Errors = append(report.Errors, fmt.Sprintf("cwcv: cross-node proxy NOT proven (bound-host-ok=%v, field %q got %q want %q) — node A did not serve node B's own config; the shared-storage free must stay gated", capt.BoundHostOK, capt.MarkerField, capt.GotValue, capt.WantMarker))
+			}
+		}
+	}
+
+	// ---- U-RBSTOP §6 rollback run-state proof ----
+	// Snapshots the live guest with the leg's vmstate, rolls back through the
+	// production Rollback (no `start`), and records run-state before/after + a
+	// witness attempt. Settles what the CLI's run-state-aware decider keys on.
+	// Per leg: running → expect running-after + witness proven; stopped → the
+	// guest must be pre-STOPPED and expect stopped-after, no witness; finalizing
+	// → the guest must be pre-RUNNING and the leg OBSERVES run-state-after to
+	// decide the `|| wasRunning` term (running-after keeps it; stopped-after
+	// drops it) — an observation, reported, never a silent pass.
+	if *rbstopVMID != 0 {
+		switch {
+		case *rbstopSnap == "" || (*rbstopLeg != "running" && *rbstopLeg != "stopped" && *rbstopLeg != "finalizing"):
+			report.Errors = append(report.Errors, "rbstop: -rbstop-snap and -rbstop-leg (running|stopped|finalizing) are required with -rbstop-vmid")
+		default:
+			wantVmstate := *rbstopLeg == "running"
+			witnessCmd, marker, werr := pve.DefaultRollbackWitnessCommand()
+			if werr != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("rbstop: build witness: %v", werr))
+			} else if capt, err := c.CaptureRollbackRunState(ctx, probeNodeName, *rbstopVMID, *rbstopSnap, wantVmstate, witnessCmd, marker, 2*time.Minute); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("rbstop: %v", err))
+			} else {
+				report.RollbackRunState = capt
+				switch *rbstopLeg {
+				case "running":
+					if !capt.RunningBefore {
+						report.Errors = append(report.Errors, "rbstop running leg: the guest was not running before the rollback — start it first")
+					}
+					if !capt.RunningAfter || !capt.WitnessProven {
+						report.Errors = append(report.Errors, fmt.Sprintf("rbstop running leg: want running-after + witness proven, got running-after=%v witnessed=%v (%s)", capt.RunningAfter, capt.WitnessProven, capt.WitnessErr))
+					}
+				case "stopped":
+					if capt.RunningBefore {
+						report.Errors = append(report.Errors, "rbstop stopped leg: the guest was RUNNING before — this leg must start from a STOPPED guest (a running start encodes the R1 bug)")
+					}
+					if capt.RunningAfter || capt.WitnessTried {
+						report.Errors = append(report.Errors, fmt.Sprintf("rbstop stopped leg: want stopped-after + no witness, got running-after=%v witness-tried=%v", capt.RunningAfter, capt.WitnessTried))
+					}
+				case "finalizing":
+					// OBSERVATION, not pass/fail: it decides the decider's term.
+					if !capt.RunningBefore {
+						report.Errors = append(report.Errors, "rbstop finalizing leg: the guest must be RUNNING before a vmstate=0 rollback for this observation to mean anything")
+					}
+					// capt.RunningAfter is the answer; the Chair reads it from the
+					// JSON. running-after ⇒ keep `|| wasRunning`; stopped-after ⇒
+					// drop it. No error is appended for either value.
+				}
 			}
 		}
 	}
