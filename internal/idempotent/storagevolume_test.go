@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
+
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 // fakeStorageClient satisfies StorageVolumeClient and StorageOrphanScanner,
@@ -29,6 +31,12 @@ type fakeStorageClient struct {
 	scannerOrphans []*proxmox.StorageContent
 	scannerErr     error
 
+	clusterOrphans []*proxmox.StorageContent
+	clusterErr     error
+
+	storageShared int   // GetStorage's Shared flag (0 = unshared)
+	getStorageErr error // when set, GetStorage returns it
+
 	posts   int
 	trace   []string // "DELETE <volid>" / "WAIT <upid>" in call order
 	deletes []string
@@ -36,6 +44,13 @@ type fakeStorageClient struct {
 }
 
 func (f *fakeStorageClient) Node() string { return f.node }
+
+func (f *fakeStorageClient) GetStorage(_ context.Context, _, name string) (*proxmox.Storage, error) {
+	if f.getStorageErr != nil {
+		return nil, f.getStorageErr
+	}
+	return &proxmox.Storage{Storage: name, Shared: f.storageShared}, nil
+}
 
 func (f *fakeStorageClient) GetStorageVolumes(_ context.Context, _, _ string) ([]*proxmox.StorageContent, error) {
 	if f.posted {
@@ -72,6 +87,10 @@ func (f *fakeStorageClient) WaitForTask(_ context.Context, _, upid string) error
 
 func (f *fakeStorageClient) OrphanVolumesForVMIDWithVMList(_ context.Context, _, _ string, _ int, _ []int) ([]*proxmox.StorageContent, error) {
 	return f.scannerOrphans, f.scannerErr
+}
+
+func (f *fakeStorageClient) OrphanVolumesClusterForVMID(_ context.Context, _, _ string, _ int, _ []pve.NodeVMID) ([]*proxmox.StorageContent, error) {
+	return f.clusterOrphans, f.clusterErr
 }
 
 // --- alloc: the returned-volid second signal (central) -------------------

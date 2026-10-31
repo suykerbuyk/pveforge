@@ -19,11 +19,12 @@ import (
 // are built only by the two commands, which wire the self and escalation
 // checks into them (UserEnsure.BeforeJoin, via CheckGroupJoin).
 //
-// ClusterGuests, `vm create --unique-tag`'s root read, is held to its
+// ClusterGuests, the root read behind `vm create --unique-tag` and the
+// cluster-wide shared-storage free (`storage free-orphans`), is held to its
 // reviewed sites too. It runs one read-only command
-// (TestRootAccess_ClusterGuests_RunsOnlyTheRead), and vm.go, its only
-// caller, holds none of the writers above: vm.go is not an allowed file,
-// so a writer reference there fails this test.
+// (TestRootAccess_ClusterGuests_RunsOnlyTheRead). Its callers — vm.go and
+// storage.go — hold none of the writers above (neither is otherwise an allowed
+// file), so a writer reference in either fails this test.
 var (
 	tgtAddUser     = sourceguard.Target{AnyQualifier: true, Name: "AddUser"}
 	tgtModifyUser  = sourceguard.Target{AnyQualifier: true, Name: "ModifyUser"}
@@ -56,12 +57,13 @@ var rootWriterSites = []struct {
 	{"cmd/pveforge/access.go", tgtCheckJoin, 1},
 	{"cmd/pveforge/access.go", tgtUserEnsure, 1},
 	{"cmd/pveforge/access.go", tgtGroupEnsure, 1},
-	{"internal/bootstrap/access.go", tgtPveum, 9},      // eight reads (guests, node qemu list, node self-identity, node quorum, users, groups, ACLs, roles) and pveumWrite
+	{"internal/bootstrap/access.go", tgtPveum, 10},     // nine reads (guests, node qemu list, node self-identity, node quorum, cluster online nodes, users, groups, ACLs, roles) and pveumWrite
 	{"internal/bootstrap/access.go", tgtRootRun, 1},    // pveum's own call
 	{"internal/bootstrap/inventory.go", tgtRootRun, 1}, // getent, which reads its own exit 2
 	{"internal/bootstrap/keys.go", tgtRootRun, 1},      // access keys' one read of authorized_keys (cat; it writes nothing)
 	{"internal/bootstrap/access.go", tgtPveumWrite, 5}, // the five writers
 	{"cmd/pveforge/vm.go", tgtClusterGst, 2},           // the check and the visibility wait
+	{"cmd/pveforge/storage.go", tgtClusterGst, 1},      // the cluster-wide shared-storage free's root enumeration
 	{"internal/bootstrap/access.go", tgtACLModify, 1},
 }
 

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
+
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 // StorageVolumeClient is the subset of *pve.RoutedClient both storage-volume
@@ -25,14 +27,27 @@ type StorageVolumeClient interface {
 	Node() string
 	RawRequest(ctx context.Context, method, path string, params url.Values) (json.RawMessage, error)
 	GetStorageVolumes(ctx context.Context, node, storage string) ([]*proxmox.StorageContent, error)
+	// GetStorage is read by VolumeFreeOrphans.Read's defense-in-depth selector
+	// guard (F1): a node-scoped CompleteVMIDs free must refuse a shared storage
+	// in the Op itself, not rely on a downstream refuseIfShared or on the CLI.
+	GetStorage(ctx context.Context, node, name string) (*proxmox.Storage, error)
 	WaitForTask(ctx context.Context, node, upid string) error
 }
 
 // StorageOrphanScanner is the destructive-safe orphan determination the free
-// consumes (pve.OrphanVolumesForVMIDWithVMList, landed as Unit 2). *pve.Routed
-// Client satisfies it structurally.
+// consumes. *pve.RoutedClient satisfies it structurally. It has TWO methods so
+// the free can scan either a single node's claimed set OR the cluster-wide one,
+// and the cluster-wide method is DELIBERATELY NOT satisfiable by the node-
+// scoped one (U-CWCV §3):
+//   - OrphanVolumesForVMIDWithVMList: node-scoped, from a complete root VMID
+//     list for THIS node (landed as Unit 2). Refuses shared storage.
+//   - OrphanVolumesClusterForVMID: cluster-wide, from a node-carrying pair list
+//     (pve.ClusterQemuPairs). The ONLY path that may free on shared storage,
+//     because only a cross-node claimed set can see a disk a VM on another node
+//     claims. VolumeFreeOrphans picks it when ClusterGuests is set.
 type StorageOrphanScanner interface {
 	OrphanVolumesForVMIDWithVMList(ctx context.Context, node, storage string, vmid int, completeVMIDs []int) ([]*proxmox.StorageContent, error)
+	OrphanVolumesClusterForVMID(ctx context.Context, node, storage string, vmid int, clusterGuests []pve.NodeVMID) ([]*proxmox.StorageContent, error)
 }
 
 // decodeScalarString decodes a PVE response that must be a non-empty JSON
@@ -207,6 +222,19 @@ type VolumeFreeOrphans struct {
 	VMID          int
 	CompleteVMIDs []int
 
+	// ClusterPairs, when non-nil, routes Read onto the CLUSTER-WIDE scanner
+	// (OrphanVolumesClusterForVMID) instead of the node-scoped
+	// OrphanVolumesForVMIDWithVMList — the ONLY safe path on SHARED storage
+	// (U-CWCV §3/§5). It carries node (pve.NodeVMID) because the cluster claimed
+	// set is a union over (node, vmid) PAIRS, which a nodeless CompleteVMIDs
+	// cannot express. The CLI builds it with pve.ClusterQemuPairs under the same
+	// quorum gate + warning as CompleteVMIDs, and only after the §2 proxy proof.
+	// A nil slice keeps the node-scoped path; set exactly one of ClusterPairs /
+	// CompleteVMIDs for a given free. (Named ClusterPairs, not ClusterGuests, so
+	// it does not collide with bootstrap.RootAccess.ClusterGuests in the
+	// root-writer source guard.)
+	ClusterPairs []pve.NodeVMID
+
 	// Applied is the volids actually freed, in order, each appended ONLY after
 	// its WaitForTask returned nil — never reconstructed from a before/after
 	// diff, the VMFieldsEnsure.Applied discipline. This Op never returns
@@ -223,7 +251,43 @@ type VolumeFreeOrphans struct {
 // which would let Satisfied short-circuit a determination that should refuse.
 func (op *VolumeFreeOrphans) Read(ctx context.Context) (string, error) {
 	node := op.Client.Node()
-	orphans, err := op.Scanner.OrphanVolumesForVMIDWithVMList(ctx, node, op.Storage, op.VMID, op.CompleteVMIDs)
+
+	// F1 defense-in-depth: the destructive selector is enforced in the Op, not
+	// only in cmd/pveforge/storage.go, so a FUTURE caller that builds the Op
+	// directly cannot free cross-node disks.
+	//
+	// (a) EXACTLY ONE of ClusterPairs / CompleteVMIDs must be set. Both-set is
+	// ambiguous; neither-set would scan a nil node-scoped list. Fail closed.
+	clusterSel := op.ClusterPairs != nil
+	nodeSel := op.CompleteVMIDs != nil
+	if clusterSel == nodeSel {
+		return "", fmt.Errorf("storage free-orphans: vmid %d on %q/%q: %w: exactly one of ClusterPairs (shared, cluster-wide) or CompleteVMIDs (node-scoped) must be set, not both and not neither", op.VMID, node, op.Storage, pve.ErrUnverifiableRead)
+	}
+	// (b) A node-scoped CompleteVMIDs free must refuse a SHARED storage in the
+	// Op itself: a node-scoped claimed set cannot see a disk a VM on another
+	// node claims, so it must error here rather than scan (even though the
+	// node-scoped scanner also refuses shared downstream — two guards).
+	if nodeSel {
+		stg, gerr := op.Client.GetStorage(ctx, node, op.Storage)
+		if gerr != nil {
+			return "", fmt.Errorf("storage free-orphans: vmid %d on %q/%q: read storage for the shared-selector guard: %w", op.VMID, node, op.Storage, gerr)
+		}
+		if stg.Shared != 0 {
+			return "", fmt.Errorf("storage free-orphans: vmid %d on %q/%q: %w: storage is shared but the free was built with a node-scoped CompleteVMIDs; a cluster-wide ClusterPairs is required to free shared storage safely", op.VMID, node, op.Storage, pve.ErrUnverifiableRead)
+		}
+	}
+
+	// Cluster-wide claimed set when ClusterPairs is set (shared storage, §3);
+	// otherwise the node-scoped list. The cluster method is NOT satisfiable by
+	// the node-scoped one — reverting this to the node-scoped scanner on shared
+	// storage would free a disk a VM on another node claims.
+	var orphans []*proxmox.StorageContent
+	var err error
+	if op.ClusterPairs != nil {
+		orphans, err = op.Scanner.OrphanVolumesClusterForVMID(ctx, node, op.Storage, op.VMID, op.ClusterPairs)
+	} else {
+		orphans, err = op.Scanner.OrphanVolumesForVMIDWithVMList(ctx, node, op.Storage, op.VMID, op.CompleteVMIDs)
+	}
 	if err != nil {
 		return "", fmt.Errorf("storage free-orphans: determine orphans for vmid %d on %q/%q: %w", op.VMID, node, op.Storage, err)
 	}

@@ -225,6 +225,14 @@ func (c *RoutedClient) OrphanVolumesForVMIDWithVMList(ctx context.Context, node,
 	return c.rest.OrphanVolumesForVMIDWithVMList(ctx, node, storage, vmid, completeVMIDs)
 }
 
+func (c *RoutedClient) ClusterClaimedVolumes(ctx context.Context, guests []NodeVMID) (map[string]bool, error) {
+	return c.rest.ClusterClaimedVolumes(ctx, guests)
+}
+
+func (c *RoutedClient) OrphanVolumesClusterForVMID(ctx context.Context, node, storage string, vmid int, clusterGuests []NodeVMID) ([]*proxmox.StorageContent, error) {
+	return c.rest.OrphanVolumesClusterForVMID(ctx, node, storage, vmid, clusterGuests)
+}
+
 func (c *RoutedClient) GetNetworkInterface(ctx context.Context, node, iface string) (*proxmox.NodeNetwork, error) {
 	return c.rest.GetNetworkInterface(ctx, node, iface)
 }

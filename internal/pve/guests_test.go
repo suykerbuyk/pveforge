@@ -13,7 +13,7 @@ func TestParseClusterGuests(t *testing.T) {
 		`{"id":"lxc/200","type":"lxc","vmid":200,"node":"n1","tags":"db"},` +
 		`{"id":"qemu/300","type":"qemu","vmid":300,"node":"n1"}]`
 	guests, err := ParseClusterGuests([]byte(good))
-	want := []Guest{{"qemu", 100, "web;x"}, {"lxc", 200, "db"}, {"qemu", 300, ""}}
+	want := []Guest{{"qemu", 100, "n1", "web;x"}, {"lxc", 200, "n1", "db"}, {"qemu", 300, "n1", ""}}
 	if err != nil || len(guests) != len(want) {
 		t.Fatalf("ParseClusterGuests(good) = %+v, %v", guests, err)
 	}
@@ -42,8 +42,11 @@ func TestParseClusterGuests(t *testing.T) {
 		"vmid a string":     `[{"type":"qemu","vmid":"100"}]`,
 		"vmid fractional":   `[{"type":"qemu","vmid":100.5}]`,
 		"vmid zero":         `[{"type":"qemu","vmid":0}]`,
-		"tags not a string": `[{"type":"qemu","vmid":100,"tags":["x"]}]`,
-		"tags null":         `[{"type":"qemu","vmid":100,"tags":null}]`,
+		"no node":           `[{"type":"qemu","vmid":100,"tags":"x"}]`,
+		"node empty":        `[{"type":"qemu","vmid":100,"node":""}]`,
+		"node not a string": `[{"type":"qemu","vmid":100,"node":123}]`,
+		"tags not a string": `[{"type":"qemu","vmid":100,"node":"n1","tags":["x"]}]`,
+		"tags null":         `[{"type":"qemu","vmid":100,"node":"n1","tags":null}]`,
 	} {
 		if g, err := ParseClusterGuests([]byte(bad)); !errors.Is(err, ErrUnverifiableRead) {
 			t.Errorf("%s: %+v, %v; want ErrUnverifiableRead", name, g, err)
@@ -55,12 +58,12 @@ func TestParseClusterGuests(t *testing.T) {
 // elements only, and splits on every separator PVE accepts.
 func TestFindGuestByTagFold(t *testing.T) {
 	guests := []Guest{
-		{"qemu", 100, "web;foo"},
-		{"lxc", 200, "Bar"},
-		{"qemu", 300, "food;bar-x"},
-		{"qemu", 400, "a, b c"},
-		{"lxc", 500, "dup"},
-		{"qemu", 600, "DUP"},
+		{"qemu", 100, "n1", "web;foo"},
+		{"lxc", 200, "n1", "Bar"},
+		{"qemu", 300, "n1", "food;bar-x"},
+		{"qemu", 400, "n1", "a, b c"},
+		{"lxc", 500, "n1", "dup"},
+		{"qemu", 600, "n1", "DUP"},
 	}
 	for _, c := range []struct {
 		tag  string

@@ -18,11 +18,11 @@ func TestRootAccess_ClusterGuests_RunsOnlyTheRead(t *testing.T) {
 		t.Fatalf("ClusterGuestsCommand = %q, want %q", ClusterGuestsCommand, want)
 	}
 	sess := &fakeSession{byCmd: map[string]fakeRunResult{
-		want: {res: RunResult{Stdout: `[{"type":"lxc","vmid":200,"tags":"x"},{"type":"qemu","vmid":100}]`}},
+		want: {res: RunResult{Stdout: `[{"type":"lxc","vmid":200,"node":"n1","tags":"x"},{"type":"qemu","vmid":100,"node":"n2"}]`}},
 	}}
 	a, tr := newAccess(sess, nil)
 	guests, err := a.ClusterGuests(context.Background())
-	if err != nil || len(guests) != 2 || guests[0] != (pve.Guest{Type: "lxc", VMID: 200, Tags: "x"}) {
+	if err != nil || len(guests) != 2 || guests[0] != (pve.Guest{Type: "lxc", VMID: 200, Node: "n1", Tags: "x"}) {
 		t.Fatalf("ClusterGuests = %+v, %v", guests, err)
 	}
 	if !slices.Equal(sess.commands, []string{want}) || opened(tr) != 1 {

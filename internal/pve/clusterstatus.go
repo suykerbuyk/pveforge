@@ -96,6 +96,63 @@ func ParseClusterStatusQuorate(b []byte) (bool, error) {
 	return quorate, nil
 }
 
+// ParseClusterStatusOnlineNodes decodes the SAME `pvesh get /cluster/status
+// --output-format json` reply ParseClusterStatusQuorate reads and returns the
+// set of node NAMES whose "online" flag is 1 — the positive online-node
+// membership the cluster-wide orphan free cross-checks its enumeration against
+// (U-CWCV §4.3, R2/V3). It is a SIBLING pass, deliberately NOT folded into
+// ParseClusterStatusQuorate: that function's (bool,error) signature and its
+// fixtures (which carry no "online" key) stay exactly as they are.
+//
+// On the type=="node" rows the node-identity field is "name" (NodeStatus.Name,
+// the /cluster field), NOT "node" — reading "node" would get "" and refuse
+// every cluster. Fail-closed as ErrUnverifiableRead on anything a healthy PVE
+// never prints: a non-array / null / {"data":…} envelope, trailing data, a
+// null entry, a node row whose "name" is absent/empty/not-a-string, a node row
+// whose "online" flag is absent/non-0/1 (quorateFlag's posture — never
+// defaulted to "offline"), or a reply carrying NO node entry at all (a healthy
+// /cluster/status always lists at least the local node).
+func ParseClusterStatusOnlineNodes(b []byte) (map[string]bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	var entries []map[string]json.RawMessage
+	if err := dec.Decode(&entries); err != nil {
+		return nil, fmt.Errorf("cluster status online nodes: %w: %v", ErrUnverifiableRead, err)
+	}
+	if entries == nil {
+		return nil, fmt.Errorf("cluster status online nodes: %w: the list is null", ErrUnverifiableRead)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("cluster status online nodes: %w: trailing data after the list", ErrUnverifiableRead)
+	}
+	online := make(map[string]bool)
+	nodes := 0
+	for i, e := range entries {
+		if e == nil {
+			return nil, fmt.Errorf("cluster status online nodes: %w: entry %d is null", ErrUnverifiableRead, i)
+		}
+		var typ string
+		if json.Unmarshal(e["type"], &typ) != nil || typ != "node" {
+			continue
+		}
+		nodes++
+		var name string
+		if json.Unmarshal(e["name"], &name) != nil || name == "" {
+			return nil, fmt.Errorf("cluster status online nodes: %w: a node entry's name is absent or not a non-empty string", ErrUnverifiableRead)
+		}
+		on, ok := quorateFlag(e["online"])
+		if !ok {
+			return nil, fmt.Errorf("cluster status online nodes: %w: node %q online flag is absent or not a 0/1 integer", ErrUnverifiableRead, name)
+		}
+		if on {
+			online[name] = true
+		}
+	}
+	if nodes == 0 {
+		return nil, fmt.Errorf("cluster status online nodes: %w: no node entry — not a healthy /cluster/status reply", ErrUnverifiableRead)
+	}
+	return online, nil
+}
+
 // quorateFlag decodes a strict 0/1 integer quorate flag. Absent, non-numeric,
 // fractional, or outside {0,1} -> not ok (the caller refuses). Mirrors
 // internal/harness decodeQuorate's int decode.

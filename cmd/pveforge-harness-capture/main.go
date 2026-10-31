@@ -95,6 +95,10 @@ type captureReport struct {
 	TokenShortList *pve.TokenShortListCapture  `json:"token_short_list,omitempty"` // C3 (76)
 	CrossNodeVMID  *pve.CrossNodeCreateCapture `json:"cross_node_vmid,omitempty"`  // C4 (77)
 
+	// U-CWCV §2 cross-node API-proxy proof (the shared-free MERGE GATE): does
+	// node A's API serve node B's OWN config for /nodes/{B}/qemu/{vmid}/config.
+	CrossNodeProxy *pve.CrossNodeProxyCapture `json:"cross_node_proxy,omitempty"`
+
 	// Errors records a per-leg failure without aborting the whole capture.
 	Errors []string `json:"errors,omitempty"`
 }
@@ -112,6 +116,12 @@ func amutRequested(agentVMID, qmcreateVMID int, upids []string, vzdumpUPID, user
 func batchcRequested(c1CloneVMID, c2VMID, c4TakenVMID int, c3RestrictedTarget string) bool {
 	return c1CloneVMID != 0 || c2VMID != 0 || c4TakenVMID != 0 || c3RestrictedTarget != ""
 }
+
+// cwcvRequested reports whether the U-CWCV §2 cross-node proxy-proof leg is set.
+// Like the Batch C legs it needs a LIVE guest (on node B), so it suppresses the
+// golden gate: it is folded into amutMode so a cross-node-proxy run does NOT
+// also demand a zero-guest cluster.
+func cwcvRequested(cwcvVMID int) bool { return cwcvVMID != 0 }
 
 // qmcreateSpellingErrors asserts a recovered qmcreate UPID's spelling: type
 // `qmcreate`, id the VMID, and a valid shape.
@@ -196,6 +206,12 @@ func run() int {
 	c4TakenVMID := flag.Int("c4-taken-vmid", 0, "item-77: a VMID that already exists on -c4-other-node; a colliding create is attempted on the target node (0=skip)")
 	c4OtherNode := flag.String("c4-other-node", "", "item-77: the node where -c4-taken-vmid already exists")
 	c4FreeVMID := flag.Int("c4-free-vmid", 0, "item-77: a VMID known FREE, for the nextid free-direction probe")
+	// U-CWCV §2 cross-node proxy proof (A-MUT class; needs a live guest on node B).
+	cwcvBoundHost := flag.String("cwcv-bound-host", "", "U-CWCV §2: node A's API host (this client's bound host); must match the client's base URL host (empty=skip)")
+	cwcvTargetNode := flag.String("cwcv-target-node", "", "U-CWCV §2: node B, whose /nodes/{B}/qemu/{vmid}/config is read through node A's API")
+	cwcvVMID := flag.Int("cwcv-vmid", 0, "U-CWCV §2: a VMID that lives on -cwcv-target-node (node B) carrying the B-unique marker (0=skip)")
+	cwcvMarkerField := flag.String("cwcv-marker-field", "", "U-CWCV §2: the config field set to a B-unique value (e.g. scsi0 or description)")
+	cwcvMarkerValue := flag.String("cwcv-marker-value", "", "U-CWCV §2: the exact B-unique value -cwcv-marker-field must carry")
 	flag.Parse()
 
 	if *target == "" {
@@ -251,7 +267,8 @@ func run() int {
 	// created. In A-MUT mode gateErr stays nil, so the exit reflects the A-MUT
 	// assertions alone, never a golden refusal.
 	amutMode := amutRequested(*agentVMID, *qmcreateVMID, upids, *vzdumpUPID, *userUPID, *exitstatusUPID) ||
-		batchcRequested(*c1CloneVMID, *c2VMID, *c4TakenVMID, *c3RestrictedTarget)
+		batchcRequested(*c1CloneVMID, *c2VMID, *c4TakenVMID, *c3RestrictedTarget) ||
+		cwcvRequested(*cwcvVMID)
 	var gateErr error
 	if !amutMode {
 		shapes, err := c.GoldenGateEmpty(ctx, []string(nodes))
@@ -460,6 +477,27 @@ func run() int {
 		} else {
 			report.CrossNodeVMID = capt
 			report.Errors = append(report.Errors, capt.Failures()...)
+		}
+	}
+
+	// ---- U-CWCV §2 cross-node API-proxy proof (the shared-free MERGE GATE) ----
+	// Reads node B's config through node A's API and proves the answer is B's OWN
+	// config by an EXACT B-unique field-value match (not a substring of the raw
+	// body) AND that this client is actually bound to node A's host. A false
+	// proof, or any read error, appends to report.Errors and exits nonzero. This
+	// proof gated the shared-storage free until it passed GREEN on the nested
+	// `pvh` harness 2026-10-30; the gate is now removed and this leg remains the
+	// re-runnable evidence.
+	if *cwcvVMID != 0 {
+		if *cwcvBoundHost == "" || *cwcvTargetNode == "" || *cwcvMarkerField == "" || *cwcvMarkerValue == "" {
+			report.Errors = append(report.Errors, "cwcv: -cwcv-bound-host, -cwcv-target-node, -cwcv-marker-field and -cwcv-marker-value are all required with -cwcv-vmid")
+		} else if capt, err := c.CaptureCrossNodeProxy(ctx, *cwcvBoundHost, *cwcvTargetNode, *cwcvVMID, *cwcvMarkerField, *cwcvMarkerValue); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("cwcv: %v", err))
+		} else {
+			report.CrossNodeProxy = capt
+			if !capt.Proven {
+				report.Errors = append(report.Errors, fmt.Sprintf("cwcv: cross-node proxy NOT proven (bound-host-ok=%v, field %q got %q want %q) — node A did not serve node B's own config; the shared-storage free must stay gated", capt.BoundHostOK, capt.MarkerField, capt.GotValue, capt.WantMarker))
+			}
 		}
 	}
 

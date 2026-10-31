@@ -304,6 +304,23 @@ func (a *RootAccess) ClusterStatusQuorate(ctx context.Context) (bool, error) {
 	return pve.ParseClusterStatusQuorate([]byte(out))
 }
 
+// ClusterStatusOnlineNodes returns the set of node NAMES PVE reports online,
+// read as root@pam over the SAME /cluster/status command ClusterStatusQuorate
+// runs (a sibling decode, pve.ParseClusterStatusOnlineNodes). It is the
+// positive online-node membership the cluster-wide orphan free cross-checks its
+// guest enumeration against (U-CWCV §4.3): a guest naming a node not in this
+// set is a corrupted enumeration and refuses the free. Read as root for the
+// same reason as the quorate read: /cluster/status needs Sys.Audit, which a
+// narrow storage token may lack. Decoded strictly; any failure is an error,
+// never a silently empty set.
+func (a *RootAccess) ClusterStatusOnlineNodes(ctx context.Context) (map[string]bool, error) {
+	out, err := a.pveum(ctx, ClusterStatusCommand)
+	if err != nil {
+		return nil, fmt.Errorf("read cluster online nodes as root: %w", err)
+	}
+	return pve.ParseClusterStatusOnlineNodes([]byte(out))
+}
+
 // ErrRootWriteOutcomeUnknown: a root write (pveum user, group or acl) ran
 // past its deadline. It may or may not have been applied.
 var ErrRootWriteOutcomeUnknown = errors.New("the root write's outcome is unknown: it may or may not have been applied; re-running is safe, since the command reads PVE's state before it writes and PVE merges a repeated grant")

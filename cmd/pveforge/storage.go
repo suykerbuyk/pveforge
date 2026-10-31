@@ -13,6 +13,7 @@ import (
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
+	"github.com/suykerbuyk/pveforge/internal/pve"
 )
 
 func newStorageCmd() *cobra.Command {
@@ -161,15 +162,59 @@ func newStorageFreeOrphansCmd() *cobra.Command {
 			return err
 		}
 
-		// RULING 3: read the root VM list FIRST, then the quorum gate, both
-		// before the lock; refuse on either failure. The gate is a precondition,
-		// not a continuous guarantee: a quorum loss AFTER this check is not
-		// caught (a volume DELETE is a storage write, vdisk_free, not a pmxcfs
-		// write, so a read-only pmxcfs does not fail it).
-		completeVMIDs, err := access.NodeVMIDs(cmd.Context(), t.Node)
+		// A shared storage's content is visible cluster-wide, so a node-scoped
+		// claimed set would report a disk a VM on ANOTHER node claims as an
+		// orphan and free a live disk. Shared storage therefore needs the
+		// cluster-wide claimed set (gated, below); unshared storage keeps the
+		// node-scoped path, whose claimed set is already correct.
+		stg, err := rc.GetStorage(cmd.Context(), t.Node, args[1])
 		if err != nil {
-			return fmt.Errorf("storage free-orphans: refusing — could not read the complete root VM list for node %q: %w", t.Node, err)
+			return fmt.Errorf("storage free-orphans: refusing — could not read storage %q on %q: %w", args[1], t.Node, err)
 		}
+
+		op := &idempotent.VolumeFreeOrphans{Client: rc, Scanner: rc, Storage: args[1], VMID: vmid}
+
+		// RULING 3: establish the VM enumeration FIRST, then the quorum gate,
+		// both before the lock; refuse on either failure. The gate is a
+		// precondition, not a continuous guarantee: a quorum loss AFTER this
+		// check is not caught (a volume DELETE is a storage write, vdisk_free,
+		// not a pmxcfs write, so a read-only pmxcfs does not fail it).
+		if stg.Shared != 0 {
+			// Shared storage routes UNCONDITIONALLY through the cluster-wide
+			// claimed set (still behind the quorum gate + stale-residual warning
+			// below). The U-CWCV §2 merge gate — that this host's API proxy serves
+			// another node's OWN config for /nodes/{B}/qemu/{vmid}/config, not a
+			// local/wrong-node answer — was proven GREEN and break-tested on the
+			// nested `pvh` harness 2026-10-30: node A (pvh-n1) served node B's
+			// (pvh-n2) config for a VMID absent on A, carrying a B-unique marker
+			// with BoundHostOK, and a wrong marker gave proven:false. See task
+			// pveforge-cluster-wide-claimed-volumes Execution status. The former
+			// clusterSharedFreeProxyProven refusal gate is therefore removed.
+			//
+			// Cluster-wide, node-carrying enumeration, QEMU-only and cross-
+			// checked against the online-node set (the sound-but-weaker
+			// membership check, §4.3). A guest naming a non-online node refuses.
+			guests, err := access.ClusterGuests(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("storage free-orphans: refusing — could not read the cluster guest list for node %q: %w", t.Node, err)
+			}
+			online, err := access.ClusterStatusOnlineNodes(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("storage free-orphans: refusing — could not read the cluster's online nodes for node %q: %w", t.Node, err)
+			}
+			pairs, err := pve.ClusterQemuPairs(guests, online)
+			if err != nil {
+				return fmt.Errorf("storage free-orphans: refusing — %w", err)
+			}
+			op.ClusterPairs = pairs
+		} else {
+			completeVMIDs, err := access.NodeVMIDs(cmd.Context(), t.Node)
+			if err != nil {
+				return fmt.Errorf("storage free-orphans: refusing — could not read the complete root VM list for node %q: %w", t.Node, err)
+			}
+			op.CompleteVMIDs = completeVMIDs
+		}
+
 		quorate, err := access.ClusterStatusQuorate(cmd.Context())
 		if err != nil {
 			return fmt.Errorf("storage free-orphans: refusing — could not read cluster quorum for node %q: %w", t.Node, err)
@@ -177,13 +222,15 @@ func newStorageFreeOrphansCmd() *cobra.Command {
 		if !quorate {
 			return fmt.Errorf("storage free-orphans: refusing — node %q is not quorate; its VM list may be stale and the free could delete a live VM's disk", t.Node)
 		}
-		// Residual (rides the shared free path): quorum is necessary, not
-		// sufficient; the post-quorate pmxcfs replication window is not closable.
+		// Residual (rides every free path, now scaled cluster-wide for shared
+		// storage): quorum is necessary, not sufficient; the post-quorate pmxcfs
+		// replication window — and, on the cluster path, a whole node silently
+		// dropped from the enumeration — are NOT closable by any API read, and
+		// are deferred to pveforge-cluster-free-stale-shortlist-completeness.
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: %s: quorum is a necessary but NOT sufficient freshness check; a node that just regained quorum or is receiving a migration can serve a stale VM list briefly, so do not run free-orphans concurrently with a migration targeting node %q or just after it rejoined the cluster\n",
 			args[0], t.Node)
 
-		op := &idempotent.VolumeFreeOrphans{Client: rc, Scanner: rc, Storage: args[1], VMID: vmid, CompleteVMIDs: completeVMIDs}
 		key := lock.ObjectKey{TargetID: args[0], Kind: "storage", ID: args[1]}
 		res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, force)
 		if err != nil {

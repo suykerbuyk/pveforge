@@ -1379,6 +1379,46 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 				return err
 			}, []string{"GET /nodes/qa-pve-05/storage/stor-y/status", "GET /nodes/qa-pve-05/storage/stor-y/content", "GET /nodes/qa-pve-05/qemu/100/config", "GET /nodes/qa-pve-05/qemu/100/config?current=1", "GET /nodes/qa-pve-05/qemu/100/snapshot"}},
 		}},
+		// ClusterClaimedVolumes takes NO node argument: it iterates the
+		// node-carrying pairs, so each pair's OWN node+vmid must appear on the
+		// wire, never the bound target node. Two cases with distinct pairs catch
+		// a pass-through that hard-coded a guest list.
+		{"ClusterClaimedVolumes", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				_, err := rc.ClusterClaimedVolumes(ctx, []NodeVMID{{Node: fwdCallerNode, VMID: fwdVMID}})
+				return err
+			}, []string{"GET /nodes/qa-pve-02/qemu/4242/config", "GET /nodes/qa-pve-02/qemu/4242/config?current=1", "GET /nodes/qa-pve-02/qemu/4242/snapshot"}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				_, err := rc.ClusterClaimedVolumes(ctx, []NodeVMID{{Node: fwdCallerNode2, VMID: fwdVMID2}})
+				return err
+			}, []string{"GET /nodes/qa-pve-05/qemu/5151/config", "GET /nodes/qa-pve-05/qemu/5151/config?current=1", "GET /nodes/qa-pve-05/qemu/5151/snapshot"}},
+		}},
+		// OrphanVolumesClusterForVMID takes the node argument for the CONTENT
+		// fetch and the node-carrying pairs for the CLAIMED set — a DIFFERENT
+		// node — plus the vmid as a client-side narrow. It does NOT call
+		// refuseIfShared, so no /status read appears. The injected pair claims
+		// local:vm-1-disk-0 (the fake's config body), absent from the content, so
+		// all three content images are orphans and the vmid narrow keeps one.
+		{"OrphanVolumesClusterForVMID", []bindingCase{
+			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				got, err := rc.OrphanVolumesClusterForVMID(ctx, fwdCallerNode, "stor-x", fwdVMID, []NodeVMID{{Node: fwdCallerNode2, VMID: fwdVMID2}})
+				var ids []string
+				for _, v := range got {
+					ids = append(ids, v.Volid)
+				}
+				volids(t, ids, "stor-x:vm-4242-disk-0")
+				return err
+			}, []string{"GET /nodes/qa-pve-02/storage/stor-x/content", "GET /nodes/qa-pve-05/qemu/5151/config", "GET /nodes/qa-pve-05/qemu/5151/config?current=1", "GET /nodes/qa-pve-05/qemu/5151/snapshot"}},
+			{fwdTargetNode2, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
+				got, err := rc.OrphanVolumesClusterForVMID(ctx, fwdCallerNode2, "stor-y", fwdVMID2, []NodeVMID{{Node: fwdCallerNode, VMID: fwdVMID}})
+				var ids []string
+				for _, v := range got {
+					ids = append(ids, v.Volid)
+				}
+				volids(t, ids, "stor-y:vm-5151-disk-0")
+				return err
+			}, []string{"GET /nodes/qa-pve-05/storage/stor-y/content", "GET /nodes/qa-pve-02/qemu/4242/config", "GET /nodes/qa-pve-02/qemu/4242/config?current=1", "GET /nodes/qa-pve-02/qemu/4242/snapshot"}},
+		}},
 		{"GetNetworkInterface", []bindingCase{
 			{fwdTargetNode, func(t *testing.T, ctx context.Context, rc *RoutedClient) error {
 				_, err := rc.GetNetworkInterface(ctx, fwdCallerNode, "vmbr7")
@@ -1608,8 +1648,8 @@ func TestRoutedForwarding_NodeBinding(t *testing.T) {
 		}},
 	}
 
-	if len(methods) != 32 {
-		t.Fatalf("node-binding table covers %d methods, want all 32 node-resolving pass-throughs", len(methods))
+	if len(methods) != 34 {
+		t.Fatalf("node-binding table covers %d methods, want all 34 node-resolving pass-throughs (32 original + the two cluster-wide claimed-set methods)", len(methods))
 	}
 	for _, m := range methods {
 		t.Run(m.name, func(t *testing.T) {
@@ -1813,6 +1853,8 @@ var routedClientSeam = map[string]seamEntry{
 	"OrphanVolumesForVMID":           {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"OrphanVolumesWithVMList":        {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"OrphanVolumesForVMIDWithVMList": {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"ClusterClaimedVolumes":          {tests: []string{"TestRoutedForwarding_NodeBinding"}},
+	"OrphanVolumesClusterForVMID":    {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetNetworkInterface":            {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"GetNetworkInterfaces":           {tests: []string{"TestRoutedForwarding_NodeBinding"}},
 	"NextVMID":                       {tests: []string{"TestRoutedForwarding_NextVMID_Exclude", "TestRoutedClient_NextVMID_Forwards"}},
@@ -2013,7 +2055,7 @@ func TestRoutedForwarding_NodeBindingRowsCallTheirOwnMethod(t *testing.T) {
 		}
 		return false
 	})
-	if rows != 32 {
-		t.Errorf("found %d node-binding rows, want 32", rows)
+	if rows != 34 {
+		t.Errorf("found %d node-binding rows, want 34", rows)
 	}
 }

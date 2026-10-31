@@ -48,7 +48,14 @@ type storageContentEntry struct {
 // uses — but decoded into storageContentEntry so the per-entry content
 // classification survives the round trip. GetStorageVolumes itself is left
 // untouched (its existing callers don't need this field); this is a
-// separate, package-private read used only by OrphanVolumes.
+// separate, package-private read used by the orphan-scan paths (OrphanVolumes,
+// OrphanVolumesWithVMList, OrphanVolumesClusterForVMID) and by the batch-C
+// capture harness (capture_harness_batchc.go).
+//
+// It fails closed as ErrUnverifiableRead on a null LIST and on any null ENTRY
+// (R6): this listing is the ACTUAL side of a destructive diff, so a [null,…]
+// payload — which no healthy PVE emits — must refuse rather than skip the null
+// and return a short orphan set, matching GetVMs/GetNodes/GetStorages.
 func (c *Client) storageContentWithType(ctx context.Context, node, storage string) ([]*storageContentEntry, error) {
 	var raw []*storageContentEntry
 	if err := c.pc.Get(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content", url.PathEscape(node), url.PathEscape(storage)), &raw); err != nil {
@@ -56,6 +63,9 @@ func (c *Client) storageContentWithType(ctx context.Context, node, storage strin
 	}
 	if raw == nil {
 		return nil, fmt.Errorf("storage %q on %q: %w: content list payload was null", storage, node, ErrUnverifiableRead)
+	}
+	if i := nullEntry(raw); i >= 0 {
+		return nil, fmt.Errorf("storage %q on %q: %w: content list entry %d is null", storage, node, ErrUnverifiableRead, i)
 	}
 	return raw, nil
 }
@@ -364,9 +374,28 @@ func (c *Client) orphanVolumesForVMIDs(ctx context.Context, node string, content
 			claimed[volid] = true
 		}
 	}
+	return orphansFromClaimed(content, claimed)
+}
 
+// orphansFromClaimed is the pure set-difference half of the orphan scan, split
+// out of orphanVolumesForVMIDs so both the node-scoped claim-loop and the
+// cluster-wide claimed set (ClusterClaimedVolumes) feed the SAME diff. It keeps
+// only claimableContentTypes entries NOT in claimed, sorted by Volid for
+// deterministic output.
+//
+// F3 (belt-and-suspenders on the delete path): a NIL content entry is a
+// fail-closed ERROR (ErrUnverifiableRead), never a panic and never a silent
+// skip — skipping it would be the empty-contribution hazard on the actual side.
+// Production never reaches this because storageContentWithType already refuses a
+// null list/entry upstream; this is the SECOND, independent guard, so a future
+// edit that removes the upstream one errors here rather than nil-derefs inside a
+// free's Read.
+func orphansFromClaimed(content []*storageContentEntry, claimed map[string]bool) ([]*proxmox.StorageContent, error) {
 	var orphans []*proxmox.StorageContent
-	for _, entry := range content {
+	for i, entry := range content {
+		if entry == nil {
+			return nil, fmt.Errorf("orphan diff: %w: content entry %d is null", ErrUnverifiableRead, i)
+		}
 		if entry.StorageContent == nil || !claimableContentTypes[entry.Content] {
 			continue
 		}
@@ -377,6 +406,49 @@ func (c *Client) orphanVolumesForVMIDs(ctx context.Context, node string, content
 	}
 	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Volid < orphans[j].Volid })
 	return orphans, nil
+}
+
+// NodeVMID is a node-carrying (node, vmid) pair: the unit the cluster-wide
+// claimed-set union consumes. The cluster claimed set is a union over PAIRS,
+// not a bare VMID list, because ClaimedVolumes is node-parameterized — a VMID
+// alone cannot name which node's /nodes/{node}/qemu/{vmid}/config to read
+// (U-CWCV C-1). Build these with ClusterQemuPairs (QEMU-only, membership-
+// cross-checked); never hand-assemble them from a nodeless list.
+type NodeVMID struct {
+	Node string
+	VMID int
+}
+
+// ClusterClaimedVolumes is the N-node generalization of orphanVolumesForVMIDs'
+// claim-loop: it unions ClaimedVolumes over every (node, vmid) pair and returns
+// the cluster-wide claimed set. Each pair's ClaimedVolumes is reused VERBATIM —
+// every per-VM fail-closed guard (digest, snapshot/vmstate oracles, the status
+// gate) applies unchanged.
+//
+// It carries the same abort discipline as the single-node loop (§4.4): the
+// FIRST error anywhere returns (nil, err) naming the node+vmid, never a partial
+// set and never a per-node empty contribution — a short claimed set on the
+// destructive path frees a live VM's disk. A caller MUST treat a non-nil error
+// as "ignore the map": the returned map is nil on error.
+//
+// A nil guests slice is REFUSED (a dropped enumeration error), mirroring
+// OrphanVolumesWithVMList's nil-list refusal; a non-nil empty slice is a
+// genuinely zero-QEMU cluster and yields an empty claimed set with no error.
+func (c *Client) ClusterClaimedVolumes(ctx context.Context, guests []NodeVMID) (map[string]bool, error) {
+	if guests == nil {
+		return nil, fmt.Errorf("cluster claimed volumes: a nil guest list is refused (a non-nil empty slice is a genuinely zero-QEMU cluster; nil is a dropped enumeration error)")
+	}
+	claimed := make(map[string]bool)
+	for _, g := range guests {
+		vmClaimed, err := c.ClaimedVolumes(ctx, g.Node, g.VMID)
+		if err != nil {
+			return nil, fmt.Errorf("cluster claimed volumes: node %q vmid %d: %w", g.Node, g.VMID, err)
+		}
+		for volid := range vmClaimed {
+			claimed[volid] = true
+		}
+	}
+	return claimed, nil
 }
 
 // narrowToVMIDPrefix keeps only the orphans whose volid matches vmid's
@@ -586,6 +658,60 @@ func (c *Client) OrphanVolumesForVMIDWithVMList(ctx context.Context, node, stora
 	orphans, err := c.OrphanVolumesWithVMList(ctx, node, storage, completeVMIDs)
 	if err != nil {
 		return nil, fmt.Errorf("orphan volumes for vmid %d: %w", vmid, err)
+	}
+	return narrowToVMIDPrefix(orphans, storage, vmid), nil
+}
+
+// OrphanVolumesClusterForVMID is the CLUSTER-WIDE, destructive-safe twin of
+// OrphanVolumesForVMIDWithVMList (U-CWCV §3): it narrows to vmid's
+// "<storage>:vm-<vmid>-" convention the orphans diffed against a CLUSTER-WIDE
+// claimed set (ClusterClaimedVolumes over the node-carrying clusterGuests),
+// NOT a single node's VM list. It is the entrypoint the free's Op
+// (idempotent.VolumeFreeOrphans) calls for SHARED storage, and it is DELIBER-
+// ATELY NOT satisfiable by the node-scoped OrphanVolumesForVMIDWithVMList: the
+// node-scoped claimed set cannot see a volume on shared storage claimed by a VM
+// on another node, so freeing against it deletes that live VM's disk.
+//
+// Unlike the node-scoped twins it does NOT call refuseIfShared — the whole
+// point is that a cluster-wide claimed set is correct on shared storage. Its
+// content listing is read from the bound node's view (storageContentWithType);
+// a shared storage's content is identical cluster-wide, so one node's view
+// suffices for the ACTUAL side.
+//
+// clusterGuests: a nil slice is REFUSED (a dropped enumeration error), exactly
+// as ClusterClaimedVolumes refuses one; a non-nil empty slice is a genuinely
+// zero-QEMU cluster. The caller (storage free-orphans) MUST build clusterGuests
+// with ClusterQemuPairs (QEMU-only, membership-cross-checked against the online
+// node set) under the quorum gate, and MUST NOT reach this on shared storage
+// until the cross-node API-proxy proof passes (§2 merge gate) — this function
+// reads /nodes/{other}/… through the bound host and trusts the answer is that
+// other node's own config.
+//
+// CONDITIONAL closure, same honesty posture as OrphanVolumesWithVMList: the
+// quorate-but-stale short list and whole-node-omission are NOT closed here —
+// they are the caller's quorum gate + warning and the follow-on task
+// pveforge-cluster-free-stale-shortlist-completeness.
+func (c *Client) OrphanVolumesClusterForVMID(ctx context.Context, node, storage string, vmid int, clusterGuests []NodeVMID) ([]*proxmox.StorageContent, error) {
+	if node == "" || storage == "" {
+		return nil, fmt.Errorf("orphan volumes (cluster) for vmid %d: node and storage are required", vmid)
+	}
+	if clusterGuests == nil {
+		return nil, fmt.Errorf("orphan volumes (cluster) for vmid %d: a nil cluster guest list is refused (nil is a dropped enumeration error; a non-nil empty slice is a genuinely zero-QEMU cluster)", vmid)
+	}
+
+	actual, err := c.storageContentWithType(ctx, node, storage)
+	if err != nil {
+		return nil, fmt.Errorf("orphan volumes (cluster) for vmid %d: get storage content on %q/%q: %w", vmid, node, storage, err)
+	}
+
+	claimed, err := c.ClusterClaimedVolumes(ctx, clusterGuests)
+	if err != nil {
+		return nil, fmt.Errorf("orphan volumes (cluster) for vmid %d: %w", vmid, err)
+	}
+
+	orphans, err := orphansFromClaimed(actual, claimed)
+	if err != nil {
+		return nil, fmt.Errorf("orphan volumes (cluster) for vmid %d: %w", vmid, err)
 	}
 	return narrowToVMIDPrefix(orphans, storage, vmid), nil
 }
