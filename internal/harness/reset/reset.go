@@ -261,6 +261,14 @@ func (d *Driver) reset(ctx context.Context) error {
 	}
 	d.step("the goldens are one point: stamp " + state[VMIDs[0]].stamp)
 	// Hard stop, nodes before storage, each not already stopped; then confirm.
+	// The status read is inherited from hack/harness/reset.sh, which this file
+	// ports; that shape was chosen before B2 was answered. It is the skip
+	// predicate and nothing else — st decides whether to POST a stop and is
+	// not used again. confirmStopped does its own, separate status read, and
+	// that is what proves the stop and what narrates it. B2's answer
+	// (pve.StopVM's doc: a stop on an already-stopped VM returned an OK no-op
+	// in the one run observed) means this read is not load-bearing for
+	// correctness. It STAYS: do not delete it on that basis.
 	for _, vmid := range stopOrder {
 		st, err := d.status(ctx, vmid)
 		if err != nil {
