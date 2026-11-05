@@ -17,13 +17,16 @@ func NetworkUPID(node, iface string) string {
 }
 
 // hitLog records every request a scripted server received: its endpoint
-// ("METHOD path", Hits) and, for every request but a GET, what it carried
-// (Writes). Endpoints and order alone do not prove a payload: a stage that
-// sent the wrong value to the right path would pass a Hits check.
+// ("METHOD path", Hits), for every request but a GET what it carried
+// (Writes), and — GETs included — the whole thing with its query string
+// (Requests). Endpoints and order alone do not prove a payload: a stage that
+// sent the wrong value to the right path would pass a Hits check, and a READ
+// specified as a query is invisible to both Hits and Writes.
 type hitLog struct {
-	mu     sync.Mutex
-	hits   []string
-	writes []string
+	mu       sync.Mutex
+	hits     []string
+	writes   []string
+	requests []string
 }
 
 func (l *hitLog) add(r *http.Request) {
@@ -33,6 +36,7 @@ func (l *hitLog) add(r *http.Request) {
 	}
 	l.mu.Lock()
 	l.hits = append(l.hits, r.Method+" "+r.URL.Path)
+	l.requests = append(l.requests, describeWrite(r))
 	if r.Method != http.MethodGet {
 		l.writes = append(l.writes, write)
 	}
@@ -67,6 +71,26 @@ func (l *hitLog) Writes() []string {
 	defer l.mu.Unlock()
 	out := make([]string, len(l.writes))
 	copy(out, l.writes)
+	return out
+}
+
+// Requests returns every request received so far — GETs INCLUDED — in
+// arrival order, rendered as describeWrite renders a write: the method, a
+// space, the path, then " ?" and the query string re-encoded with its keys
+// SORTED, then the body for a write. Sorted keys make the rendering
+// order-independent, so a test asserts one literal rather than a permutation.
+//
+// It exists because Hits() deliberately drops the query string and Writes()
+// deliberately omits GETs, so neither can hold a READ's parameters to
+// account. A determination specified as a query — "the request carries
+// source=all, vmid=<V>, an explicit positive limit and since=0" — needs this
+// one. Hits() and Writes() are unchanged: four other packages assert on their
+// exact shapes.
+func (l *hitLog) Requests() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.requests))
+	copy(out, l.requests)
 	return out
 }
 
