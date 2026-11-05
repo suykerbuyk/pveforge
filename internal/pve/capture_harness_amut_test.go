@@ -119,56 +119,6 @@ func TestUPIDSpelling(t *testing.T) {
 	})
 }
 
-// item 69/70: FindTaskUPID filters on TYPE AND id, so a qmstart sharing the id
-// is never mistaken for the qmcreate.
-func TestFindTaskUPID_TypeAndID(t *testing.T) {
-	// Both a qmcreate and a qmstart for id 150; the create is OLDER.
-	rows := []map[string]any{
-		{"upid": "UPID:pvh-n1:0001:0002:66AC0000:qmcreate:150:root@pam:", "type": "qmcreate", "id": "150", "starttime": 1000},
-		{"upid": "UPID:pvh-n1:0003:0004:66AC0005:qmstart:150:root@pam:", "type": "qmstart", "id": "150", "starttime": 2000},
-	}
-	body, _ := json.Marshal(map[string]any{"data": rows})
-	c := amutClient(t, "200 OK", string(body))
-
-	got, err := c.FindTaskUPID(context.Background(), "pvh-n1", "qmcreate", "150", 0)
-	if err != nil {
-		t.Fatalf("FindTaskUPID: %v", err)
-	}
-	if got != "UPID:pvh-n1:0001:0002:66AC0000:qmcreate:150:root@pam:" {
-		t.Errorf("got %q, want the qmcreate row (not the qmstart with the same id)", got)
-	}
-
-	// No qmcreate present → an error, never a silent wrong pick.
-	only := []map[string]any{{"upid": "UPID:pvh-n1:0003:0004:66AC0005:qmstart:150:root@pam:", "type": "qmstart", "id": "150", "starttime": 2000}}
-	b2, _ := json.Marshal(map[string]any{"data": only})
-	if _, err := amutClient(t, "200 OK", string(b2)).FindTaskUPID(context.Background(), "pvh-n1", "qmcreate", "150", 0); err == nil {
-		t.Error("want an error when no qmcreate matches")
-	}
-}
-
-// A `since` window excludes a STALE qmcreate (a reused id from an earlier run)
-// and keeps the one in this run's create window.
-func TestFindTaskUPID_SinceWindow(t *testing.T) {
-	rows := []map[string]any{
-		{"upid": "UPID:pvh-n1:00AA:00BB:66000000:qmcreate:150:root@pam:", "type": "qmcreate", "id": "150", "starttime": 500},  // stale, before the window
-		{"upid": "UPID:pvh-n1:00CC:00DD:66AC0000:qmcreate:150:root@pam:", "type": "qmcreate", "id": "150", "starttime": 1500}, // this run
-	}
-	body, _ := json.Marshal(map[string]any{"data": rows})
-	got, err := amutClient(t, "200 OK", string(body)).FindTaskUPID(context.Background(), "pvh-n1", "qmcreate", "150", 1000)
-	if err != nil {
-		t.Fatalf("FindTaskUPID: %v", err)
-	}
-	if got != "UPID:pvh-n1:00CC:00DD:66AC0000:qmcreate:150:root@pam:" {
-		t.Errorf("got %q, want the in-window qmcreate (not the stale one before since)", got)
-	}
-	// If ONLY the stale row exists and the window excludes it → an error.
-	stale := []map[string]any{rows[0]}
-	sb, _ := json.Marshal(map[string]any{"data": stale})
-	if _, err := amutClient(t, "200 OK", string(sb)).FindTaskUPID(context.Background(), "pvh-n1", "qmcreate", "150", 1000); err == nil {
-		t.Error("want an error when the only qmcreate is before the since window")
-	}
-}
-
 // item 69: exitstatus is WARNINGS only when it is EXACTLY `WARNINGS: <n>`.
 func TestCaptureTaskExitStatus(t *testing.T) {
 	ctx := context.Background()

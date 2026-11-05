@@ -140,45 +140,6 @@ func (sp *UPIDSpelling) Check(exp ExpectUPID) error {
 	return nil
 }
 
-// taskRow is one row of PVE's task list (GET /nodes/{node}/tasks).
-type taskRow struct {
-	UPID      string `json:"upid"`
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	StartTime int64  `json:"starttime"`
-}
-
-// FindTaskUPID recovers one task's UPID from PVE's task list by TYPE AND id —
-// the item-69/70 qmcreate recovery (vm create prints no UPID, vm.go:306). It
-// filters on BOTH type and id, never id alone: a qmstart shares the id of the
-// qmcreate, so "the UPID whose id is <vmid>" could be the start. `since` (unix
-// seconds, 0 = ignore) bounds the create window. Of the matches it returns the
-// newest; zero matches is an error.
-func (c *Client) FindTaskUPID(ctx context.Context, node, taskType, wantID string, since int64) (string, error) {
-	raw, err := c.RawRequest(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/tasks", url.PathEscape(node)), nil)
-	if err != nil {
-		return "", fmt.Errorf("find %s task for id %q on %q: %w", taskType, wantID, node, err)
-	}
-	var rows []taskRow
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		return "", fmt.Errorf("find %s task for id %q on %q: task list shape: %w", taskType, wantID, node, err)
-	}
-	best := taskRow{}
-	found := false
-	for _, r := range rows {
-		if r.Type != taskType || r.ID != wantID || r.StartTime < since {
-			continue
-		}
-		if !found || r.StartTime > best.StartTime {
-			best, found = r, true
-		}
-	}
-	if !found {
-		return "", fmt.Errorf("find %s task for id %q on %q: no matching task (type AND id)", taskType, wantID, node)
-	}
-	return best.UPID, nil
-}
-
 // ---- item 69: CaptureTaskExitStatus -------------------------------------
 
 // TaskExitStatus is one item-69 capture read from PVE's OWN task-status
