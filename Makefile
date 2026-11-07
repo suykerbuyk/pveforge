@@ -62,6 +62,48 @@ test: ## Run unit tests (race detector + coverage — this project's standing ve
 .PHONY: check
 check: lint test ## Everything CI runs: lint (module hygiene, gofmt, vet) then the unit tests
 
+# test-harness is deliberately NOT a prerequisite of `check`.
+#
+# `make check` is CI's contract: .github/workflows/ci.yml runs `make check` and
+# `make vuln` and nothing else, and docs/prd.md and README.md both say so.
+# Folding the harness-tagged tests into `check` would change what CI runs,
+# which is the operator's decision, not a side effect of adding a gate. The
+# hole still closes: `make gate` runs this target inside the clean export.
+#
+# The package set is DERIVED from two constraints, never a hard-coded name:
+#   (1) packages whose test-file set grows under -tags harness, i.e. the
+#       packages that actually have harness-tagged tests; and
+#   (2) minus those whose tagged tests import internal/harness, because that
+#       is harness.Open, whose TestMain refuses to skip without a live nested
+#       cluster (that set is `make harness`'s job, not this one).
+# A name anchored at a package path rots the first time a tagged test is added
+# beside internal/harness/suites; these two constraints do not.
+#
+# Every counting grep is its own statement: a `grep` that matches nothing exits
+# 1, and chaining one with && has produced both a false green and a false red
+# in this repository.
+.PHONY: test-harness
+test-harness: ## Run the harness-tagged tests that need no nested cluster (the landing gate runs these; `check` deliberately does not — see the comment above)
+	@set -e; \
+	tagged=$$(mktemp); plain=$$(mktemp); tmp=$$(mktemp); bound=$$(mktemp); have=$$(mktemp); scope=$$(mktemp); \
+	trap 'rm -f "$$tagged" "$$plain" "$$tmp" "$$bound" "$$have" "$$scope"' EXIT; \
+	go list -tags harness -f '{{.ImportPath}} {{len .TestGoFiles}} {{len .XTestGoFiles}}' ./... > "$$tagged"; sort -o "$$tagged" "$$tagged"; \
+	go list               -f '{{.ImportPath}} {{len .TestGoFiles}} {{len .XTestGoFiles}}' ./... > "$$plain";  sort -o "$$plain"  "$$plain"; \
+	comm -23 "$$tagged" "$$plain" > "$$tmp"; \
+	awk '{print $$1}' "$$tmp" > "$$have"; \
+	go list -tags harness -f '{{.ImportPath}} {{join .TestImports ","}},{{join .XTestImports ","}}' ./... > "$$tmp"; \
+	awk '$$2 ~ /github\.com\/suykerbuyk\/pveforge\/internal\/harness(,|$$)/ {print $$1}' "$$tmp" > "$$bound"; \
+	grep -vxF -f "$$bound" "$$have" > "$$scope" || true; \
+	n=$$(wc -l < "$$scope"); \
+	echo "test-harness: packages=$$n"; \
+	cat "$$scope"; \
+	if [ "$$n" -eq 0 ]; then echo "test-harness: no package has harness-tagged tests - the derivation is broken"; exit 1; fi; \
+	go test -tags harness -count=1 -p 1 $$(cat "$$scope")
+
+.PHONY: gate
+gate: ## Run the full landing gate on a clean export of the WORKTREE (not the index) — see hack/gate/clean-export.sh
+	hack/gate/clean-export.sh
+
 .PHONY: integration
 integration: ## Run integration-tagged tests (none exist yet — this project's live-host verification has so far been manual, ad-hoc SSH probes against a real PVE cluster, never wired into `go test`; kept as a placeholder so a future -tags=integration test file needs no Makefile change)
 	@if [ -z "$$(grep -rl --include='*.go' 'go:build integration\|+build integration' $(GO_DIRS) 2>/dev/null)" ]; then \

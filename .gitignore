@@ -5,6 +5,17 @@
 /.grok/
 /.vibe-palace/
 
+# Agent scratch, never committed. Both were un-ignored until the landing gate
+# was mechanized, and `git add -A` therefore swept them into every clean
+# export: .build holds the chair's and implementors' briefs, plans and logs
+# (519 files / 4.8 MB when this was measured), and .wt is where a unit
+# worktree is created, which `git add -A` records as a gitlink no file-count
+# assertion can see. hack/gate/clean-export.sh asserts the exported tree's
+# top-level entries against a literal allowlist as well — these two rules are
+# the prevention, that assertion is the separate observer.
+/.build/
+/.wt/
+
 # Go
 /bin/
 /dist/

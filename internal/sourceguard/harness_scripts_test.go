@@ -23,6 +23,23 @@ import (
 
 const harnessDir = "../../hack/harness"
 
+// hackDir is the root of the SCRIPT SCAN below, and of nothing else.
+//
+// harnessDir stays what it is: it is not a walk root but the base of 26 path
+// joins across this package (lib.sh, README.md, test/fake-*.sh, build/env.sh,
+// the .env.example files, evidence.sh, stage14-destructive-proof.sh, and
+// filepath.Join(harnessDir, "..", "..") in harness_nested_test.go, which
+// reaches the repository root). Repointing it at hack/ would break every one
+// of them, and would climb to the repository's PARENT in that last case.
+//
+// Only TestHarnessScripts_ParseAndHideNoFailure's walk moves here, because it
+// joins nothing and is the scan that runs `bash -n` and the failure-hiding
+// checks, so it is where a new script outside hack/harness has to be covered.
+// harnessReadmeScripts' walk stays on harnessDir: its caller has already read
+// filepath.Join(harnessDir, "README.md"), and the README's script map has no
+// reason to see hack/gate/.
+const hackDir = "../../hack"
+
 var (
 	// local x=$(...) takes local's status, never the command's.
 	localSubst = regexp.MustCompile(`(?m)^\s*local\s+[A-Za-z_][A-Za-z0-9_]*=\$\(`)
@@ -32,7 +49,7 @@ var (
 
 func TestHarnessScripts_ParseAndHideNoFailure(t *testing.T) {
 	var scripts []string
-	err := filepath.WalkDir(harnessDir, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(hackDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -46,9 +63,9 @@ func TestHarnessScripts_ParseAndHideNoFailure(t *testing.T) {
 	}
 	// Anti-vacuity: the walk found the scripts it must.
 	have := strings.Join(scripts, "\n")
-	for _, want := range []string{"hack/harness/lib.sh", "hack/harness/test/fake-pveforge.sh"} {
+	for _, want := range []string{"hack/harness/lib.sh", "hack/harness/test/fake-pveforge.sh", "hack/gate/clean-export.sh"} {
 		if !strings.Contains(have, want) {
-			t.Fatalf("%s not found under %s; found:\n%s", want, harnessDir, have)
+			t.Fatalf("%s not found under %s; found:\n%s", want, hackDir, have)
 		}
 	}
 	for _, s := range scripts {
