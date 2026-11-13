@@ -193,7 +193,7 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
 
       pveforge bootstrap qa-pve-07 --roster ./pveforge.toml --reprovisioned \
         --host-key-fingerprint SHA256:<console> --grant /:PVEVMAdmin::1
-      pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml \
+      pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-qa-pve-07-outer.toml \
         --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console> \
         --token-owner pveforge-harness@pve --token-id build --grant …
 

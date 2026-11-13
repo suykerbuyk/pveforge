@@ -280,9 +280,12 @@ harness_init() {
 
 	local dir=$HOME/.config/pveforge
 	# Host-keyed so N hypervisors coexist on one workstation (no un-keyed
-	# fallback: that collision is what the keying closes).
+	# fallback: that collision is what the keying closes). The refusal below
+	# names the keying and the pre-b21c9c2 un-keyed name; its text is pinned by
+	# the "roster refusal ..." rows of outerInvariantCases, and "never read" is
+	# a literal part of that contract.
 	local roster=$dir/harness-${HARNESS_NODE}-outer.toml
-	[ -f "$roster" ] || _harness_die 2 "the harness roster $roster does not exist"
+	[ -f "$roster" ] || _harness_die 2 "the harness roster $roster does not exist (the name is host-keyed from OUTER_NODE=$HARNESS_NODE in $HARNESS_OUTER_ENV: harness-<OUTER_NODE>-outer.toml. Before b21c9c2 the roster was the un-keyed harness-outer.toml, which is never read and is not a fallback. To migrate, the operator copies that file (cp -p, mode 0600 preserved) to the host-keyed name in their own terminal; the copy is a one-time migration step, not a fallback)"
 	local mode
 	mode=$("$HARNESS_TOOL_STAT" -c %a "$roster") || _harness_die 2 "cannot read the mode of $roster"
 	[ "$mode" = 600 ] || _harness_die 2 "the harness roster $roster has mode $mode, want 600"

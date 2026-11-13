@@ -11,7 +11,7 @@
 #            and qa-pve-07's pinned host key (from D5_PIN_ROSTER's
 #            qa-pve-07 target) is one of the keys the host serves. When all
 #            pass, the P0 baseline (ACL list, roles, users, groups, pools) is
-#            written once to ~/.config/pveforge/harness-outer.p0, never
+#            written once to ~/.config/pveforge/harness-<OUTER_NODE>-outer.p0, never
 #            overwritten.
 #   roles    after steps 1-4: V0 and L1b.
 #   owner    after steps 5-6: the pool exists and is empty; the user exists,

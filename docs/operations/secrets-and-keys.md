@@ -188,7 +188,7 @@ none"). `roster pin-tls` pins it without touching its token.
   you verified by other means:
 
   ```
-  pveforge roster pin-tls qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml --expect sha256//<verified-pin>
+  pveforge roster pin-tls qa-pve-07-harness --roster ~/.config/pveforge/harness-qa-pve-07-outer.toml --expect sha256//<verified-pin>
   ```
 
   The address must serve exactly that key, and the pin is written with source
@@ -236,7 +236,7 @@ installed keypair and the TLS pin together, then mints a fresh token.
 
    ```
    pveforge bootstrap qa-pve-07 --roster ./pveforge.toml --reprovisioned --host-key-fingerprint SHA256:<console-value> --grant /:PVEVMAdmin::1
-   pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console-value> --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0'
+   pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-qa-pve-07-outer.toml --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console-value> --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0'
    ```
 
    The grants must be exactly the held token's, since grants that differ are
@@ -389,7 +389,7 @@ nothing is persisted.
   that failed) stay manual. List them, read-only:
 
   ```
-  pveforge access keys qa-pve-02 --roster ./pveforge.toml --also-roster ~/.config/pveforge/harness-outer.toml
+  pveforge access keys qa-pve-02 --roster ./pveforge.toml --also-roster ~/.config/pveforge/harness-qa-pve-07-outer.toml
   ```
 
   It reads root's `authorized_keys` and lists every `pveforge@` key, with
@@ -519,7 +519,7 @@ For every roster in use:
 
 ```
 pveforge roster validate ./pveforge.toml --require-tls-pins
-pveforge roster validate ~/.config/pveforge/harness-outer.toml --require-tls-pins
+pveforge roster validate ~/.config/pveforge/harness-qa-pve-07-outer.toml --require-tls-pins
 pveforge roster validate ~/.config/pveforge/harness-nested.toml --require-tls-pins
 ```
 
@@ -569,7 +569,8 @@ pveforge roster rekey --roster ./pveforge.toml
 **The harness rosters are one ordered pair of steps.** Their passphrase is
 also sealed in `hack/harness/secrets.age`, where the harness steps that run
 pveforge take it from. The steps built on `hack/harness/lib.sh` (probe, build, golden, reset)
-open `harness-outer.toml`; `nested.sh` opens `harness-nested.toml`, and
+open the host-keyed `harness-<OUTER_NODE>-outer.toml` (for qa-pve-07,
+`harness-qa-pve-07-outer.toml`); `nested.sh` opens `harness-nested.toml`, and
 golden and reset read it too, through acceptance. Rekeying without resealing
 breaks every step that opens a rekeyed roster,
 so do both, in this order, in your own terminal, with no harness step running
@@ -578,11 +579,16 @@ in between:
 1. Rekey both harness rosters to the same new passphrase:
 
    ```
-   pveforge roster rekey --roster ~/.config/pveforge/harness-outer.toml
+   pveforge roster rekey --roster ~/.config/pveforge/harness-qa-pve-07-outer.toml
    pveforge roster rekey --roster ~/.config/pveforge/harness-nested.toml
    ```
 
    Each prints a reminder to seal (the harness roster names are recognised).
+   Rekey the host-keyed file the harness opens. A roster still named
+   `harness-outer.toml` (the name before `b21c9c2`) is not read by the
+   harness: rekeying it instead would change a file nothing reads and leave
+   the live roster on the old passphrase. If both exist, rekey the host-keyed
+   one.
 2. Seal the new passphrase, giving the nested root password again as well:
    `seal` replaces the whole blob (procedure 7).
 

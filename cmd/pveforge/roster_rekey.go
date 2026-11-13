@@ -76,7 +76,7 @@ then seal the new passphrase into hack/harness/secrets.age.`,
 }
 
 // harnessRoster reports whether path is named like one of the nested
-// harness's rosters (harness-outer.toml, harness-nested.toml), whose
+// harness's rosters (harness-<node>-outer.toml, harness-nested.toml), whose
 // passphrase is also sealed in hack/harness/secrets.age.
 func harnessRoster(path string) bool {
 	base := filepath.Base(path)

@@ -14,7 +14,8 @@ puts them into `<cmd>`'s environment only, and a blob can hold only these two
 names:
 
 - `PVEFORGE_ROSTER_PASSPHRASE`: encrypts both harness rosters, the outer
-  `~/.config/pveforge/harness-outer.toml` (the pool token) and the nested
+  `~/.config/pveforge/harness-qa-pve-07-outer.toml` (the pool token; host-keyed
+  `harness-<OUTER_NODE>-outer.toml` since `b21c9c2`) and the nested
   `~/.config/pveforge/harness-nested.toml`.
 - `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD`: root's password on the nested
   nodes. It is a test password, never the outer one.
@@ -29,6 +30,55 @@ the nested cluster also need
 `PVEFORGE_HARNESS_OUTER_ROSTERS`, which lists the outer rosters, since the
 guard refuses any overlap with them. golden.sh and reset.sh need
 `PVEFORGE_HARNESS_ROSTER` set to the nested roster; nested.sh sets it itself.
+
+## Migrating from the pre-`b21c9c2` names
+
+Before `b21c9c2` the outer roster was `harness-outer.toml` and the P0 baseline
+`harness-outer.p0`. The harness now reads names keyed from `OUTER_NODE` in
+`harness-outer.env` (`harness-<OUTER_NODE>-outer.toml`, `harness-<OUTER_NODE>-outer.p0`),
+and it never reads the old names and never falls back to them: a missing
+host-keyed roster is refused (exit 2), and the refusal says so.
+
+To migrate, COPY the old files to the host-keyed names in your own terminal,
+preserving modes (the roster 0600, the `.p0` directory 0700). **qa-pve-07 was
+already migrated on 2026-11-05: its host-keyed copies exist, so on this host the
+copy step below must NOT be run.** Each line stands alone, uses absolute paths
+(no `cd`), and refuses visibly when its destination exists, so pasting one line
+is safe by itself. The refusal is a check followed by a copy, not an atomic
+step: run these lines only when no other pveforge process is running on this
+host (the same precondition as the cleanup below), or a concurrent writer could
+create the destination between the check and the copy:
+
+```
+if [ -e ~/.config/pveforge/harness-qa-pve-07-outer.toml ] || [ -L ~/.config/pveforge/harness-qa-pve-07-outer.toml ]; then echo "harness-qa-pve-07-outer.toml exists - stop: already migrated"; else cp -p -- ~/.config/pveforge/harness-outer.toml ~/.config/pveforge/harness-qa-pve-07-outer.toml; fi
+if [ -e ~/.config/pveforge/harness-qa-pve-07-outer.p0 ] || [ -L ~/.config/pveforge/harness-qa-pve-07-outer.p0 ]; then echo "harness-qa-pve-07-outer.p0 exists - stop: already migrated"; else cp -a -- ~/.config/pveforge/harness-outer.p0 ~/.config/pveforge/harness-qa-pve-07-outer.p0; fi
+```
+
+The roster's encrypted secret travels with the file; nothing is re-credentialled.
+Rekey, TLS re-pin and validate then act on the host-keyed file (the docs name it).
+
+Deleting the old set is a separate, later step of yours, and only when NO
+pveforge process in ANY session is still using the old roster: its `.lock` file
+and `.locks/` directory are live synchronisation paths
+(`internal/roster/writeback.go`, `internal/lock/lock.go`), and unlinking one
+while a process holds it lets a later process take a second, unrelated lock.
+Once that holds, one operation per line, absolute paths:
+
+```
+rm -rf -- ~/.config/pveforge/harness-outer.p0
+rm -f -- ~/.config/pveforge/harness-outer.toml
+rm -f -- ~/.config/pveforge/harness-outer.toml.lock
+rm -rf -- ~/.config/pveforge/harness-outer.toml.locks
+```
+
+## `PATH`
+
+`lib.sh` resolves `jq`, `grep`, `flock`, `sha256sum`, `stat`, `mktemp`, `mkdir`,
+`sleep` and `date` from `PATH` once, when it is sourced, and refuses with
+`harness: refusing: <tool> is not on PATH` (exit 2). On this workstation `jq`
+lives in `~/.local/bin`, which a scrubbed PATH (`env -i`, cron, a bare agent
+pane) leaves out. Run harness steps with your login `PATH`, or add that
+directory explicitly.
 
 ## The order
 

@@ -946,6 +946,32 @@ func outerInvariantCases(t *testing.T) []harnessCase {
 		{name: "roster is host-keyed with no fallback", outerEnv: exampleOuterEnv(t, "OUTER_NODE=qa-pve-08", "OUTER_FQDN=qa-pve-08.lab.quantum.com"),
 			plantFiles: map[string]string{"harness-outer.toml": "# planted un-keyed roster\n"},
 			body:       stdInit, wantCode: 2, wantErr: "harness-qa-pve-08-outer.toml does not exist", wantCalls: []string{}},
+		// (c2) the refusal's GUIDANCE. Same setup as (c): node qa-pve-08, the
+		// un-keyed harness-outer.toml planted. One substring per row, so a
+		// failure names the clause that went missing. "never read" is a LITERAL
+		// part of the refusal-message contract (the statement that the un-keyed
+		// file is never read / is not a fallback); the behavioural no-fallback
+		// property is pinned by (c) above, not by this text.
+		{name: "roster refusal names OUTER_NODE keying", outerEnv: exampleOuterEnv(t, "OUTER_NODE=qa-pve-08", "OUTER_FQDN=qa-pve-08.lab.quantum.com"),
+			plantFiles: map[string]string{"harness-outer.toml": "# planted un-keyed roster\n"},
+			body:       stdInit, wantCode: 2, wantErr: "OUTER_NODE=qa-pve-08", wantCalls: []string{}},
+		{name: "roster refusal names the un-keyed file", outerEnv: exampleOuterEnv(t, "OUTER_NODE=qa-pve-08", "OUTER_FQDN=qa-pve-08.lab.quantum.com"),
+			plantFiles: map[string]string{"harness-outer.toml": "# planted un-keyed roster\n"},
+			// NOT a substring of the keyed path harness-qa-pve-08-outer.toml.
+			body: stdInit, wantCode: 2, wantErr: "the un-keyed harness-outer.toml", wantCalls: []string{}},
+		{name: "roster refusal names the pre-b21c9c2 change", outerEnv: exampleOuterEnv(t, "OUTER_NODE=qa-pve-08", "OUTER_FQDN=qa-pve-08.lab.quantum.com"),
+			plantFiles: map[string]string{"harness-outer.toml": "# planted un-keyed roster\n"},
+			// "Before b21c9c2", not bare "b21c9c2": the refusal echoes $HOME, which
+			// is t.TempDir() and embeds THIS case's name, so a bare sha would be
+			// satisfied by the path alone (measured: mutant M4 survived).
+			body: stdInit, wantCode: 2, wantErr: "Before b21c9c2", wantCalls: []string{}},
+		{name: "roster refusal states the un-keyed file is never read", outerEnv: exampleOuterEnv(t, "OUTER_NODE=qa-pve-08", "OUTER_FQDN=qa-pve-08.lab.quantum.com"),
+			plantFiles: map[string]string{"harness-outer.toml": "# planted un-keyed roster\n"},
+			body:       stdInit, wantCode: 2, wantErr: "never read", wantCalls: []string{}},
+		// (c3) the other direction: a roster that EXISTS with the wrong mode is
+		// refused for its mode, and carries none of the migration guidance.
+		{name: "roster mode refusal carries no migration guidance", roster: "0644", body: stdInit, wantCode: 2,
+			wantErr: "has mode 644, want 600", wantNotErr: "OUTER_NODE=", wantCalls: []string{}},
 	}
 }
 

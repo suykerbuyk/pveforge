@@ -843,6 +843,168 @@ func TestREADME_GuideHarnessGrantsAreD5s(t *testing.T) {
 	}
 }
 
+// The operator docs' pasteable roster/P0 paths for the OUTER harness target.
+// Since b21c9c2 the harness reads host-keyed names (harness-<OUTER_NODE>-outer
+// .toml / .p0) and never the un-keyed harness-outer.toml, so a rekey, TLS
+// re-pin or validate that names the old file succeeds against a file nothing
+// reads. THE CONTRACT is literal config-dir paths: a token that starts
+// "~/.config/pveforge/" or "$HOME/.config/pveforge/" and then names a
+// harness-* file. Relative or shell-assembled spellings are out of scope. The
+// history prose that explains the old name keeps the BARE name
+// (harness-outer.toml, no config-dir prefix), which this scan never sees.
+var outerRosterPath = regexp.MustCompile(`(?:~|\$HOME)/\.config/pveforge/(harness-[A-Za-z0-9_<>-]*(?:\.[A-Za-z0-9_-]+)*)`)
+
+// The full path tokens (after the config dir), by kind. A suffixed name
+// (harness-qa-pve-07-outer.toml.old) is a different token, so it is a problem.
+var (
+	outerKeyed       = map[string]bool{"harness-qa-pve-07-outer.toml": true, "harness-qa-pve-07-outer.p0": true}
+	outerPlaceholder = map[string]bool{"harness-<OUTER_NODE>-outer.toml": true, "harness-<OUTER_NODE>-outer.p0": true}
+	outerLegacy      = map[string]bool{"harness-outer.toml": true, "harness-outer.p0": true, "harness-outer.toml.lock": true, "harness-outer.toml.locks": true}
+)
+
+// outerMigrationDoc is the ONE file that may name the generic placeholder and
+// the legacy (pre-b21c9c2) paths: its migration section copies and then
+// deletes them. Everywhere else both are problems (a generic placeholder in a
+// command is shell redirection syntax, and a legacy path is the stale object).
+// Even there a legacy path is legal only on a migration copy/cleanup LINE (its
+// trimmed text starts with "if [ -e " or "rm -"); on any other line of that
+// file, e.g. a rekey command, it is the stale object again.
+const outerMigrationDoc = "hack/harness/README.md"
+
+// outerCounts is what a file names: host-keyed outer paths, legacy paths and
+// generic placeholders (the last two only ever legal in outerMigrationDoc).
+type outerCounts struct{ keyed, legacy, placeholder int }
+
+// outerRosterProblems judges every config-dir outer token in text (file is the
+// repo-relative slash path) and counts the allowed ones by kind.
+func outerRosterProblems(file, text string) (problems []string, n outerCounts) {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		migrationLine := strings.HasPrefix(trimmed, "if [ -e ") || strings.HasPrefix(trimmed, "rm -")
+		for _, m := range outerRosterPath.FindAllStringSubmatch(line, -1) {
+			tok := strings.TrimRight(m[1], ".") // a sentence-final period is not part of the path
+			// Only roster/P0 files are in scope; harness-evidence, harness-nested.known_hosts etc. are not.
+			if !strings.Contains(tok, ".toml") && !strings.Contains(tok, ".p0") && !strings.Contains(tok, "-outer") {
+				continue
+			}
+			switch {
+			case tok == "harness-nested.toml":
+			case outerKeyed[tok]:
+				n.keyed++
+			case outerLegacy[tok] && file == outerMigrationDoc && migrationLine:
+				n.legacy++
+			case outerPlaceholder[tok] && file == outerMigrationDoc:
+				n.placeholder++
+			default:
+				problems = append(problems, fmt.Sprintf("%s: names %q, not a host-keyed outer or the nested harness path (legacy names are legal only on a migration copy/cleanup line of %s, generic names only in it)", file, tok, outerMigrationDoc))
+			}
+		}
+	}
+	return problems, n
+}
+
+// outerDocWant is the EXACT count of each kind per markdown file that carries
+// any; a scanned file absent here must carry none, and an entry here whose
+// file is not scanned fails (so neither a dropped file nor a zeroed count can
+// pass).
+var outerDocWant = map[string]outerCounts{
+	"README.md":                           {keyed: 1},
+	"docs/operations/secrets-and-keys.md": {keyed: 5},
+	"hack/harness/README.md":              {keyed: 7, legacy: 6},
+	"hack/harness/d5/sequence.md":         {keyed: 4},
+	"hack/harness/d5/revert.md":           {keyed: 1},
+}
+
+// TestREADME_OperatorDocsNameTheKeyedOuterRoster: M8. Every markdown file in
+// the repository that shows an outer roster/P0 path shows the host-keyed one.
+// The read set is DERIVED by walking the repository from its root, not listed
+// by hand: git ls-files is unavailable because the landing gate runs this in
+// an exported tree with no .git. The walk skips .git, .wt, .build, testdata
+// and vendor (worktrees and scratch copies are not the repository's docs).
+func TestREADME_OperatorDocsNameTheKeyedOuterRoster(t *testing.T) {
+	// The matcher itself, on known answers (anti-vacuity, in both directions).
+	for _, c := range []struct {
+		name, file, text string
+		wantProblems     int
+		want             outerCounts
+	}{
+		{"keyed roster", "README.md", "--roster ~/.config/pveforge/harness-qa-pve-07-outer.toml --x", 0, outerCounts{keyed: 1}},
+		{"keyed roster, sentence-final period", "README.md", "see ~/.config/pveforge/harness-qa-pve-07-outer.toml.", 0, outerCounts{keyed: 1}},
+		{"keyed p0 directory", "README.md", "in `~/.config/pveforge/harness-qa-pve-07-outer.p0/` once", 0, outerCounts{keyed: 1}},
+		{"un-keyed roster", "README.md", "--roster ~/.config/pveforge/harness-outer.toml", 1, outerCounts{}},
+		{"un-keyed roster via $HOME", "README.md", "--roster $HOME/.config/pveforge/harness-outer.toml", 1, outerCounts{}},
+		{"suffixed keyed roster (F05)", "README.md", "--roster ~/.config/pveforge/harness-qa-pve-07-outer.toml.old", 1, outerCounts{}},
+		{"suffixed keyed p0 (F05)", "README.md", "~/.config/pveforge/harness-qa-pve-07-outer.p0.bak", 1, outerCounts{}},
+		{"another host's keyed name", "README.md", "~/.config/pveforge/harness-qa-pve-09-outer.toml", 1, outerCounts{}},
+		{"bare history prose is out of scope", "README.md", "the name before b21c9c2 was harness-outer.toml", 0, outerCounts{}},
+		// C03: the generic placeholder, both ways.
+		{"placeholder in a command elsewhere", "README.md", "--roster ~/.config/pveforge/harness-<OUTER_NODE>-outer.toml", 1, outerCounts{}},
+		{"placeholder in the migration doc", outerMigrationDoc, "`~/.config/pveforge/harness-<OUTER_NODE>-outer.toml`", 0, outerCounts{placeholder: 1}},
+		// Legacy paths, both ways, and their sidecars / directory forms.
+		{"legacy roster in a migration copy line", outerMigrationDoc, "if [ -e ~/.config/pveforge/harness-qa-pve-07-outer.toml ]; then echo x; else cp -p -- ~/.config/pveforge/harness-outer.toml x; fi", 0, outerCounts{keyed: 1, legacy: 1}},
+		{"legacy roster in a rekey line of the migration doc", outerMigrationDoc, "pveforge roster rekey --roster ~/.config/pveforge/harness-outer.toml", 1, outerCounts{}},
+		{"legacy roster in an indented rekey line of the migration doc", outerMigrationDoc, "   pveforge roster rekey --roster ~/.config/pveforge/harness-outer.toml", 1, outerCounts{}},
+		{"legacy lock sidecar elsewhere", "docs/x.md", "rm ~/.config/pveforge/harness-outer.toml.lock", 1, outerCounts{}},
+		{"legacy locks dir elsewhere", "docs/x.md", "rm -rf ~/.config/pveforge/harness-outer.toml.locks", 1, outerCounts{}},
+		{"legacy p0 directory elsewhere", "docs/x.md", "~/.config/pveforge/harness-outer.p0/", 1, outerCounts{}},
+		{"legacy p0 child elsewhere", "docs/x.md", "~/.config/pveforge/harness-outer.p0/acl.json", 1, outerCounts{}},
+		{"legacy lock sidecar in a migration rm line", outerMigrationDoc, "rm -f -- ~/.config/pveforge/harness-outer.toml.lock", 0, outerCounts{legacy: 1}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, n := outerRosterProblems(c.file, c.text)
+			if len(p) != c.wantProblems || n != c.want {
+				t.Errorf("got %d problems %v, counts %+v; want %d, %+v", len(p), p, n, c.wantProblems, c.want)
+			}
+		})
+	}
+
+	// The docs: every markdown file, found by walking the repository.
+	skip := map[string]bool{".git": true, ".wt": true, ".build": true, "testdata": true, "vendor": true}
+	scanned := map[string]bool{}
+	err := filepath.WalkDir("../..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// Every dot-directory below the root (.agents, .claude, .github...)
+			// is tooling state, not the repository's docs; the root itself is "..".
+			if (path != "../.." && strings.HasPrefix(d.Name(), ".")) || skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		rel, err := filepath.Rel("../..", path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		scanned[rel] = true
+		problems, got := outerRosterProblems(rel, string(b))
+		for _, p := range problems {
+			t.Error(p)
+		}
+		if want := outerDocWant[rel]; got != want {
+			t.Errorf("%s: outer path counts %+v, want exactly %+v", rel, got, want)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel := range outerDocWant {
+		if !scanned[rel] {
+			t.Errorf("%s is expected to carry outer paths but was not scanned: the walk is not seeing it", rel)
+		}
+	}
+}
+
 // TestREADME_GuideRootGrantsPropagate: in the guide, every grant on "/" keeps
 // propagate 1. Its only such grant is the live token's (PVEVMAdmin on /,
 // propagate 1), and the same grant without ::1 reads as too wide, a verdict

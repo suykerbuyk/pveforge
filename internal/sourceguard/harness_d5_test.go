@@ -871,7 +871,7 @@ func TestD5Sequence_MatchesTheFixtures(t *testing.T) {
 	if !strings.Contains(text, `echo "E=$E"`) {
 		t.Error("G0 does not print the evidence path for the operator's G4 terminal")
 	}
-	for _, flag := range []string{"bootstrap qa-pve-07-harness ", "--roster ~/.config/pveforge/harness-outer.toml ", "--node qa-pve-07 ", "--no-ssh-key ", `--host-key-fingerprint "$PIN" `, "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
+	for _, flag := range []string{"bootstrap qa-pve-07-harness ", "--roster ~/.config/pveforge/harness-qa-pve-07-outer.toml ", "--node qa-pve-07 ", "--no-ssh-key ", `--host-key-fingerprint "$PIN" `, "--token-owner pveforge-harness@pve ", "--token-id build ", "-o json "} {
 		if !strings.Contains(boot, flag) {
 			t.Errorf("bootstrap line lacks %q", flag)
 		}

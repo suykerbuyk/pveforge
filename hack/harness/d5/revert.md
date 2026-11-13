@@ -67,8 +67,9 @@ ssh -o BatchMode=yes root@qa-pve-07.lab.quantum.com 'pveum role delete ForgeHarn
 ## R7: the roster entry, by hand
 
 Delete the `qa-pve-07-harness` `[[targets]]` entry, its `[targets.token]` block
-included, from `~/.config/pveforge/harness-outer.toml`. No pveforge command
-removes a target.
+included, from `~/.config/pveforge/harness-qa-pve-07-outer.toml`. No pveforge command
+removes a target. If a pre-`b21c9c2` `harness-outer.toml` copy still exists,
+remove the entry from it too, so neither copy carries a dead token.
 
 ## R-V: back to P0
 

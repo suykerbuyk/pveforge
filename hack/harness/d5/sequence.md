@@ -48,7 +48,7 @@ When K1 passes it prints `PIN host_key_fingerprint=SHA256:…`: the fingerprint
 it verified. G4 passes that exact value to bootstrap, so the outer root
 password is never sent to a host K1 did not verify.
 When every check passes it writes the P0 baseline to
-`~/.config/pveforge/harness-outer.p0/` once.
+`~/.config/pveforge/harness-qa-pve-07-outer.p0/` once.
 
 STOP. Evidence: `$E/g0/`, and the P0 baseline.
 
@@ -113,7 +113,8 @@ read from `PVEFORGE_PVE_PASSWORD` or a terminal prompt. It never reaches an
 agent. The secret of the new token stays inside pveforge.
 
 `roster init` does not create the directory (G0 did), and refuses an existing
-file: check `~/.config/pveforge/harness-outer.toml` is absent first. First set
+file: check `~/.config/pveforge/harness-qa-pve-07-outer.toml` is absent first (lib.sh reads
+that host-keyed name; a pre-`b21c9c2` `harness-outer.toml` is not read). First set
 `E` in this terminal to the value G0 printed (`E=…`), so the result lands with
 the other gates' evidence, and `PIN` to the fingerprint G0's K1 printed
 (`PIN=SHA256:…`, copied exactly). Bootstrap checks qa-pve-07's host key
@@ -121,8 +122,8 @@ against it before the password is sent (`--host-key-fingerprint`), and refuses
 any other key.
 
 ```
-pveforge roster init ~/.config/pveforge/harness-outer.toml
-pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-outer.toml --host qa-pve-07.lab.quantum.com --node qa-pve-07 --insecure-tls --pve-user root@pam --no-ssh-key --host-key-fingerprint "$PIN" --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0' -o json > "$E/g4-bootstrap.json"
+pveforge roster init ~/.config/pveforge/harness-qa-pve-07-outer.toml
+pveforge bootstrap qa-pve-07-harness --roster ~/.config/pveforge/harness-qa-pve-07-outer.toml --host qa-pve-07.lab.quantum.com --node qa-pve-07 --insecure-tls --pve-user root@pam --no-ssh-key --host-key-fingerprint "$PIN" --token-owner pveforge-harness@pve --token-id build --grant '/pool/pveforge-harness:ForgeHarness:Pool.Audit,VM.Allocate,VM.Audit,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,VM.Snapshot:0' --grant '/storage/pveforge-harness:ForgeHarnessSpace:Datastore.AllocateSpace,Datastore.Audit:0' --grant '/storage/local:ForgeHarnessIso:Datastore.Audit:0' --grant '/sdn/zones/localnetwork/vmbr0:ForgeHarnessNet:SDN.Use:0' -o json > "$E/g4-bootstrap.json"
 ```
 
 Its stdout carries no secret. The gate: `token_outcome` is `minted`,
