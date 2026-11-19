@@ -233,6 +233,30 @@ type harnessCase struct {
 	// skipUnlessLocale skips the case, saying so, where this locale is not
 	// installed: what it tests does not arise without it.
 	skipUnlessLocale string
+	// relTool ("go" or "git") plants an executable of that name in the case's
+	// working directory and puts "." first on PATH, so `type -P` answers a
+	// relative path.
+	relTool string
+	// The fakes' answers (hack/harness/test/fake-go.sh, fake-git.sh): the whole
+	// `go version -m` output / the HEAD git prints, and their exit statuses.
+	// "" and 0 are the defaults: a clean build at HEAD.
+	goOut, gitHead string
+	goRC, gitRC    int
+	// quietGo switches the real go's telemetry off in the case's HOME: it writes
+	// counters there from a detached process, which races the TempDir cleanup.
+	quietGo bool
+	// cdLib runs the case with the harness directory as its working directory.
+	cdLib bool
+
+	// wantNoState: after the run, nothing of the harness's own exists under
+	// ~/.config/pveforge: no harness.lock, no harness-runs. A refusal before the
+	// lock leaves none.
+	wantNoState bool
+	// wantGoCalled: go.log is exactly one line, `version -m -- $PVEFORGE_BIN`.
+	wantGoCalled bool
+	// wantGitLog is git.log's exact content, "-" for "git was never run" ("" is
+	// not checked). The checkout is the repository root lib.sh lives in.
+	wantGitLog string
 
 	wantCode   int
 	wantErr    string   // stderr must contain it
@@ -276,7 +300,40 @@ func harnessPATH(t *testing.T) string {
 			dirs = append(dirs, d)
 		}
 	}
-	return strings.Join(dirs, ":")
+	return harnessFakeToolDir(t) + ":" + strings.Join(dirs, ":")
+}
+
+// harnessFakeToolDir is a directory of links named go and git to the offline
+// fakes (hack/harness/test/fake-go.sh, fake-git.sh), which lib.sh's
+// binary-provenance check runs instead of the real tools: every offline case's
+// PVEFORGE_BIN is a bash script, which real `go version -m` cannot read, and a
+// `make gate` export has no .git. With no answer files the fakes report a
+// clean build at the same revision as HEAD.
+func harnessFakeToolDir(t *testing.T, skip ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for tool, fake := range map[string]string{"go": "fake-go.sh", "git": "fake-git.sh"} {
+		if slicesContains(skip, tool) {
+			continue
+		}
+		abs, err := filepath.Abs(filepath.Join(harnessDir, "test", fake))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(abs, filepath.Join(dir, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func slicesContains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls []string) {
@@ -319,6 +376,15 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 		}
 	default:
 		if err := os.WriteFile(filepath.Join(cfg, "harness-outer.env"), []byte(c.outerEnv), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.quietGo {
+		tel := filepath.Join(home, ".config", "go", "telemetry")
+		if err := os.MkdirAll(tel, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tel, "mode"), []byte("off"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -389,7 +455,7 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 		if err := os.Mkdir(links, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for _, tool := range []string{"jq", "flock", "stat", "sha256sum", "tr", "cat", "grep", "mktemp", "mkdir"} {
+		for _, tool := range []string{"jq", "flock", "stat", "sha256sum", "tr", "cat", "grep", "mktemp", "mkdir", "sleep", "date", "bash"} {
 			if tool == c.pathWithout {
 				continue
 			}
@@ -401,7 +467,35 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 				t.Fatal(err)
 			}
 		}
-		env["PATH"] = links
+		env["PATH"] = harnessFakeToolDir(t, c.pathWithout) + ":" + links
+	}
+	if c.relTool != "" {
+		// `type -P <tool>` finds an executable of that name in the case's cwd
+		// through the relative PATH entry ".", and answers ./<tool>.
+		body := "#!/bin/sh\necho REL-" + c.relTool + "-RAN >&2\nexit 97\n"
+		if err := os.WriteFile(filepath.Join(work, c.relTool), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		env["PATH"] = ".:" + env["PATH"]
+	}
+	if c.gitHead == "-" { // git exits 0 and prints nothing
+		if err := os.WriteFile(filepath.Join(fakeDir, "git.head"), []byte("\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{"go.out": c.goOut, "git.head": c.gitHead} {
+		if body != "" && !(name == "git.head" && body == "-") {
+			if err := os.WriteFile(filepath.Join(fakeDir, name), []byte(body+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for name, rc := range map[string]int{"go.rc": c.goRC, "git.rc": c.gitRC} {
+		if rc != 0 {
+			if err := os.WriteFile(filepath.Join(fakeDir, name), []byte(fmt.Sprint(rc)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 
 	script := filepath.Join(tmp, "case.sh")
@@ -424,6 +518,9 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append(append([]string(nil), c.bashArgs...), run)...)
 	cmd.Dir = work
+	if c.cdLib {
+		cmd.Dir = filepath.Dir(lib)
+	}
 	for k, v := range env {
 		if v != "-" {
 			cmd.Env = append(cmd.Env, k+"="+v)
@@ -444,6 +541,40 @@ func runHarnessCase(t *testing.T, c harnessCase) (code int, stderr string, calls
 		for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
 			if l != "" {
 				calls = append(calls, strings.ReplaceAll(l, roster, "R"))
+			}
+		}
+	}
+	cfgDir := cfg
+	if c.wantNoState {
+		for _, n := range []string{"harness.lock", "harness-runs"} {
+			if _, err := os.Lstat(filepath.Join(cfgDir, n)); err == nil {
+				t.Errorf("%s exists after a refusal: the check must run before the lock and any state", n)
+			}
+		}
+	}
+	if c.wantGoCalled {
+		b, _ := os.ReadFile(filepath.Join(fakeDir, "go.log"))
+		if want := "version -m -- " + fake + "\n"; string(b) != want {
+			t.Errorf("go.log = %q, want %q", b, want)
+		}
+	}
+	if c.wantGitLog != "" {
+		b, err := os.ReadFile(filepath.Join(fakeDir, "git.log"))
+		switch {
+		case c.wantGitLog == "-":
+			if err == nil {
+				t.Errorf("git ran, but must not have: %q", b)
+			}
+		default:
+			root, rerr := filepath.Abs(filepath.Join(harnessDir, "..", ".."))
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if real, rerr := filepath.EvalSymlinks(root); rerr == nil {
+				root = real
+			}
+			if want := strings.ReplaceAll(c.wantGitLog, "ROOT", root) + "\n"; string(b) != want {
+				t.Errorf("git.log = %q, want %q", b, want)
 			}
 		}
 	}
@@ -977,9 +1108,16 @@ func outerInvariantCases(t *testing.T) []harnessCase {
 
 func TestHarnessLib_Offline(t *testing.T) {
 	cases := append(harnessCases(), outerInvariantCases(t)...)
-	// Anti-vacuity: the positive control and the refusals are all here.
-	if len(cases) < 150 {
-		t.Fatalf("%d harness cases, want at least 150", len(cases))
+	prov := provenanceCases()
+	cases = append(cases, prov...)
+	// Anti-vacuity: the positive control and the refusals are all here. The
+	// floor is the count with the provenance rows in (deleting rows makes a
+	// suite greener, lessons #4), and the provenance rows hold their own.
+	if len(cases) < 318 {
+		t.Fatalf("%d harness cases, want at least 318", len(cases))
+	}
+	if len(prov) < 32 {
+		t.Fatalf("%d provenance cases, want at least 32", len(prov))
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1015,5 +1153,302 @@ func TestHarnessLib_Offline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// fakeBuildInfo is `go version -m` output for a binary, in the shape the real
+// tool prints (tab-indented, "build" lines).
+func fakeBuildInfo(lines ...string) string {
+	out := "/bin/pveforge: go1.27.4\n\tpath\tgithub.com/suykerbuyk/pveforge/cmd/pveforge"
+	for _, l := range lines {
+		out += "\n\tbuild\t" + l
+	}
+	return out
+}
+
+const (
+	provRevA = "1111111111111111111111111111111111111111" // fake go's default build, and fake git's default HEAD
+	provRevB = "2222222222222222222222222222222222222222"
+)
+
+// provenanceCases pin harness_init's binary-provenance check
+// (_harness_check_binary_provenance) against the fake go and git. Every
+// refusal is exit 2, with ZERO pveforge calls and none of the harness's state
+// (no lock, no created-VM record): the check runs before either. The real
+// toolchain's side of the same contract is TestHarnessLib_ProvenanceReal.
+func provenanceCases() []harnessCase {
+	refuse := func(name, goOut string, rc int, want string) harnessCase {
+		return harnessCase{name: "provenance refuses " + name, goOut: goOut, goRC: rc, body: "harness_init\n", wantCode: 2, wantErr: want,
+			wantCalls: []string{}, wantNoState: true, wantGoCalled: true, wantGitLog: ""}
+	}
+	clean := fakeBuildInfo("vcs=git", "vcs.revision="+provRevA, "vcs.modified=false")
+	return []harnessCase{
+		refuse("a build from a modified tree", fakeBuildInfo("vcs=git", "vcs.revision="+provRevA, "vcs.modified=true"), 0, "was built from a modified tree"),
+		refuse("a build with no VCS info", fakeBuildInfo("-buildvcs=false"), 0, "carries no VCS build info"),
+		refuse("a go that cannot read the binary", clean, 1, "cannot read build info"),
+		refuse("a vcs.modified that is neither true nor false", fakeBuildInfo("vcs=git", "vcs.revision="+provRevA, "vcs.modified=maybe"), 0, "neither true nor false"),
+		refuse("a doubled vcs.modified", fakeBuildInfo("vcs.revision="+provRevA, "vcs.modified=false", "vcs.modified=false"), 0, "ambiguous VCS build info (1 vcs.revision and 2 vcs.modified"),
+		refuse("a vcs.revision with no vcs.modified", fakeBuildInfo("vcs.revision="+provRevA), 0, "ambiguous VCS build info (1 vcs.revision and 0 vcs.modified"),
+		refuse("a vcs.modified with no vcs.revision", fakeBuildInfo("vcs.modified=false"), 0, "ambiguous VCS build info (0 vcs.revision and 1 vcs.modified"),
+		refuse("a 39-digit revision", fakeBuildInfo("vcs.revision="+provRevA[:39], "vcs.modified=false"), 0, "not a 40-digit commit id"),
+		// A dirty binary is refused whether or not the revision is HEAD's.
+		{name: "provenance refuses a modified tree whose revision is not HEAD", gitHead: provRevB, goOut: fakeBuildInfo("vcs.revision="+provRevA, "vcs.modified=true"),
+			body: "harness_init\n", wantCode: 2, wantErr: "was built from a modified tree", wantNoState: true, wantCalls: []string{}},
+		// go is looked up when harness_init runs, so it refuses THERE, with the
+		// check's own text (not a source-time "go is not on PATH").
+		{name: "provenance refuses when go is missing", pathWithout: "go", body: "harness_init\n", wantCode: 2, wantErr: "the harness cannot read the build info of", wantNoState: true, wantCalls: []string{}},
+		{name: "provenance refuses a go found through a relative PATH entry", relTool: "go", body: "harness_init\n", wantCode: 2, wantErr: "which is not an absolute path: the harness will not run a go",
+			wantNotErr: "REL-go-RAN", wantNoState: true, wantCalls: []string{}},
+		// A script that sources lib.sh and never calls harness_init needs
+		// neither go nor git (stage14-like consumers).
+		{name: "sourcing lib.sh needs no go", pathWithout: "go", body: "echo SOURCED >&2\n", wantErr: "SOURCED", wantCalls: []string{}},
+		{name: "sourcing lib.sh needs no git", pathWithout: "git", body: "echo SOURCED >&2\n", wantErr: "SOURCED", wantCalls: []string{}},
+		// D1: `source lib.sh` from its own directory, set -e already active.
+		{name: "bare lib.sh sourced from its own directory under set -e", cdLib: true, env: map[string]string{"HARNESS_LIB": "lib.sh"}, pre: "set -e\n",
+			body:      "if [ \"$HARNESS_REPO_ROOT\" = \"$(cd ../.. && pwd -P)\" ]; then echo ROOT-OK >&2; else echo \"ROOT-BAD $HARNESS_REPO_ROOT\" >&2; fi\n",
+			wantErr:   "ROOT-OK",
+			wantCalls: []string{}},
+		// Clean at HEAD: no refusal, no WARN, and the comparison RAN (git was
+		// asked, of the checkout holding lib.sh, for HEAD).
+		{name: "provenance passes a clean build at HEAD", body: "harness_init\n", wantErr: "rev 111111111111;", wantNotErr: "WARN", wantCalls: []string{},
+			wantGoCalled: true, wantGitLog: "-C ROOT rev-parse HEAD"},
+		// Stale: a clean build of another commit warns and runs.
+		{name: "provenance warns, not refuses, a clean build that is not HEAD", gitHead: provRevB, body: "harness_init\necho PROCEEDED >&2\n",
+			wantErr: "built from 111111111111, but HEAD of the harness checkout is 222222222222", wantNotErr: "cannot determine HEAD", wantCalls: []string{},
+			wantGoCalled: true, wantGitLog: "-C ROOT rev-parse HEAD"},
+		{name: "provenance proceeds past a stale warning", gitHead: provRevB, body: "harness_init\necho PROCEEDED >&2\n", wantErr: "PROCEEDED", wantCalls: []string{}},
+		// Unknown HEAD warns and runs; F1: a failing git must not end the script.
+		{name: "provenance warns and runs when git fails", gitRC: 128, body: "harness_init\necho PROCEEDED >&2\n", wantErr: "cannot determine HEAD", wantNotErr: "but HEAD of the harness checkout is",
+			wantCalls: []string{}, wantGitLog: "-C ROOT rev-parse HEAD"},
+		{name: "provenance reaches the end after a failing git", gitRC: 128, body: "harness_init\necho PROCEEDED >&2\n", wantErr: "PROCEEDED", wantCalls: []string{}},
+		{name: "provenance warns and runs when git is missing", pathWithout: "git", body: "harness_init\necho PROCEEDED >&2\n", wantErr: "cannot determine HEAD", wantNotErr: "but HEAD of the harness checkout is",
+			wantCalls: []string{}, wantGitLog: "-"},
+		{name: "provenance reaches the end with git missing", pathWithout: "git", body: "harness_init\necho PROCEEDED >&2\n", wantErr: "PROCEEDED", wantCalls: []string{}},
+		{name: "provenance does not run a git found through a relative PATH entry", relTool: "git", body: "harness_init\necho PROCEEDED >&2\n",
+			wantErr: "git resolves to ./git, which is not an absolute path", wantNotErr: "REL-git-RAN", wantCalls: []string{}, wantGitLog: "-"},
+		{name: "provenance warns under a conditional caller", gitRC: 128, body: "harness_init || echo CONTINUED >&2\n", wantErr: "cannot determine HEAD", wantNotErr: "but HEAD of the harness checkout is", wantCalls: []string{}},
+		// The check CALLED DIRECTLY, without harness_init around it, so a mutant
+		// in the check cannot hide behind init's other work.
+		{name: "provenance check direct: modified tree refused", goOut: fakeBuildInfo("vcs.revision="+provRevA, "vcs.modified=true"), body: "_harness_check_binary_provenance \"$PVEFORGE_BIN\"\necho PROCEEDED >&2\n",
+			wantCode: 2, wantErr: "was built from a modified tree", wantNotErr: "PROCEEDED", wantCalls: []string{}, wantGitLog: "-"},
+		{name: "provenance check direct: no VCS info refused", goOut: fakeBuildInfo("-buildvcs=false"), body: "_harness_check_binary_provenance \"$PVEFORGE_BIN\"\necho PROCEEDED >&2\n",
+			wantCode: 2, wantErr: "carries no VCS build info", wantNotErr: "PROCEEDED", wantCalls: []string{}, wantGitLog: "-"},
+		{name: "provenance check direct: stale warns and returns", gitHead: provRevB, body: "_harness_check_binary_provenance \"$PVEFORGE_BIN\"\necho PROCEEDED >&2\n",
+			wantErr: "but HEAD of the harness checkout is 222222222222", wantCalls: []string{}},
+		{name: "provenance check direct: a failing git warns and returns", gitRC: 128, body: "_harness_check_binary_provenance \"$PVEFORGE_BIN\"\necho PROCEEDED >&2\n",
+			wantErr: "PROCEEDED", wantCalls: []string{}, wantGitLog: "-C ROOT rev-parse HEAD"},
+		// What git prints is HEAD only if it is a 40-digit commit id.
+		{name: "provenance: a git that prints non-hex is an unknown HEAD", gitHead: provRevB + "; echo X", body: "harness_init\necho PROCEEDED >&2\n",
+			wantErr: "cannot determine HEAD", wantNotErr: "but HEAD of the harness checkout is", wantCalls: []string{}, wantGitLog: "-C ROOT rev-parse HEAD"},
+		{name: "provenance: a git that exits 0 and prints nothing is an unknown HEAD", gitHead: "-", body: "harness_init\necho PROCEEDED >&2\n",
+			wantErr: "cannot determine HEAD", wantNotErr: "but HEAD of the harness checkout is", wantCalls: []string{}, wantGitLog: "-C ROOT rev-parse HEAD"},
+		// Only the BUILD lines count: a dependency line that spells vcs.modified=true is not the build's.
+		{name: "provenance reads only build lines, not a dep line naming vcs.modified=true", goOut: clean + "\n\tdep\texample.com/vcs.modified=true\tv1.0.0\n\tdep\texample.com/vcs.revision=" + provRevB + "\tv1.0.0",
+			body: "harness_init\necho PROCEEDED >&2\n", wantErr: "PROCEEDED", wantNotErr: "WARN", wantCalls: []string{}, wantGoCalled: true},
+		// A binary and HEAD that agree on the first 12 digits are still different commits.
+		{name: "provenance warns on revisions sharing their first 12 digits", gitHead: provRevA[:12] + provRevB[:28], body: "harness_init\necho PROCEEDED >&2\n",
+			wantErr: "but HEAD of the harness checkout is " + provRevA[:12], wantCalls: []string{}, wantGitLog: "-C ROOT rev-parse HEAD"},
+		// A refusal ends the script even under `if !` (set -e is off inside).
+		{name: "provenance refusal under if !", goOut: fakeBuildInfo("vcs.revision="+provRevA, "vcs.modified=true"), wantCode: 2, wantNotErr: "CONTINUED", wantNoState: true,
+			body: "if ! harness_init; then echo CONTINUED >&2; fi\necho CONTINUED >&2\n", wantCalls: []string{}},
+	}
+}
+
+// TestHarnessLib_ProvenanceReal runs the REAL harness_init, with the real go
+// and git, against binaries the real go built: what the fake rows cannot show,
+// that real `go version -m` says what the check reads. Each row builds a tiny
+// module in its own temp repository, and copies lib.sh to
+// <repo>/hack/harness/lib.sh so that repository is the checkout lib.sh calls
+// HEAD (it climbs two directories from its own file).
+func TestHarnessLib_ProvenanceReal(t *testing.T) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("go is not installed here: %v", err)
+	}
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git is not installed here: %v", err)
+	}
+	libSrc, err := filepath.Abs(filepath.Join(harnessDir, "lib.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	libBody, err := os.ReadFile(libSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakePveforge, err := filepath.Abs(filepath.Join(harnessDir, "test", "fake-pveforge.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The case's base PATH minus the fakes' directory (its first element), plus
+	// the real go and git.
+	basePATH := strings.SplitN(harnessPATH(t), ":", 2)[1]
+	realPATH := basePATH + ":" + filepath.Dir(goBin) + ":" + filepath.Dir(gitBin)
+
+	gitEnv := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	run := func(t *testing.T, dir string, env []string, name string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git := func(t *testing.T, repo string, args ...string) string {
+		t.Helper()
+		return run(t, repo, gitEnv, "git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"}, args...)...)
+	}
+	// The build env is the caller's with every Go setting that could change the
+	// result forced: an inherited GOFLAGS=-buildvcs=false or GOWORK would turn a
+	// clean row red for the wrong reason.
+	buildEnv := append(append([]string(nil), gitEnv...), "GOFLAGS=", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0")
+	write := func(t *testing.T, path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// repo makes a committed repository holding the module and lib.sh.
+	repo := func(t *testing.T) string {
+		t.Helper()
+		r := t.TempDir()
+		write(t, filepath.Join(r, "go.mod"), "module provtest\n\ngo 1.21\n")
+		write(t, filepath.Join(r, "main.go"), "package main\n\nfunc main() {}\n")
+		write(t, filepath.Join(r, "hack", "harness", "lib.sh"), string(libBody))
+		git(t, r, "init", "-q")
+		git(t, r, "add", "-A")
+		git(t, r, "commit", "-q", "-m", "c1")
+		return r
+	}
+	build := func(t *testing.T, r string, extra ...string) string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "pveforge")
+		run(t, r, buildEnv, "go", append(append([]string{"build"}, extra...), "-o", out, ".")...)
+		return out
+	}
+	// harness runs the real harness_init; refused says whether the row must
+	// leave no lock and no run record (runHarnessCase asserts it).
+	harness := func(t *testing.T, lib, bin string, refused bool) (int, string) {
+		t.Helper()
+		code, stderr, _ := runHarnessCase(t, harnessCase{name: t.Name(), env: map[string]string{"PATH": realPATH, "PVEFORGE_BIN": bin, "HARNESS_LIB": lib},
+			body: "harness_init\necho PROCEEDED >&2\n", wantNoState: refused, quietGo: true})
+		return code, stderr
+	}
+	short := func(s string) string { return s[:12] }
+
+	t.Run("clean build at HEAD proceeds with no warning", func(t *testing.T) {
+		r := repo(t)
+		bin := build(t, r)
+		head := git(t, r, "rev-parse", "HEAD")
+		code, stderr := harness(t, filepath.Join(r, "hack", "harness", "lib.sh"), bin, false)
+		if code != 0 || !strings.Contains(stderr, "PROCEEDED") || strings.Contains(stderr, "WARN") || !strings.Contains(stderr, "rev "+short(head)) {
+			t.Errorf("exit %d, want a clean proceed naming rev %s:\n%s", code, short(head), stderr)
+		}
+	})
+	t.Run("a clean build of an older commit warns and proceeds", func(t *testing.T) {
+		r := repo(t)
+		bin := build(t, r)
+		old := git(t, r, "rev-parse", "HEAD")
+		write(t, filepath.Join(r, "main.go"), "package main\n\nfunc main() { _ = 1 }\n")
+		git(t, r, "commit", "-q", "-a", "-m", "c2")
+		head := git(t, r, "rev-parse", "HEAD")
+		code, stderr := harness(t, filepath.Join(r, "hack", "harness", "lib.sh"), bin, false)
+		want := "built from " + short(old) + ", but HEAD of the harness checkout is " + short(head)
+		if code != 0 || !strings.Contains(stderr, "PROCEEDED") || !strings.Contains(stderr, want) {
+			t.Errorf("exit %d, want a proceed with %q:\n%s", code, want, stderr)
+		}
+	})
+	t.Run("an untracked file makes the build dirty and it is refused", func(t *testing.T) {
+		r := repo(t)
+		write(t, filepath.Join(r, "untracked.txt"), "x\n")
+		bin := build(t, r)
+		code, stderr := harness(t, filepath.Join(r, "hack", "harness", "lib.sh"), bin, true)
+		if code != 2 || !strings.Contains(stderr, "was built from a modified tree") || strings.Contains(stderr, "PROCEEDED") {
+			t.Errorf("exit %d, want a modified-tree refusal:\n%s", code, stderr)
+		}
+	})
+	t.Run("a tracked edit makes the build dirty and it is refused", func(t *testing.T) {
+		r := repo(t)
+		write(t, filepath.Join(r, "main.go"), "package main\n\nfunc main() { _ = 2 }\n")
+		bin := build(t, r)
+		code, stderr := harness(t, filepath.Join(r, "hack", "harness", "lib.sh"), bin, true)
+		if code != 2 || !strings.Contains(stderr, "was built from a modified tree") {
+			t.Errorf("exit %d, want a modified-tree refusal:\n%s", code, stderr)
+		}
+	})
+	t.Run("-buildvcs=false leaves no VCS info and is refused", func(t *testing.T) {
+		r := repo(t)
+		bin := build(t, r, "-buildvcs=false")
+		code, stderr := harness(t, filepath.Join(r, "hack", "harness", "lib.sh"), bin, true)
+		if code != 2 || !strings.Contains(stderr, "carries no VCS build info") || strings.Contains(stderr, "modified tree") {
+			t.Errorf("exit %d, want the no-VCS-info refusal:\n%s", code, stderr)
+		}
+	})
+	t.Run("a checkout that is not a repository warns and proceeds", func(t *testing.T) {
+		r := repo(t)
+		bin := build(t, r)
+		lib := filepath.Join(t.TempDir(), "hack", "harness", "lib.sh")
+		write(t, lib, string(libBody))
+		code, stderr := harness(t, lib, bin, false)
+		if code != 0 || !strings.Contains(stderr, "PROCEEDED") || !strings.Contains(stderr, "cannot determine HEAD") {
+			t.Errorf("exit %d, want a proceed with an unknown-HEAD warning:\n%s", code, stderr)
+		}
+	})
+	t.Run("a bash script is not a Go binary and is refused", func(t *testing.T) {
+		r := repo(t)
+		code, stderr := harness(t, filepath.Join(r, "hack", "harness", "lib.sh"), fakePveforge, true)
+		if code != 2 || !strings.Contains(stderr, "cannot read build info") {
+			t.Errorf("exit %d, want the unreadable-build-info refusal:\n%s", code, stderr)
+		}
+	})
+}
+
+// D1: lib.sh finds the checkout it lives in at source time, and where that
+// fails (here, the climb from a bare `lib.sh` crosses a directory with no
+// search permission) the root is EMPTY and the source goes on, under set -e,
+// rather than aborting: an unknown HEAD is only a warning.
+func TestHarnessLib_RepoRootUnreachableDoesNotAbortSource(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so the climb cannot be made to fail")
+	}
+	lib, err := filepath.Abs(filepath.Join(harnessDir, "lib.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	parent := filepath.Join(tmp, "p")
+	child := filepath.Join(parent, "c")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "lib.sh"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	script := filepath.Join(tmp, "case.sh")
+	src := "#!/usr/bin/env bash\ncd \"$C\"\nchmod 600 \"$P\"\nset -e\nsource lib.sh\necho \"ROOT=[${HARNESS_REPO_ROOT}]\" >&2\necho REACHED >&2\n"
+	if err := os.WriteFile(script, []byte(src), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", script)
+	cmd.Env = []string{"PATH=" + harnessPATH(t), "HOME=" + tmp, "C=" + child, "P=" + parent}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("source aborted: %v\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ROOT=[]") || !strings.Contains(stderr.String(), "REACHED") {
+		t.Errorf("want an empty root and the script reaching its end:\n%s", stderr.String())
 	}
 }

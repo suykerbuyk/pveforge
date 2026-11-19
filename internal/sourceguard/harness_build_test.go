@@ -1317,7 +1317,7 @@ func TestBuild_IgnoresInheritedHB(t *testing.T) {
 				// The build-into-cache path, with a go on PATH that "builds"
 				// the real pins tool.
 				s.env["HARNESS_PINS_BIN"] = "-"
-				s.stubs["go"] = "#!/usr/bin/env bash\n[ \"$1 $2\" = 'build -o' ] || exit 97\nmkdir -p -- \"${3%/*}\" && cp -- " + pinsTool(t) + " \"$3\"\n"
+				s.stubs["go"] = "#!/usr/bin/env bash\nif [ \"$1 $2\" = 'version -m' ]; then printf '%s\\n' \"$4: go1.27.4\" $'\\tbuild\\tvcs.revision=1111111111111111111111111111111111111111' $'\\tbuild\\tvcs.modified=false'; exit 0; fi\n[ \"$1 $2\" = 'build -o' ] || exit 97\nmkdir -p -- \"${3%/*}\" && cp -- " + pinsTool(t) + " \"$3\"\n"
 			}
 			r := runProbe(t, s)
 			if b, err := os.ReadFile(ran); err == nil {

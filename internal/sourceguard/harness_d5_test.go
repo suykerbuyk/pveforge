@@ -271,8 +271,9 @@ type d5Result struct {
 
 func d5PATH(t *testing.T, fakeBin string) string {
 	t.Helper()
-	seen := map[string]bool{fakeBin: true}
-	dirs := []string{fakeBin}
+	fakeTools := harnessFakeToolDir(t) // go and git, for the binary-provenance check in harness_init
+	seen := map[string]bool{fakeBin: true, fakeTools: true}
+	dirs := []string{fakeBin, fakeTools}
 	for _, tool := range []string{"bash", "jq", "flock", "stat", "sha256sum", "tr", "cat", "awk", "tee", "mkdir", "install", "dirname", "ssh-keygen"} {
 		p, err := exec.LookPath(tool)
 		if err != nil {

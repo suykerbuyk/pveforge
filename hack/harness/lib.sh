@@ -134,6 +134,24 @@ for harness_tool in jq grep flock sha256sum stat mktemp mkdir sleep date; do
 done
 unset harness_tool harness_tool_path
 
+# The checkout this lib.sh lives in, resolved once, now, so a later cd cannot
+# move it. It is what harness_init's provenance check calls "current HEAD". A
+# name with no slash (`source lib.sh`) is the current directory; if the climb
+# fails the root is EMPTY, which the check reports as an unknown HEAD, so this
+# step can neither abort the source under set -e nor refuse anything.
+harness_src=${BASH_SOURCE[0]}
+case $harness_src in
+*/*) harness_src_dir=${harness_src%/*} ;;
+*) harness_src_dir=. ;;
+esac
+if harness_repo_root=$(cd -- "$harness_src_dir/../.." 2>/dev/null && pwd -P); then
+	:
+else
+	harness_repo_root=
+fi
+declare -gr "HARNESS_REPO_ROOT=$harness_repo_root"
+unset harness_src harness_src_dir harness_repo_root
+
 # ---- Outer identity: read from the site file, never the environment. ----
 # A bare X= clears any inherited value (operator ruling 2026-09-24 (3)'s "never
 # taken from the environment"): read_outer_identity assigns these only from
@@ -260,6 +278,71 @@ _harness_require_args() { # function-name minimum given
 	[ "$3" -ge "$2" ] || _harness_die 2 "$1 needs at least $2 arguments"
 }
 
+# _harness_check_binary_provenance refuses a pveforge binary that corresponds
+# to no commit, from the build info the binary carries itself (go version -m),
+# and warns when that commit is not HEAD of the checkout holding lib.sh. It
+# runs before the lock and before any state is made, so a refusal leaves none.
+#   - vcs.modified=true            refuse (built from a changed or untracked tree)
+#   - no / ambiguous VCS info      refuse (-buildvcs=false, an export, not a Go
+#                                  binary): fail closed, never a silent pass
+#   - go missing or unusable       refuse
+#   - revision != HEAD             WARN only (a .wt/ worktree build is such)
+#   - HEAD unknown (no git, a failing git, not a repo)  WARN only
+# go and git are looked up HERE, not when lib.sh is sourced, so a script that
+# never calls harness_init needs neither. Sets _harness_bin_rev.
+_harness_check_binary_provenance() { # binary
+	local bin=$1 go_path git_path info line rev='' mod='' nrev=0 nmod=0 head=''
+	go_path=$(type -P go) || _harness_die 2 "go is not on PATH: the harness cannot read the build info of $bin"
+	[[ $go_path == /* ]] || _harness_die 2 "go resolves to $go_path, which is not an absolute path: the harness will not run a go found through a relative PATH entry"
+	if info=$("$go_path" version -m -- "$bin" 2>/dev/null); then
+		:
+	else
+		_harness_die 2 "cannot read build info from $bin with go version -m (not a Go binary?)"
+	fi
+	while IFS= read -r line; do
+		case $line in
+		*$'\tbuild\t'vcs.revision=*)
+			nrev=$((nrev + 1))
+			rev=${line##*vcs.revision=}
+			;;
+		*$'\tbuild\t'vcs.modified=*)
+			nmod=$((nmod + 1))
+			mod=${line##*vcs.modified=}
+			;;
+		esac
+	done <<<"$info"
+	if [ "$nrev" -eq 0 ] && [ "$nmod" -eq 0 ]; then
+		_harness_die 2 "$bin carries no VCS build info (built with -buildvcs=false, or outside a git checkout), so it corresponds to no commit: rebuild it with make build from a clean checkout"
+	fi
+	if [ "$nrev" -ne 1 ] || [ "$nmod" -ne 1 ]; then
+		_harness_die 2 "$bin carries ambiguous VCS build info ($nrev vcs.revision and $nmod vcs.modified lines, want one each): rebuild it with make build from a clean checkout"
+	fi
+	[[ $rev =~ ^[0-9a-f]{40}$ ]] || _harness_die 2 "$bin carries a vcs.revision that is not a 40-digit commit id: rebuild it with make build from a clean checkout"
+	case $mod in
+	false) ;;
+	true) _harness_die 2 "$bin was built from a modified tree (vcs.modified=true), so it corresponds to no commit: rebuild it with make build from a clean checkout" ;;
+	*) _harness_die 2 "$bin carries a vcs.modified that is neither true nor false: rebuild it with make build from a clean checkout" ;;
+	esac
+	_harness_bin_rev=$rev
+
+	# An unknown HEAD is a warning, so the lookup sits in the condition of an
+	# if: a failing git must not end the script under set -e before it warns.
+	# What git prints is taken as HEAD only if it is a 40-digit commit id.
+	if git_path=$(type -P git); then
+		if [[ $git_path != /* ]]; then
+			echo "harness: WARN: git resolves to $git_path, which is not an absolute path, so it is not run; cannot tell whether $bin is built from the current HEAD" >&2
+			return 0
+		fi
+	else
+		git_path=''
+	fi
+	if [ -n "$git_path" ] && [ -n "$HARNESS_REPO_ROOT" ] && head=$("$git_path" -C "$HARNESS_REPO_ROOT" rev-parse HEAD 2>/dev/null) && [[ $head =~ ^[0-9a-f]{40}$ ]]; then
+		[ "$head" = "$rev" ] || echo "harness: WARN: $bin is built from ${rev:0:12}, but HEAD of the harness checkout is ${head:0:12}: rebuild it with make build if that is not what you meant to run" >&2
+	else
+		echo "harness: WARN: cannot determine HEAD of the harness checkout (git missing or failing, or not a repository), so cannot tell whether $bin is built from the current HEAD" >&2
+	fi
+}
+
 # harness_init checks the environment, takes the harness lock and opens this
 # run's record of created VMs. It must run before anything reaches PVE.
 harness_init() {
@@ -275,6 +358,8 @@ harness_init() {
 	esac
 	[ -f "$bin" ] || _harness_die 2 "PVEFORGE_BIN $bin is not a file"
 	[ -x "$bin" ] || _harness_die 2 "PVEFORGE_BIN $bin is not executable"
+	_harness_bin_rev=
+	_harness_check_binary_provenance "$bin"
 	[ -n "${PVEFORGE_ROSTER_PASSPHRASE:-}" ] || _harness_die 2 "PVEFORGE_ROSTER_PASSPHRASE must be set: pveforge is never left to prompt"
 	[ -z "${PVEFORGE_PVE_PASSWORD+set}" ] || _harness_die 2 "PVEFORGE_PVE_PASSWORD is set: no harness script needs root's password"
 
@@ -307,7 +392,7 @@ harness_init() {
 
 	local sum
 	sum=$("$HARNESS_TOOL_SHA256SUM" "$bin") || _harness_die 2 "cannot hash $bin"
-	echo "harness: pveforge $bin sha256 ${sum%% *}; created-VM record $HARNESS_CREATED_FILE" >&2
+	echo "harness: pveforge $bin sha256 ${sum%% *} rev ${_harness_bin_rev:0:12}; created-VM record $HARNESS_CREATED_FILE" >&2
 	HARNESS_ROSTER=$roster || _harness_die 2 "cannot set HARNESS_ROSTER"
 	readonly PVEFORGE_BIN HARNESS_ROSTER HARNESS_LOCK_FD HARNESS_CREATED_FILE
 	HARNESS_INITIALIZED=1

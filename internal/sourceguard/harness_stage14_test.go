@@ -74,6 +74,7 @@ func runStage14(t *testing.T, outerEnv string, args ...string) (string, int, str
 		}
 	}
 	add(binDir)
+	add(harnessFakeToolDir(t)) // go and git, for the binary-provenance check in harness_init
 	for _, tool := range []string{"bash", "jq", "grep", "flock", "sha256sum", "stat", "mktemp", "mkdir", "sleep", "date", "tee", "seq", "readlink", "dirname", "timeout", "cat", "tr"} {
 		p, err := exec.LookPath(tool)
 		if err != nil {

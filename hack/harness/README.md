@@ -31,6 +31,22 @@ the nested cluster also need
 guard refuses any overlap with them. golden.sh and reset.sh need
 `PVEFORGE_HARNESS_ROSTER` set to the nested roster; nested.sh sets it itself.
 
+## The pveforge binary must be a clean build of a commit
+
+`harness_init` reads the build info the binary carries (`go version -m`) and
+refuses a `PVEFORGE_BIN` that corresponds to no commit, so the harness cannot
+run a build nobody can reproduce:
+
+- **refused (exit 2):** `vcs.modified=true` (built from a tree with a change
+  or an untracked file), no VCS info at all (`-buildvcs=false`, a build from a
+  `git archive` export, or a file that is not a Go binary), or no `go` on `PATH`;
+- **warned, and it runs:** `vcs.revision` is not `HEAD` of the checkout that
+  holds `lib.sh` (a `.wt/` worktree build is such), or that `HEAD` cannot be
+  read (no `git`, or not a repository).
+
+Build it with `make build`, from a tree with no changes and no untracked files
+(`git status` empty), then point `PVEFORGE_BIN` at `bin/pveforge`.
+
 ## Migrating from the pre-`b21c9c2` names
 
 Before `b21c9c2` the outer roster was `harness-outer.toml` and the P0 baseline
