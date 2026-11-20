@@ -27,6 +27,7 @@ func newVMCmd() *cobra.Command {
 		Short: "Inspect and modify VMs",
 	}
 	cmd.AddCommand(newVMCreateCmd())
+	cmd.AddCommand(newVMDestroyCmd())
 	cmd.AddCommand(newVMGetCmd())
 	cmd.AddCommand(newVMSetCmd())
 	cmd.AddCommand(newVMSnapshotCmd())

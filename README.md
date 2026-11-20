@@ -49,6 +49,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `access inventory` | List every user, group and ACL entry, and each `@pam` user's account on the node (read as root over SSH) |
 | `access keys` | List pveforge's SSH keys in root's `authorized_keys`, which roster holds each, and each stray's manual removal command (read-only) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
+| `vm destroy` | Destroy the VM you name and prove it is gone; re-running resolves an outcome left unknown |
 | `vm snapshot list` / `create` / `delete` / `rollback` | List, create and delete a VM's snapshots; roll back to the newest one and prove the guest came back |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
 | `network set`, `network bridge create` / `destroy` | Change node-level network interfaces |
@@ -402,6 +403,92 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 - `api post`, `put` and `delete` are refused, unless `--unsafe-no-lock` is
   given. With it, they proceed with no lock and print a warning saying so.
 
+## `vm destroy`
+
+```
+pveforge vm destroy qa-pve-01 691 --yes
+```
+
+`vm destroy <target-id> <vmid> --yes` destroys the VM you name on the target's
+node, purging it and its disks, and proves it is gone. It is irreversible, and
+it destroys exactly the VM you name: **nothing in it protects against naming
+the wrong VM correctly.** There is no VMID band, ledger, pool or tag guard.
+`--yes` is required, and is checked after the reads, so a refusal tells you
+the real reason first. A re-run that only resolves an earlier destroy needs
+`--yes` too. There is no `--force`, `--no-wait` or `--wait-timeout`.
+
+Every run ends in exactly one of four outcomes. The `outcome` field is on
+stdout, identical in `-o kv` and `-o json`, and the exit status says the same:
+
+| `outcome` | Exit | Meaning | What to do |
+|---|---|---|---|
+| `ok` | `0` | The VM is proven gone: a destroy task ended exactly `OK` and PVE says the vmid is free | Treat it as destroyed |
+| `failed` | `1` | A known failure | Do not retry blindly |
+| `unknown` | `3` | A destroy or stop request may have been sent and how it ended was not observed. A stop that is unknown never dispatches the destroy | Re-run: it asks PVE, never a local file. Or follow up the `upid` |
+| `refused` | `4` | Nothing was dispatched | Wait for what the refusal names, and re-run |
+
+Exit 1 with an EMPTY stdout is different: the command never ran (a malformed
+vmid, an unknown target, an unreadable roster). A signal after the dispatch
+exits 130 or 143 and still prints `outcome=unknown`. A signal that coincides
+with an outcome the command had already OBSERVED (a destroy task seen to fail)
+prints that outcome, and only the exit status is 130 or 143. A signal during a
+retry's gone-proof, when nothing was dispatched, reports `outcome=refused` with
+exit 130 or 143 and no "may have been applied" note.
+
+The `situation` field names the row. The report carries the `vmid`, and the
+facts of that row; a fact that does not apply is absent:
+
+| `situation` | `outcome` | Exit | Meaning |
+|---|---|---|---|
+| `B1` | `ok` | `0` | This run destroyed it. `upid` and `exitstatus=OK` |
+| `B1-unclean` | `failed` | `1` | The task ended `WARNINGS: n`, or the per-task status read after the wait returned showed a non-`OK` error string: not proven cleanly destroyed, volumes may remain. PVE counts that as success and its stderr notice still appears, beside an exit-1 verdict |
+| `task-failed` | `failed` | `1` | The destroy task ended with an error |
+| `B2` | `unknown` | `3` | The wait hit the 10-minute ceiling; the task may still run |
+| `B3` | `unknown` | `3` | The task status could not be read |
+| `B9` | `unknown` | `130` or `143` | Interrupted after the dispatch |
+| `B1-unproven` | `unknown` | `3` | Dispatched, but PVE did not confirm the vmid free |
+| `dispatch-unconfirmed` | `unknown` | `3` | The destroy request got no definite answer (or a 2xx without a task id): a worker may exist. There is no `upid` |
+| `stop-unknown` | `unknown` | `3` | The stop before the destroy got no definite answer, or its wait could not be completed. The destroy was NOT dispatched |
+| `stop-failed` | `failed` | `1` | PVE answered the stop with an error, or the stop task failed. The destroy was NOT dispatched |
+| `dispatch-refused` | `failed` | `1` | PVE answered the destroy request with an error (a 403 names the privilege). Nothing was destroyed |
+| `B4` | `refused` | `4` | A destroy of this vmid is unfinished (`inflight_upid`) |
+| `B4b` | `refused` | `4` | A migrate, clone or restore of this vmid is unfinished |
+| `B4c` | `refused` | `4` | A stop or shutdown of this vmid is unfinished. The cost: a destroy issued seconds after a shutdown of the same VM refuses until that task has ended |
+| `B4d` | `refused` | `4` | `--yes` was not given |
+| `B5-gone` | `ok` | `0` | A re-run: the earlier destroy ended `OK` on some member and the vmid is free. `already_destroyed` |
+| `B5-unclean` | `failed` | `1` | A re-run: the earlier destroy ended other than `OK`, and the VM is gone |
+| `B5-elsewhere` | `refused` | `4` | The VM is not on this node but PVE still claims the vmid |
+| `B5-absent-without-task` | `refused` | `4` | The VM is absent and no destroy of it is visible: absence alone is not proof (a destroy older than PVE's task retention reads this way) |
+| `B10` | `refused` | `4` | A read could not be completed: the object lock, the visibility probe, the task list, the node-local config, the status gate, or the free-proof. `read` and `error` name it |
+
+A re-run after a failed destroy that left the VM in place is a new attempt, not
+a refusal: stderr says a prior destroy failed, and the report carries
+`prior_upid` and `prior_exitstatus`. The `reason` field is carried only by
+`failed` and `unknown` rows: `deadline`, `read-failure`, `interrupted`,
+`proof-unestablished`, `dispatch-unconfirmed`, `stop-unknown`, `unclean`,
+`task-failed`, `dispatch-refused`, `stop-failed`. A refusal never carries a
+`reason` or a `upid`.
+
+The token needs `Sys.Audit` on `/nodes/<node>` (PVE filters the task list to a
+token's own tasks without it, and the command refuses rather than trust that
+list), `VM.PowerMgmt` (the stop) and `VM.Allocate` (the destroy). Resolving a
+retry also reads the cluster member list, which needs `Sys.Audit` on `/`.
+`PVEVMAdmin` holds the last two and neither audit privilege; the operator guide
+([`docs/operations/secrets-and-keys.md`](docs/operations/secrets-and-keys.md),
+procedure 11) shows how to add it.
+
+Residuals the command states rather than hides:
+- PVE decides, from a read followed later by a write. Another actor can start a
+  hazardous task between the two, including during the stop and its wait: the
+  command refuses only what it observed.
+- A stop PVE answered with a 500 is a known failure; a stop with no answer is
+  unknown. They are different rows.
+- On newer PVE a destroy runs `register_used_id` before it forks, so a destroy
+  that fails with a 500 there may already have registered the vmid.
+- A disk reassign (`qmmove`) in flight is not detected.
+- On a non-clustered host a re-run whose VM is already absent is refused,
+  because the member list cannot be read as proof.
+
 ## Output
 
 - Commands that print data take `-o kv|json`: the `get` commands,
@@ -424,7 +511,9 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 - A PVE task that ends with exit status `WARNINGS: <n>` succeeded, as PVE
   itself counts it: the command exits 0 and prints one stderr notice per such
   task, naming it, so the warnings are never silent. Read them in the task's
-  log. Anything but `OK` or exactly `WARNINGS: <n>` is a failure.
+  log. Anything but `OK` or exactly `WARNINGS: <n>` is a failure. `vm destroy`
+  is the exception: a destroy that ends `WARNINGS: <n>` may have left a disk
+  behind, so it is `failed` (exit 1) and the notice still appears beside it.
   How PVE reports pending changes is itself not yet verified live (see below).
 
 ## Exit status
@@ -433,8 +522,8 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 |---|---|
 | `0` | Success, including a command that completed with a printed warning, or completed although it was interrupted after its outcome was observed |
 | `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0 |
-| `3` | The outcome is unknown: the command dispatched a change to PVE and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Exit 3 is what `api post`, `api put` and `api delete` report for a PVE task whose wait ran out or could not be completed (a signal during that wait is 130 or 143 instead). Look the task up by the UPID printed at dispatch. Other commands that wait on a task report the same condition in their error text and exit `1` |
-| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. No command exits 4 yet |
+| `3` | The outcome is unknown: the command dispatched a change to PVE and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Exit 3 is what `api post`, `api put`, `api delete` and `vm destroy` report (a signal during the wait is 130 or 143 instead). Look the task up by the UPID printed at dispatch, or re-run `vm destroy`. The other commands that wait on a task (`vm create`, the snapshot and network commands) report the same condition in their error text and still exit `1` |
+| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. `vm destroy` is the command that exits 4 |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
 

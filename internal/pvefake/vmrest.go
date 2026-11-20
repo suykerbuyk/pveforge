@@ -177,6 +177,15 @@ type VMREST struct {
 	// issued, so a "no self-collision" criterion passes vacuously.
 	Reflect bool
 
+	// ReflectEnd, when non-empty, makes a reflected row TERMINAL instead of
+	// running: it is created with EndTime>0, Saved true and Status = ReflectEnd
+	// (the exit string, "OK", "WARNINGS: 1", an error message). It is how a
+	// destroy that ENDS is driven through the verb with the row appearing only
+	// AFTER the dispatch — a pre-scripted terminal row would also be visible to
+	// the pre-dispatch determination. Empty means exactly the running behaviour
+	// above. Only consulted when Reflect is on.
+	ReflectEnd string
+
 	t    testing.TB
 	node string
 	seq  int64 // guarded by hitLog.mu
@@ -267,10 +276,14 @@ func (s *VMREST) reflect(taskType, vmid, upid string) {
 	if upid == "" {
 		upid = fmt.Sprintf("UPID:%s:%08X:%08X:%08X:%s:%s:root@pam:", s.node, n, n, n, taskType, vmid)
 	}
-	s.Tasks = append(s.Tasks, TaskRow{
+	row := TaskRow{
 		UPID: upid, Type: taskType, ID: vmid, StartTime: 1000 + n,
 		Status: "RUNNING", Node: s.node, User: "root@pam",
-	})
+	}
+	if s.ReflectEnd != "" {
+		row.Status, row.EndTime, row.Saved = s.ReflectEnd, 2000+n, true
+	}
+	s.Tasks = append(s.Tasks, row)
 	s.mu.Unlock()
 }
 
@@ -289,11 +302,19 @@ func vmidFromPath(path string) string {
 
 // Server starts the scripted server; the caller closes it. Closing it is also
 // how "PVE is unreachable" is driven.
-func (s *VMREST) Server() *httptest.Server {
+func (s *VMREST) Server() *httptest.Server { return httptest.NewServer(s.handler()) }
+
+// ServerTLS is Server over TLS: what a roster target (https, a pinned SPKI)
+// reaches, so a command can be driven through runRoot against this fixture.
+// It serves exactly the same handler as Server; nothing about the answers
+// differs.
+func (s *VMREST) ServerTLS() *httptest.Server { return httptest.NewTLSServer(s.handler()) }
+
+func (s *VMREST) handler() http.Handler {
 	base := "/api2/json"
 	qemu := base + "/nodes/" + s.node + "/qemu/"
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.add(r)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -402,7 +423,7 @@ func (s *VMREST) Server() *httptest.Server {
 			s.t.Errorf("pvefake VMREST: unscripted %s %s", r.Method, r.URL.Path)
 			pveErr(w, http.StatusNotFound, "unscripted")
 		}
-	}))
+	})
 }
 
 // nodeLeaf splits /api2/json/nodes/{node}/{leaf} (exactly one segment after the

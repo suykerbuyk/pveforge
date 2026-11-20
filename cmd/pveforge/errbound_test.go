@@ -324,6 +324,7 @@ func TestBoundErrText_B7_AnEchoedSecretStraddlingTheBoundNeverLeaks(t *testing.T
 func TestBoundErrText_B8_EveryPrintedErrorTextIsBounded(t *testing.T) {
 	wantBounded := map[string]int{
 		"main.go: runRoot: err.Error()":              1,
+		"vm_destroy.go: errText: err.Error()":        1, // the one place a PVE-derived error becomes a vm destroy report field
 		"reread.go: warnNotReread: afterErr.Error()": 1, // Run's AfterErr, for every command that reports it
 		"reread.go: warnPostCheck: postErr.Error()":  1, // Run's PostApplyErr: vm create, vm set, user and group ensure
 	}

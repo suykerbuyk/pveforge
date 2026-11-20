@@ -603,6 +603,82 @@ in between:
   the decrypt, before any request is sent. (`roster validate` decrypts
   nothing, so it proves nothing here.)
 
+### 11. Granting what `vm destroy` needs
+
+`pveforge vm destroy` destroys one VM irreversibly. It refuses unless it can
+see every task on the node, so its roster token needs more than the
+`PVEVMAdmin` the live `root@pam!pveforge` token holds. It needs three
+privileges, and one of them `PVEVMAdmin` lacks:
+
+- **`Sys.Audit`.** On `/nodes/<node>` for a first destroy of a VM that is
+  present: PVE shows a token only its own tasks without it, so the command
+  reads `/nodes/<node>/status` first and refuses on a 403, naming
+  `Sys.Audit on /nodes/<node>`. **On `/`** to resolve a RETRY (a re-run after an unknown outcome,
+  or any run where the VM is already absent): that read lists the cluster
+  members, and refuses on a 403 naming `Sys.Audit on /`. Grant it on `/` with
+  propagate 1 and both are covered.
+- **`VM.PowerMgmt`.** The stop that precedes the destroy of a running VM. A
+  token with audit but not power management passes the reads and then fails at
+  the stop.
+- **`VM.Allocate`.** The destroy itself.
+
+`PVEVMAdmin` holds the last two. `PVEAuditor` holds `Sys.Audit`. Bootstrap
+refuses two grants on one path, so the token cannot be given both roles on `/`
+through `--grant`; the way is one custom role. Its privileges are
+`PVEVMAdmin`'s exactly, plus `Sys.Audit`, nothing added and nothing dropped.
+`PVEVMAdmin`'s list below was read live from the nested PVE 9.2.11 on
+2026-11-20 (`GET /access/roles/PVEVMAdmin`). Read it again on your own PVE
+before creating the role, because PVE changes its builtin roles between
+releases.
+
+1. **Read the builtin role** as root on the node, and compare it with the list
+   here:
+
+   ```
+   pveum role list --output-format json
+   ```
+
+2. **Create the role** as root on the node. Its privileges are the 23 of
+   `PVEVMAdmin` plus `Sys.Audit`:
+
+   ```
+   pveum role add PVEForgeVMAdminAudit --privs "VM.Allocate,VM.Audit,VM.Backup,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.GuestAgent.Audit,VM.GuestAgent.FileRead,VM.GuestAgent.FileSystemMgmt,VM.GuestAgent.FileWrite,VM.GuestAgent.Unrestricted,VM.Migrate,VM.PowerMgmt,VM.Replicate,VM.Snapshot,VM.Snapshot.Rollback,Sys.Audit"
+   ```
+
+3. **Add it to the live token, without rotating the token.** An additional ACL
+   row keeps the token, its secret and its `PVEVMAdmin` row:
+
+   ```
+   pveum acl modify / --tokens 'root@pam!pveforge' --roles PVEForgeVMAdminAudit --propagate 1
+   ```
+
+4. **Verify**, against a VM that does not exist. The command reads and refuses
+   without dispatching anything (`outcome=refused`, exit 4, and
+   `B5-absent-without-task` when every privilege is held):
+
+   ```
+   pveforge vm destroy qa-pve-07 999998 --roster ./pveforge.toml --yes
+   ```
+
+**Do not add the privilege by re-running bootstrap with the new role.** A
+token is validated by its effective privileges (`internal/pve/validate.go`),
+and the two ways a held token can differ from a re-run's grants end
+differently (`internal/bootstrap/rotation.go`, `tokenPhase`):
+
+- **After step 3 the held set is WIDER than `PVEForgeVMAdminAudit` alone**: the
+  token still holds its `PVEVMAdmin` row as well. That is `ErrScopeTooWide`,
+  and a bootstrap re-run REVOKES the token while PVE still lists it, for every
+  holder, then mints a replacement (procedure 5).
+- **A token that LACKS something the role confers** (before step 3, if you
+  re-ran bootstrap first) is `ErrWrongScope`. That revokes only when the token
+  is also absent from PVE.
+
+So do not re-run bootstrap against the live token to add this. This was
+derived by reading those two files, not rehearsed on a fake bootstrap PVE.
+
+What this does NOT do: nothing here protects against naming the wrong VM
+correctly. `vm destroy` has no VMID band, ledger, pool or tag guard.
+
 ## Reading the refusals
 
 Every refusal below writes nothing unless it says otherwise. The central rule:

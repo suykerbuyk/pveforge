@@ -14,7 +14,8 @@ import (
 // and the walk are lockguard's (Scan.TaskWaits).
 //
 // The sites are pinned per file, so a new wait, or one the walk stopped
-// seeing, is a deliberate change here: 12 production waits, plus
+// seeing, is a deliberate change here: 13 production waits (the `vm destroy` verb's
+// among them), plus
 // RoutedClient's pass-through to Client, plus the Batch C harness capture
 // instrument's 4 waits (clone/start/destroy-oracle/cross-node create — all
 // //go:build harness, each given the caller's own ctx).
@@ -33,6 +34,7 @@ func TestTaskWaitsUseTheCallersContext(t *testing.T) {
 	want := map[string]int{
 		"cmd/pveforge/api.go":                    1,
 		"cmd/pveforge/harness_vm.go":             1,
+		"cmd/pveforge/vm_destroy.go":             1,
 		"internal/harness/build/build.go":        1,
 		"internal/harness/probe/probe.go":        5,
 		"internal/harness/reset/reset.go":        1,

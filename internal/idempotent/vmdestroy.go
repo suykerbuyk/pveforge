@@ -192,6 +192,36 @@ func (op *VMDestroy) Satisfied(current string) bool {
 	return current == ""
 }
 
+// The phases of StatusGatedStop a *StopGateError names.
+const (
+	// StopGatePhaseStatusGate: the run-status read failed or was unverifiable.
+	// Nothing was dispatched.
+	StopGatePhaseStatusGate = "status-gate"
+	// StopGatePhaseStopPost: the stop request itself failed. Whether a stop
+	// task exists is for the CALLER to read off the error chain (a *pve.StatusError
+	// is PVE's answer; anything else is no answer).
+	StopGatePhaseStopPost = "stop-post"
+	// StopGatePhaseStopWait: a stop task was dispatched (UPID set) and its wait
+	// failed.
+	StopGatePhaseStopWait = "stop-wait"
+)
+
+// StopGateError is how StatusGatedStop fails. It exists so a caller (the
+// production `vm destroy` verb) can tell "nothing was dispatched" from "a stop
+// was dispatched" without reading prose. Its Error() text is EXACTLY the
+// wrapped error's, and Unwrap reaches it, so every message and every
+// errors.Is/As the Op's callers already rely on (pve.IsTaskOutcomeUnknown,
+// pve.ErrUnverifiableRead, *pve.StatusError, *pve.TaskFailedError) is unchanged.
+type StopGateError struct {
+	Phase string
+	// UPID is the stop task's, set once StopVM returned one (Phase stop-wait).
+	UPID string
+	Err  error
+}
+
+func (e *StopGateError) Error() string { return e.Err.Error() }
+func (e *StopGateError) Unwrap() error { return e.Err }
+
 // Apply runs the destroy sequence: (1) read the run status as a fail-closed
 // gate, (2) stop unless already "stopped" (returning on any stop failure),
 // (3) hard destroy, (4) node-local reverify, (5) stale-cache-tolerant tag
@@ -217,14 +247,14 @@ func (op *VMDestroy) StatusGatedStop(ctx context.Context) error {
 	// as "stopped".
 	vm, err := op.Client.GetVM(ctx, op.Client.Node(), op.VMID)
 	if err != nil {
-		return fmt.Errorf("vm destroy: vm %d: status gate: %w", op.VMID, err)
+		return &StopGateError{Phase: StopGatePhaseStatusGate, Err: fmt.Errorf("vm destroy: vm %d: status gate: %w", op.VMID, err)}
 	}
 	// Local refusal mirroring VMShutdown.Read (vmshutdown.go:125-134): GetVM's
 	// own contract never returns (nil, nil) or an empty status, but this
 	// interface can, and an unverifiable read must never fall through as "not
 	// stopped" and trigger a stop+destroy. Fail closed with ErrUnverifiableRead.
 	if vm == nil || vm.Status == "" {
-		return fmt.Errorf("vm destroy: vm %d: status gate: %w", op.VMID, pve.ErrUnverifiableRead)
+		return &StopGateError{Phase: StopGatePhaseStatusGate, Err: fmt.Errorf("vm destroy: vm %d: status gate: %w", op.VMID, pve.ErrUnverifiableRead)}
 	}
 
 	// Step 2: stop, gated and fail-closed. Skip the stop ONLY on a
@@ -237,10 +267,10 @@ func (op *VMDestroy) StatusGatedStop(ctx context.Context) error {
 	if vm.Status != proxmox.StatusVirtualMachineStopped {
 		upid, err := op.Client.StopVM(ctx, op.VMID)
 		if err != nil {
-			return fmt.Errorf("vm destroy: vm %d: stop: %w", op.VMID, err)
+			return &StopGateError{Phase: StopGatePhaseStopPost, Err: fmt.Errorf("vm destroy: vm %d: stop: %w", op.VMID, err)}
 		}
 		if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
-			return fmt.Errorf("vm destroy: vm %d: stop: wait for task: %w", op.VMID, err)
+			return &StopGateError{Phase: StopGatePhaseStopWait, UPID: upid, Err: fmt.Errorf("vm destroy: vm %d: stop: wait for task: %w", op.VMID, err)}
 		}
 	}
 	return nil

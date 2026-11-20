@@ -578,18 +578,26 @@ command tree (`make man`) and held to it byte for byte
 - **Exit status.** 0 success, including a printed warning; 1 failure,
   including a usage error (an unknown subcommand, or a bare command group);
   3 the outcome is unknown (a change was dispatched and how it ended was not
-  observed; today `api post`/`put`/`delete`, for a task wait that ran out or
-  could not be completed); 4 refused before anything was dispatched (no
-  command yet); 130 interrupted by SIGINT, 143 by SIGTERM, which win over 3
+  observed; `api post`/`put`/`delete`, for a task wait that ran out or could
+  not be completed, and `vm destroy`); 4 refused before anything was
+  dispatched (`vm destroy`); 130 interrupted by SIGINT, 143 by SIGTERM, which win over 3
   and 4. Asking for help exits 0. `exec` exits with its command's own status
   once it hands over. A second signal
   kills the process at once; the kernel releases any lock it held. The README
   holds the table, and `cmd/pveforge/readme_test.go` holds it to the code.
+- **`vm destroy`.** The destroy-retry-safety contract: before it dispatches,
+  the verb asks PVE (never a local file) whether a destroy, migrate, clone,
+  restore, stop or shutdown of the vmid is unfinished, and refuses while one
+  is. It reports one of four outcomes (`ok`, `failed`, `unknown`, `refused`) in
+  an `outcome` field on stdout and in the exit status (0, 1, 3, 4); `ok` only
+  from a destroy task that ended exactly `OK` plus a cluster-wide free vmid.
+  The README's `vm destroy` section holds the table; the token needs
+  `Sys.Audit`, `VM.PowerMgmt` and `VM.Allocate`.
 - **Task waits.** A command that gets a PVE task id (a UPID) back waits for the
   task, holding its lock, up to the 10-minute task ceiling. Only the `api`
   writes can lower it (`--wait-timeout`) or skip the wait (`--no-wait`, which
-  returns at dispatch); `vm create`, the snapshot commands and the network
-  commands always wait up to the ceiling. A wait that runs out or is
+  returns at dispatch); `vm create`, `vm destroy`, the snapshot commands and
+  the network commands always wait up to the ceiling. A wait that runs out or is
   interrupted is reported as outcome-unknown — the task may still be running
   — never as failed.
 
@@ -964,7 +972,7 @@ holds this table to every runnable command's annotation, both ways):
 
 | Tier | Commands |
 |---|---|
-| destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `storage create`, `storage alloc`, `storage free-orphans`, `vm snapshot delete`, `vm snapshot rollback`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe`, `harness golden`, `harness reset`, `harness build` |
+| destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `storage create`, `storage alloc`, `storage free-orphans`, `vm snapshot delete`, `vm snapshot rollback`, `vm destroy`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe`, `harness golden`, `harness reset`, `harness build` |
 | mutating | `roster pin-tls`, `vm create`, `vm set`, `vm snapshot create`, `network set`, `network bridge create`, `storage set-content`, `user ensure`, `group ensure`, `harness vm snapshot create` |
 | safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `access keys`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
 

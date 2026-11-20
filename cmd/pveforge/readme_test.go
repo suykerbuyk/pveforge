@@ -347,7 +347,7 @@ var operatorDocs = []struct {
 	minLines int
 }{
 	{"../../README.md", 5},
-	{"../../docs/operations/secrets-and-keys.md", 10},
+	{"../../docs/operations/secrets-and-keys.md", 11},
 	{prdPath, 2},
 }
 
@@ -1532,7 +1532,7 @@ func TestPRD_CommandSpansMatchTheCommandTree(t *testing.T) {
 		"`roster validate --require-tls-pins`": 1,
 		"`vm snapshot rollback`":               1,
 		"`api post|put|delete`":                1,
-		"`vm destroy`":                         1,
+		"`vm delete`":                          1,
 		"`vm`":                                 0,
 		"`discover <noun> <target-id>`":        0,
 		"`export = \"token\"`":                 0,
@@ -1542,7 +1542,7 @@ func TestPRD_CommandSpansMatchTheCommandTree(t *testing.T) {
 			t.Errorf("%q: found %d command spans, want %d", doc, got, want)
 		}
 	}
-	for _, bad := range []string{"`roster validate --require-tls-pin`", "`vm destroy`", "`roster`  `roster pin`"} {
+	for _, bad := range []string{"`roster validate --require-tls-pin`", "`vm delete`", "`roster`  `roster pin`"} {
 		cs := prdCommandSpans(bad)
 		if len(cs) != 1 || checkDocCommand(cs[0]) == "" {
 			t.Errorf("%s passed the command-span check", bad)

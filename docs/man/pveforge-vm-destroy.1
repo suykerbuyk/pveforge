@@ -1,0 +1,69 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-vm-destroy - Destroy a VM, with its disks, and prove it is gone
+
+
+.SH SYNOPSIS
+\fBpveforge vm destroy <target-id> <vmid> [flags]\fP
+
+
+.SH DESCRIPTION
+Destroy the VM <vmid> on the target's node, purging it and its disks, and
+report one of four outcomes on stdout (the "outcome" field, identical in -o kv
+and -o json) and in the exit status:
+
+.PP
+outcome  exit  meaning
+  ok       exit 0  the VM is proven gone (the destroy task ended exactly OK and PVE says the vmid is free)
+  failed   exit 1  a known failure; do not retry blindly
+  unknown  exit 3  a destroy or stop request may have been sent and its outcome was not observed
+  refused  exit 4  NOTHING was dispatched; wait and re-run
+
+.PP
+Re-running the same command resolves an unknown outcome: it asks PVE what
+became of the earlier destroy. PVE decides, never a local file. The command
+refuses while PVE shows an unfinished destroy, migrate, clone, restore, stop or
+shutdown of this vmid, and when it cannot establish that none is running.
+
+.PP
+It is irreversible and destroys exactly the VM you name. Nothing here protects
+against naming the wrong VM correctly. --yes is required, and is checked after
+the reads, so a refusal tells you the real reason first (a re-run that only
+resolves an earlier destroy needs --yes too).
+
+.PP
+The token must hold Sys.Audit on /nodes/<node> (to see every task there),
+VM.PowerMgmt (the stop) and VM.Allocate (the destroy); resolving a RETRY also
+needs Sys.Audit on / (the cluster member list). A destroy issued seconds after a
+shutdown of the same VM refuses until that task has ended.
+
+.PP
+The object lock is held for the whole run; --lock-wait bounds acquiring it
+only. The wait for the task is not configurable (up to 10 minutes).
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for destroy
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+.PP
+\fB--yes\fP[=false]
+	confirm this irreversible destroy (required)
+
+
+.SH SEE ALSO
+\fBpveforge-vm(1)\fP

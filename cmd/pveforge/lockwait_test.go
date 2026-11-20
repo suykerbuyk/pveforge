@@ -242,6 +242,7 @@ var lockingCommands = []string{
 	"pveforge storage set-content",
 	"pveforge user ensure",
 	"pveforge vm create",
+	"pveforge vm destroy",
 	"pveforge vm get",
 	"pveforge vm set",
 	"pveforge vm snapshot create",

@@ -82,8 +82,8 @@ func TestCommandTree_EveryGroupRefusesToRunWithoutAKnownSubcommand(t *testing.T)
 	}
 
 	// Arguments after "--" are arguments too, never a way past the check.
-	if code, _, stderr := runArgs("--", "vm", "destroy"); code == 0 || !strings.Contains(stderr, `unknown command "vm" for "pveforge"`) {
-		t.Errorf("pveforge -- vm destroy: exit %d, stderr %q; want a non-zero exit naming the unknown command", code, stderr)
+	if code, _, stderr := runArgs("--", "vm", "bogus"); code == 0 || !strings.Contains(stderr, `unknown command "vm" for "pveforge"`) {
+		t.Errorf("pveforge -- vm bogus: exit %d, stderr %q; want a non-zero exit naming the unknown command", code, stderr)
 	}
 }
 

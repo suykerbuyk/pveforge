@@ -709,3 +709,53 @@ func TestVMDestroy_ViaRun_FullCycle_AppliesAndConfirmsGone(t *testing.T) {
 		t.Errorf("expected exactly one stop and one destroy, got stop=%d destroy=%d", client.stopVMCalls, client.destroyVMCalls)
 	}
 }
+
+// U6: StatusGatedStop's failures are *StopGateError — the phase a caller (the
+// production `vm destroy` verb) classifies on without reading prose — and the
+// wrapper is TRANSPARENT: its text is byte-for-byte the text it replaced, and
+// every errors.Is/As the Op's callers already used still reaches through it.
+func TestStatusGatedStop_StopGateErrorPhasesAndTransparency(t *testing.T) {
+	timeout := fmt.Errorf("task wait: %w", proxmox.ErrTimeout)
+	for _, tc := range []struct {
+		name   string
+		f      *fakeVMDestroyClient
+		phase  string
+		upid   string
+		text   string
+		reach  func(error) bool
+		reachN string
+	}{
+		{"status read fails", &fakeVMDestroyClient{node: "n1", getVMErr: errors.New("boom")}, StopGatePhaseStatusGate, "",
+			"vm destroy: vm 100: status gate: boom", func(err error) bool { return err != nil }, "any"},
+		{"unverifiable status", &fakeVMDestroyClient{node: "n1", getVMNil: true}, StopGatePhaseStatusGate, "",
+			"vm destroy: vm 100: status gate: " + pve.ErrUnverifiableRead.Error(), func(err error) bool { return errors.Is(err, pve.ErrUnverifiableRead) }, "ErrUnverifiableRead"},
+		{"stop POST fails", &fakeVMDestroyClient{node: "n1", getVMStatus: "running", stopVMErr: errors.New("no")}, StopGatePhaseStopPost, "",
+			"vm destroy: vm 100: stop: no", func(err error) bool { return err != nil }, "any"},
+		{"stop wait fails", &fakeVMDestroyClient{node: "n1", getVMStatus: "running", stopVMUPID: "UPID:n1:1", waitForTaskErrs: []error{timeout}}, StopGatePhaseStopWait, "UPID:n1:1",
+			"vm destroy: vm 100: stop: wait for task: " + timeout.Error(), func(err error) bool { return errors.Is(err, proxmox.ErrTimeout) }, "ErrTimeout"},
+	} {
+		op := &VMDestroy{Client: tc.f, VMID: 100}
+		err := op.StatusGatedStop(context.Background())
+		var sg *StopGateError
+		if !errors.As(err, &sg) {
+			t.Fatalf("%s: %T %v, want *StopGateError", tc.name, err, err)
+		}
+		if sg.Phase != tc.phase || sg.UPID != tc.upid {
+			t.Errorf("%s: phase %q upid %q, want %q %q", tc.name, sg.Phase, sg.UPID, tc.phase, tc.upid)
+		}
+		if err.Error() != tc.text {
+			t.Errorf("%s: text %q, want the unchanged %q", tc.name, err.Error(), tc.text)
+		}
+		if !tc.reach(err) {
+			t.Errorf("%s: errors.Is/As %s no longer reaches through the wrapper", tc.name, tc.reachN)
+		}
+		if tc.phase != StopGatePhaseStopWait && tc.f.destroyVMCalls != 0 {
+			t.Errorf("%s: a destroy was issued", tc.name)
+		}
+	}
+	// Control: a stopped VM passes the gate with no error and no stop.
+	f := &fakeVMDestroyClient{node: "n1", getVMStatus: "stopped"}
+	if err := (&VMDestroy{Client: f, VMID: 100}).StatusGatedStop(context.Background()); err != nil || f.stopVMCalls != 0 {
+		t.Errorf("control: %v, stops %d", err, f.stopVMCalls)
+	}
+}

@@ -536,3 +536,66 @@ func TestVMREST_F10_FilterComposesBeforeLimit(t *testing.T) {
 		})
 	}
 }
+
+// U6: ServerTLS serves the SAME handler as Server, over TLS — what a roster
+// target (https, a pinned SPKI) reaches. A control against the plain server
+// proves the answer is the same, not merely that something answered.
+func TestVMREST_U6_ServerTLSServesTheSameHandler(t *testing.T) {
+	s := NewVMREST(t, "n1")
+	s.Tasks = []TaskRow{{UPID: "UPID:n1:A:A:A:qmdestroy:690:root@pam:", Type: "qmdestroy", ID: "690", StartTime: 100, Status: "OK", EndTime: 101, Saved: true}}
+	plain, tls := s.Server(), s.ServerTLS()
+	t.Cleanup(plain.Close)
+	t.Cleanup(tls.Close)
+	if !strings.HasPrefix(tls.URL, "https://") || !strings.HasPrefix(plain.URL, "http://") {
+		t.Fatalf("urls %q %q", plain.URL, tls.URL)
+	}
+	body := func(c *http.Client, url string) string {
+		resp, err := c.Get(url + "/api2/json/nodes/n1/tasks?source=all&limit=10")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	a, b := body(http.DefaultClient, plain.URL), body(tls.Client(), tls.URL)
+	if a != b || !strings.Contains(a, "qmdestroy") {
+		t.Errorf("plain %s\ntls   %s", a, b)
+	}
+}
+
+// U6: ReflectEnd makes a REFLECTED row terminal (endtime, saved, the exit
+// string) so a destroy that ENDS can be driven with the row appearing only
+// after the dispatch; empty keeps the running behaviour.
+func TestVMREST_U6_ReflectEnd(t *testing.T) {
+	for _, tc := range []struct {
+		end      string
+		terminal bool
+	}{{"", false}, {"OK", true}, {"WARNINGS: 1", true}} {
+		s := NewVMREST(t, "n1")
+		s.Reflect, s.ReflectEnd, s.DestroyUPID = true, tc.end, "UPID:n1:00000001:00000001:5F000001:qmdestroy:690:root@pam:"
+		srv := s.Server()
+		t.Cleanup(srv.Close)
+		_, rows := getRows(t, srv.URL+"/api2/json/nodes/n1/tasks?source=all&vmid=690&limit=10")
+		if len(rows) != 0 {
+			t.Fatalf("a row exists before any dispatch: %v", rows)
+		}
+		req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api2/json/nodes/n1/qemu/690", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("DELETE: %v %v", err, resp)
+		}
+		resp.Body.Close()
+		_, rows = getRows(t, srv.URL+"/api2/json/nodes/n1/tasks?source=all&vmid=690&limit=10")
+		if len(rows) != 1 {
+			t.Fatalf("end %q: %d rows after the dispatch", tc.end, len(rows))
+		}
+		_, has := rows[0]["endtime"]
+		if has != tc.terminal {
+			t.Errorf("end %q: endtime present = %v, want %v: %v", tc.end, has, tc.terminal, rows[0])
+		}
+		if tc.terminal && rows[0]["status"] != tc.end {
+			t.Errorf("end %q: status %v", tc.end, rows[0]["status"])
+		}
+	}
+}
