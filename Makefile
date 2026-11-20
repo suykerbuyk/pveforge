@@ -70,6 +70,10 @@ check: lint test ## Everything CI runs: lint (module hygiene, gofmt, vet) then t
 # which is the operator's decision, not a side effect of adding a gate. The
 # hole still closes: `make gate` runs this target inside the clean export.
 #
+# `make gate` also runs `make vuln` (CI runs it too), pinned to the toolchain
+# go.mod names, so a stale go.mod floor is seen where the workstation's newer
+# go would mask it. `vuln` itself stays out of lint/test and out of `check`.
+#
 # The package set is DERIVED from two constraints, never a hard-coded name:
 #   (1) packages whose test-file set grows under -tags harness, i.e. the
 #       packages that actually have harness-tagged tests; and
@@ -101,7 +105,7 @@ test-harness: ## Run the harness-tagged tests that need no nested cluster (the l
 	go test -tags harness -count=1 -p 1 $$(cat "$$scope")
 
 .PHONY: gate
-gate: ## Run the full landing gate on a clean export of the WORKTREE (not the index) — see hack/gate/clean-export.sh
+gate: ## Run the full landing gate on a clean export of the WORKTREE (not the index): check, test-harness, then vuln on the go.mod toolchain (needs the network) — see hack/gate/clean-export.sh
 	hack/gate/clean-export.sh
 
 .PHONY: integration

@@ -705,3 +705,262 @@ func TestMakefile_GateAndHarnessTargets(t *testing.T) {
 		t.Errorf("check's prerequisites are %v, want [lint test]: CI runs `make check`, and docs/prd.md and README.md say that is everything it runs; adding to it is the operator's call", got)
 	}
 }
+
+// ---- the vuln step ---------------------------------------------------------
+//
+// A fake govulncheck stands in for the real one so these run offline. It
+// proves what the SCRIPT does with the environment and with each outcome; it
+// cannot prove the real govulncheck honours that environment, which is why the
+// stale-floor RED against the real tool is shown by a real run, not here.
+
+const fakeGovulncheck = `#!/bin/sh
+if [ "$1" = "-version" ]; then
+	case "$GOTOOLCHAIN" in
+	go*) echo "Go: ${FAKE_GO_LIE:-$GOTOOLCHAIN}" ;;
+	*) echo "Go: unpinned" ;;
+	esac
+	exit 0
+fi
+echo "scan GOTOOLCHAIN=$GOTOOLCHAIN GOFLAGS=[$GOFLAGS] GOWORK=$GOWORK GOENV=$GOENV" >>"$FAKE_REC"
+case "$FAKE_MODE" in
+clean) echo "No vulnerabilities found."; exit 0 ;;
+silent) exit 0 ;;
+findings) echo "Vulnerability #1: GO-2026-6859"; echo "Your code is affected by 1 vulnerability"; exit 3 ;;
+dbdown) echo "govulncheck: loading DB: connection refused"; exit 1 ;;
+esac
+exit 9
+`
+
+// localGoVersion is the toolchain this test host runs, so a fixture floor equal
+// to it needs no download.
+func localGoVersion(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("go", "env", "GOVERSION").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+type vulnRun struct {
+	code int
+	out  string
+	rec  string
+}
+
+// runVuln runs the full gate (script = real or mutant) on a fixture whose
+// go.mod floor is `floor`, with the fake govulncheck first on PATH and a
+// Go environment the script must override (GOFLAGS is hostile; GOWORK and GOENV
+// start empty, so a dropped pin shows as an empty value where `off` is required).
+func runVuln(t *testing.T, script, mode, floor, lie string, noGovulncheck bool) vulnRun {
+	t.Helper()
+	// The floor under test is the go.mod `toolchain` line when it differs from
+	// this host's go, so the script's own `go list` (GOTOOLCHAIN=local below)
+	// never tries to fetch it; only the pinned vuln step does.
+	mod := "module fixture\n\ngo " + strings.TrimPrefix(localGoVersion(t), "go") + "\n"
+	if floor != localGoVersion(t) {
+		mod += "toolchain " + floor + "\n"
+	}
+	return runVulnMod(t, script, mode, mod, lie, noGovulncheck)
+}
+
+// runVulnMod is runVuln with the fixture's go.mod text given verbatim, for the
+// rows that are about how the floor is PARSED.
+func runVulnMod(t *testing.T, script, mode, mod, lie string, noGovulncheck bool) vulnRun {
+	t.Helper()
+	repo, export := goFixture(t)
+	write(t, repo, "go.mod", mod)
+	write(t, repo, "Makefile", "check:\n\t@echo \"ok  \tfixture/internal/x\t0.01s\"\n\ntest-harness:\n\t@echo \"test-harness: packages=1\"\n\t@echo \"ok  \tfixture/internal/x\t0.01s\"\n\nvuln:\n\tgovulncheck ./...\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "fixture")
+	write(t, repo, "internal/x/extra.txt", "unstaged so the tree is not HEAD\n")
+
+	bin := t.TempDir()
+	if !noGovulncheck {
+		if err := os.WriteFile(filepath.Join(bin, "govulncheck"), []byte(fakeGovulncheck), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := filepath.Join(t.TempDir(), "rec")
+	abs, err := filepath.Abs(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(abs)
+	cmd.Dir = repo
+	env := append(gitEnv(), "TMPDIR="+export, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_MODE="+mode, "FAKE_REC="+rec, "FAKE_GO_LIE="+lie,
+		"GOFLAGS=-tags=polluted", "GOWORK=", "GOENV=", "GOTOOLCHAIN=local", "GOPROXY=off")
+	if noGovulncheck {
+		// a PATH with no govulncheck anywhere: only the system essentials
+		env = append(env, "PATH=/usr/bin:/bin:"+filepath.Dir(mustLookPath(t, "go")))
+	}
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !asExitError(err, &ee) {
+			t.Fatalf("running %s: %v\n%s", abs, err, out)
+		}
+		code = ee.ExitCode()
+	}
+	b, _ := os.ReadFile(rec)
+	return vulnRun{code, string(out), string(b)}
+}
+
+func mustLookPath(t *testing.T, name string) string {
+	t.Helper()
+	p, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// pinnedScan is the one scan record a correct gate leaves.
+func pinnedScan(floor string) string {
+	return "scan GOTOOLCHAIN=" + floor + " GOFLAGS=[] GOWORK=off GOENV=off\n"
+}
+
+func TestCleanExport_VulnStep(t *testing.T) {
+	floor := localGoVersion(t)
+	t.Run("clean and pinned passes", func(t *testing.T) {
+		r := runVuln(t, cleanExportScript, "clean", floor, "", false)
+		if r.code != 0 {
+			t.Fatalf("exit %d:\n%s", r.code, r.out)
+		}
+		if r.rec != pinnedScan(floor) {
+			t.Errorf("scan environment = %q, want %q (inherited GOFLAGS/GOWORK must not reach the scan)", r.rec, pinnedScan(floor))
+		}
+		if !strings.Contains(r.out, "no vulnerabilities found") {
+			t.Errorf("no positive line:\n%s", r.out)
+		}
+	})
+	cases := []struct {
+		name, mode, lie, want string
+	}{
+		{"findings", "findings", "", "FINDINGS under"},
+		{"database unreachable", "dbdown", "", "did NOT COMPLETE"},
+		{"exit 0 with no positive line", "silent", "", "never printed"},
+		{"preflight reports another toolchain", "clean", "go1.1.1", "would not be judged by the floor toolchain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runVuln(t, cleanExportScript, tc.mode, floor, tc.lie, false)
+			if r.code == 0 {
+				t.Fatalf("the gate PASSED:\n%s", r.out)
+			}
+			if !strings.Contains(r.out, tc.want) {
+				t.Errorf("refused (exit %d) but not with %q:\n%s", r.code, tc.want, r.out)
+			}
+			if tc.mode == "dbdown" && strings.Contains(r.out, "FINDINGS under") {
+				t.Errorf("an unreachable database was reported as findings:\n%s", r.out)
+			}
+		})
+	}
+	t.Run("toolchain unavailable offline", func(t *testing.T) {
+		r := runVuln(t, cleanExportScript, "clean", "go1.99.9", "", false)
+		if r.code == 0 || !strings.Contains(r.out, "is not available") || strings.Contains(r.out, "FINDINGS") {
+			t.Fatalf("exit %d:\n%s", r.code, r.out)
+		}
+		if r.rec != "" {
+			t.Errorf("the scan ran without its toolchain: %q", r.rec)
+		}
+	})
+	t.Run("govulncheck missing", func(t *testing.T) {
+		r := runVuln(t, cleanExportScript, "clean", floor, "", true)
+		if r.code == 0 || !strings.Contains(r.out, "govulncheck is not installed") {
+			t.Fatalf("exit %d:\n%s", r.code, r.out)
+		}
+	})
+}
+
+// TestCleanExport_VulnPinMutantsAreKilled drops each pinned variable, and the
+// scan's own pin (the split pin: preflight pinned, scan not), from a copy of
+// the script. Each must leave a scan record that is not the pinned one -- the
+// same assertion the real script passes above -- or the pin is not guarded.
+func TestCleanExport_VulnPinMutantsAreKilled(t *testing.T) {
+	floor := localGoVersion(t)
+	src, err := os.ReadFile(cleanExportScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const assign = `VULN_ENV=(GOTOOLCHAIN="$tc" GOFLAGS= GOWORK=off GOENV=off)`
+	const scan = `env "${VULN_ENV[@]}" make vuln`
+	muts := []struct{ name, from, to string }{
+		{"drop GOTOOLCHAIN", assign, `VULN_ENV=(GOFLAGS= GOWORK=off GOENV=off)`},
+		{"drop GOFLAGS", assign, `VULN_ENV=(GOTOOLCHAIN="$tc" GOWORK=off GOENV=off)`},
+		{"drop GOWORK", assign, `VULN_ENV=(GOTOOLCHAIN="$tc" GOFLAGS= GOENV=off)`},
+		{"drop GOENV", assign, `VULN_ENV=(GOTOOLCHAIN="$tc" GOFLAGS= GOWORK=off)`},
+		{"split pin: scan unpinned", scan, `make vuln`},
+	}
+	for _, m := range muts {
+		t.Run(m.name, func(t *testing.T) {
+			if strings.Count(string(src), m.from) != 1 {
+				t.Fatalf("the script no longer contains %q exactly once; this control would be vacuous", m.from)
+			}
+			path := filepath.Join(t.TempDir(), "mutant.sh")
+			if err := os.WriteFile(path, []byte(strings.Replace(string(src), m.from, m.to, 1)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
+				t.Fatalf("the mutant does not parse: %v\n%s", err, out)
+			}
+			r := runVuln(t, path, "clean", floor, "", false)
+			if r.rec == pinnedScan(floor) {
+				t.Errorf("mutant %q left the scan fully pinned: the pin is not guarded\n%s", m.name, r.out)
+			}
+		})
+	}
+}
+
+// TestCleanExport_VulnFloorParsesLikeSetupGo pins the floor parser to the one
+// CI's pinned setup-go (b7ad1dad31e06c5925ef5d2fc7ad053ef454303e,
+// src/installer.ts parseGoVersionFile) applies: column-0 anchored,
+// `toolchain` before `go`. The first row is the measured defect: an indented
+// toolchain line setup-go ignores, which a whitespace-tolerant parser took.
+func TestCleanExport_VulnFloorParsesLikeSetupGo(t *testing.T) {
+	local := localGoVersion(t)
+	v := strings.TrimPrefix(local, "go")
+	hdr := "module fixture\n\n"
+	t.Run("indented toolchain is ignored; floor is the go line", func(t *testing.T) {
+		r := runVulnMod(t, cleanExportScript, "clean", hdr+"go "+v+"\n  toolchain go1.99.9\n", "", false)
+		if r.code != 0 || r.rec != pinnedScan(local) {
+			t.Fatalf("exit %d, scan %q, want the go line's %s:\n%s", r.code, r.rec, local, r.out)
+		}
+	})
+	t.Run("tab-indented toolchain is ignored too", func(t *testing.T) {
+		r := runVulnMod(t, cleanExportScript, "clean", hdr+"go "+v+"\n\ttoolchain go1.99.9\n", "", false)
+		if r.code != 0 || r.rec != pinnedScan(local) {
+			t.Fatalf("exit %d, scan %q:\n%s", r.code, r.rec, r.out)
+		}
+	})
+	t.Run("column-0 toolchain wins over the go line", func(t *testing.T) {
+		r := runVulnMod(t, cleanExportScript, "clean", hdr+"go "+v+"\ntoolchain go1.99.9\n", "", false)
+		if r.code == 0 || !strings.Contains(r.out, "toolchain go1.99.9 is not available") {
+			t.Fatalf("the column-0 toolchain line was not the floor (exit %d):\n%s", r.code, r.out)
+		}
+	})
+	refuse := []struct{ name, mod string }{
+		// setup-go's /^go / does not match a tab-indented line, returns '' and
+		// installs nothing, so CI scans whatever Go the runner carries: not a
+		// floor the gate can name, so it refuses rather than guess.
+		{"tab-indented go line", hdr + "\tgo " + v + "\n"},
+		{"space-indented go line", hdr + " go " + v + "\n"},
+		{"two-part go line", hdr + "go 1.27\n"},
+		{"rc toolchain", hdr + "go " + v + "\ntoolchain go1.99rc1\n"},
+		{"no go line", hdr},
+	}
+	for _, tc := range refuse {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			r := runVulnMod(t, cleanExportScript, "clean", tc.mod, "", false)
+			if r.code == 0 || r.rec != "" {
+				t.Fatalf("exit %d, scan %q: the gate guessed a floor:\n%s", r.code, r.rec, r.out)
+			}
+			if !strings.Contains(r.out, "vuln: cannot derive a full toolchain version") && !strings.Contains(r.out, "not a release version") {
+				t.Errorf("refused (exit %d) but not by the floor parser:\n%s", r.code, r.out)
+			}
+		})
+	}
+}

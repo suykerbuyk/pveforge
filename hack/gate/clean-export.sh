@@ -456,6 +456,119 @@ run_counted() {
 	return 0
 }
 
+# run_vuln runs `make vuln` in the export on the toolchain go.mod NAMES, and
+# refuses to read a pass it cannot positively see.
+#
+# WHY PINNED: govulncheck judges standard-library vulnerabilities by the `go`
+# on PATH. A workstation toolchain newer than go.mod's floor hid a stale floor
+# (GO-2026-6859, go 1.27.3) from this gate for four commits while CI, whose
+# setup-go installs exactly the floor, stayed red. So the floor is read from
+# the EXPORT's go.mod -- the tree under test, not the checkout -- and BOTH the
+# preflight and the scan run with the same cleared environment:
+#   GOTOOLCHAIN=<floor>  the toolchain the scan must be judged by
+#   GOFLAGS=             a developer's -tags/-mod cannot change the package set
+#   GOWORK=off           a go.work cannot redirect the scan to other modules
+#   GOENV=off            a persisted `go env -w` cannot reintroduce any of it
+# One array, used by every call below: pinning only the preflight (the split
+# pin) would let the preflight vouch for a toolchain the scan never used.
+#
+# NOT FAIL-OPEN: pass needs exit 0 AND govulncheck's own "No vulnerabilities
+# found." line. `make` turns every recipe failure into exit 2, so findings,
+# an unreachable database and a missing toolchain are told apart by what they
+# print, never by the status. Each is a refusal with its own message.
+# Needs the network (the database, and the toolchain on first use);
+# VULNDB=file:///mirror is honoured through the Makefile.
+run_vuln() {
+	local tc floor log rc gv
+	local -a VULN_ENV
+	log="$EXPORT/.gate-vuln.log"
+
+	# THE FLOOR IS WHAT CI'S setup-go INSTALLS, so this parser replicates
+	# parseGoVersionFile (src/installer.ts) of actions/setup-go at
+	# b7ad1dad31e06c5925ef5d2fc7ad053ef454303e -- the SHA ci.yml pins -- exactly:
+	#   1. /^toolchain go(1\.\d+(?:\.\d+|rc\d+)?)/m   first match wins
+	#   2. /^go (\d+(\.\d+)*)/m                        otherwise
+	# COLUMN-0 ANCHORED, one capture. A whitespace-tolerant parse (awk's default
+	# field splitting) took an INDENTED `  toolchain go1.27.4` that setup-go
+	# ignores, scanned 1.27.4, and passed a tree whose CI scan, on the 1.27.3
+	# setup-go installs, is red (GO-2026-6859). Measured. If you change the pin
+	# in ci.yml, re-read that file and this block together.
+	# (setup-go skips rule 1 only when GOTOOLCHAIN=local is set in its own
+	# environment; ci.yml sets nothing, so rule 1 applies.)
+	# Shapes setup-go accepts but the gate cannot scan -- a two-part version, an
+	# rc/beta, or no match at all (setup-go then installs nothing and CI scans
+	# whatever Go the runner carries) -- are REFUSED below, never guessed.
+	tc=$(awk '
+		t == "" && match($0, /^toolchain go1\.[0-9]+(\.[0-9]+|rc[0-9]+)?/) { t = "go" substr($0, 13, RLENGTH - 12) }
+		g == "" && match($0, /^go [0-9]+(\.[0-9]+)*/) { g = "go" substr($0, 4, RLENGTH - 3) }
+		END { if (t != "") print t; else print g }
+	' "$EXPORT/go.mod")
+	case "$tc" in
+	go[0-9]*.[0-9]*.[0-9]*) ;;
+	*)
+		printf 'clean-export: vuln: cannot derive a full toolchain version from go.mod the way CI'"'"'s setup-go does (got [%s]); a column-0 `go X.Y.Z` or `toolchain goX.Y.Z` line is required\n' "$tc" >&2
+		return 1
+		;;
+	esac
+	case "$tc" in
+	*rc* | *beta* | *[!0-9.go]*)
+		printf 'clean-export: vuln: toolchain [%s] is not a release version the gate can scan\n' "$tc" >&2
+		return 1
+		;;
+	esac
+	VULN_ENV=(GOTOOLCHAIN="$tc" GOFLAGS= GOWORK=off GOENV=off)
+
+	rc=0
+	command -v govulncheck >/dev/null 2>&1 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		printf 'clean-export: vuln: govulncheck is not installed (go install golang.org/x/vuln/cmd/govulncheck@v1.6.0); the gate cannot vouch for the tree\n' >&2
+		return 1
+	fi
+
+	# Is the floor toolchain obtainable? Offline with it uncached, go fails
+	# here -- a different fault from a finding, and said so.
+	rc=0
+	floor=$(cd "$EXPORT" && env "${VULN_ENV[@]}" go env GOVERSION 2>&1) || rc=$?
+	if [ "$rc" -ne 0 ] || [ "$floor" != "$tc" ]; then
+		printf 'clean-export: vuln: toolchain %s is not available (go said: %s). Run once online, or `make deps`, to cache it. This is NOT a vulnerability finding.\n' "$tc" "$floor" >&2
+		return 1
+	fi
+
+	# The observer is govulncheck itself, a different producer from the
+	# variables just set: it must report the toolchain it will scan with.
+	rc=0
+	gv=$(cd "$EXPORT" && env "${VULN_ENV[@]}" govulncheck -version 2>&1) || rc=$?
+	gv=$(printf '%s\n' "$gv" | sed -n 's/^Go: //p')
+	if [ "$rc" -ne 0 ] || [ "$gv" != "$tc" ]; then
+		printf 'clean-export: vuln: govulncheck reports Go [%s] but the go.mod floor is %s: the scan would not be judged by the floor toolchain\n' "$gv" "$tc" >&2
+		return 1
+	fi
+
+	say "running make vuln in the export on $tc"
+	rc=0
+	( cd "$EXPORT" && env "${VULN_ENV[@]}" make vuln ) >"$log" 2>&1 || rc=$?
+	cat "$log"
+	say "make vuln exit=$rc"
+
+	local clean finds
+	clean=0
+	grep -q 'No vulnerabilities found\.' "$log" || clean=$?
+	finds=0
+	grep -q 'Vulnerability #' "$log" || finds=$?
+	if [ "$rc" -eq 0 ] && [ "$clean" -eq 0 ] && [ "$finds" -ne 0 ]; then
+		say "vuln: scanned with $tc (go.mod floor $tc): no vulnerabilities found"
+		return 0
+	fi
+	if [ "$finds" -eq 0 ]; then
+		printf 'clean-export: vuln: FINDINGS under %s (listed above)\n' "$tc" >&2
+	elif [ "$rc" -eq 0 ]; then
+		printf 'clean-export: vuln: make vuln exited 0 but never printed "No vulnerabilities found.": a pass that was not seen is not a pass\n' >&2
+	else
+		printf 'clean-export: vuln: the scan did NOT COMPLETE (database or network unreachable, or a tool error: see above). This is NOT a vulnerability finding and NOT a pass.\n' >&2
+	fi
+	return 1
+}
+
 build_export
 
 if [ "$EXPORT_ONLY" = yes ]; then
@@ -498,6 +611,18 @@ rc=0
 run_counted test-harness - || rc=$?
 if [ "$rc" -ne 0 ]; then
 	FAILED=1
+fi
+
+# vuln runs only when the suites above passed: it is the one step that touches
+# the network, and it is meaningless on a tree already refused.
+if [ "$FAILED" -eq 0 ]; then
+	rc=0
+	run_vuln || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		FAILED=1
+	fi
+else
+	say "vuln: skipped, an earlier step failed"
 fi
 
 if [ "$FAILED" -ne 0 ]; then

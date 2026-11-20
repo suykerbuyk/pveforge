@@ -989,12 +989,14 @@ exercised is 9.2.11.
   `quantum-ng`) builds the binary from a pinned commit and never vendors or
   owns the source. Every library package is `internal/`, so only the binary
   is consumable. Release and versioning policy is open (§6 item 10).
-- **Toolchain and build:** Go 1.27.1; a single Go binary, needing no other
+- **Toolchain and build:** Go 1.27.4; a single Go binary, needing no other
   tool installed beside it. The Makefile is the interface: `make build`, `make
   test` (race detector and coverage), `make check` (lint, then test: what CI
   runs), `make lint` (module hygiene, gofmt, go vet), `make modcheck`
   (offline, read-only), `make deps` (the one online module step, which
   fills the module cache for the offline checks), `make vuln` (govulncheck),
+  `make gate` (the landing gate on a clean export of the worktree: `check`,
+  the harness-tagged tests, then `vuln` on the toolchain go.mod names),
   `make man`, `make install`, `make harness` (§7.7).
 - **CI:** `.github/workflows/ci.yml` runs `make check` and `make vuln`
   (operator, 2026-09-23).
@@ -1088,7 +1090,7 @@ is the detailed account; this section is the map.
 
 ### 7.1 Module and dependencies
 
-Module `github.com/suykerbuyk/pveforge`, Go 1.27.1. Direct dependencies:
+Module `github.com/suykerbuyk/pveforge`, Go 1.27.4. Direct dependencies:
 `github.com/suykerbuyk/go-proxmox` (the fork, §0.1 finding 3), `filippo.io/age`
 (secrets), `github.com/gofrs/flock` (locks and roster writes),
 `github.com/pelletier/go-toml/v2` (the roster), `github.com/spf13/cobra` and
