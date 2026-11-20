@@ -14,6 +14,14 @@ import (
 // means the field is ABSENT from the rendered row, which is what makes the
 // row non-terminal: a consumer that classifies on "endtime present and
 // non-zero" sees exactly what PVE would have shown it.
+//
+// Saved is PVE's `saved` bit — the ONLY thing that decides which half of the
+// log a row is in, and NOT the same thing as EndTime. PVE keeps a task in its
+// ACTIVE file until the task has finished AND been written to the archive
+// index; a finished-but-not-yet-archived task (up to 25 of them, RESTEnvironment
+// active_workers' $MAX_FINISHED) therefore has EndTime > 0 and Saved false, and
+// `source=active` returns it. Saved defaults to FALSE, so a row meant to be an
+// archived one must say Saved: true; a running row is Saved false by nature.
 type TaskRow struct {
 	UPID      string
 	Type      string
@@ -21,6 +29,7 @@ type TaskRow struct {
 	StartTime int64
 	Status    string
 	EndTime   int64
+	Saved     bool
 	Node      string
 	User      string
 }
@@ -56,7 +65,10 @@ type VMREST struct {
 	Tasks []TaskRow
 
 	// NodeStatus is the status code GET /nodes/{n}/status answers with; 0
-	// means 200. A 403 carries PVE's own wording, naming Sys.Audit, and does
+	// means 200. A 403 carries PVE's own wording, naming Sys.Audit, and ONLY a
+	// 403 does: any other code answers a generic body that does not name the
+	// privilege, so a consumer that classifies by the body's text instead of the
+	// status code is told apart from one that reads the code. The status does
 	// NOT change what the task collection answers — that asymmetry is the
 	// hazard a visibility precondition exists for, and it is scripted here
 	// independently on purpose.
@@ -98,8 +110,9 @@ type VMREST struct {
 	VMStatus string
 
 	// Reflect makes a mutation this server ACCEPTS appear in the task list as
-	// a NON-TERMINAL row of the matching type, the way PVE's node-local index
-	// does. Opt-in, and off by default, so a fixture that never asks for it
+	// a NON-TERMINAL row of the matching type — status RUNNING, no endtime,
+	// Saved false, exactly what PVE's active branch serves — the way PVE's
+	// node-local index does. Opt-in, and off by default, so a fixture that never asks for it
 	// keeps the static behaviour every other case depends on.
 	//
 	// Without it a re-run determination cannot see what this process just
@@ -116,9 +129,17 @@ type VMREST struct {
 // answers an unknown one with 400 "property is not defined in schema"
 // (measured; a deliberately bogus zzznotaparam=1 returns the identical 400,
 // so that is PVE's schema refusing it and not a client-side screen).
+//
+// `start` is DELIBERATELY ABSENT, and that is STRICTER than PVE: PVE's schema
+// does define `start` (minimum 0) and honours it. This fixture refuses a
+// parameter the production determination must never send, because honouring it
+// is a kindness (a non-zero `start` skips filter-passing rows before the limit
+// test, so a short page stops meaning "the filtered set is exhausted") and
+// silently ignoring it — what this fixture did before — is the other. Either
+// would let a query that sends `start` pass here and be wrong on a real node.
 var taskListParams = map[string]bool{
 	"source": true, "vmid": true, "limit": true, "since": true,
-	"typefilter": true, "start": true, "errors": true,
+	"typefilter": true, "errors": true,
 }
 
 // NewVMREST returns a server for node with an empty task log, an empty
@@ -148,7 +169,7 @@ func (s *VMREST) reflect(taskType, vmid, upid string) {
 	}
 	s.Tasks = append(s.Tasks, TaskRow{
 		UPID: upid, Type: taskType, ID: vmid, StartTime: 1000 + n,
-		Status: "running", Node: s.node, User: "root@pam",
+		Status: "RUNNING", Node: s.node, User: "root@pam",
 	})
 	s.mu.Unlock()
 }
@@ -180,7 +201,11 @@ func (s *VMREST) Server() *httptest.Server {
 		switch {
 		case r.URL.Path == nodeStatus:
 			if s.NodeStatus != 0 && s.NodeStatus != http.StatusOK {
-				pveErr(w, s.NodeStatus, fmt.Sprintf("Permission check failed (/nodes/%s, Sys.Audit)", s.node))
+				msg := fmt.Sprintf("node status refused (%d)", s.NodeStatus)
+				if s.NodeStatus == http.StatusForbidden {
+					msg = fmt.Sprintf("Permission check failed (/nodes/%s, Sys.Audit)", s.node)
+				}
+				pveErr(w, s.NodeStatus, msg)
 				return
 			}
 			_, _ = fmt.Fprint(w, `{"data":{"uptime":1}}`)
@@ -327,16 +352,19 @@ func (s *VMREST) serveTaskList(w http.ResponseWriter, r *http.Request) {
 		if v := q.Get("typefilter"); v != "" && t.Type != v {
 			continue
 		}
-		// source partitions the log: active holds what has not ended,
-		// archive holds what has, all holds both. Measured: active and
-		// archive return genuinely different sets on one node at one moment.
+		// source partitions the log by the SAVED bit, never by EndTime: active
+		// holds every row not yet written to the archive index (running ones
+		// AND finished-but-unarchived ones), archive holds the saved ones, all
+		// holds both, and an absent source is archive (PVE's default).
+		// Measured: active and archive return genuinely different sets on one
+		// node at one moment.
 		switch q.Get("source") {
 		case "active":
-			if t.EndTime != 0 {
+			if t.Saved {
 				continue
 			}
 		case "archive", "":
-			if t.EndTime == 0 {
+			if !t.Saved {
 				continue
 			}
 		case "all":

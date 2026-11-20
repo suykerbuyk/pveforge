@@ -1908,6 +1908,7 @@ var routedClientSeam = map[string]seamEntry{
 	"CreateSnapshot":                 {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_Snapshot_Forwards"}},
 	"ShutdownVM":                     {tests: []string{"TestRoutedForwarding_NodeBinding", "TestShutdownVM_MakesExactlyOneRequestOnEveryPath"}},
 	"CloneVM":                        {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_CloneVM_Forwards"}},
+	"DetermineDestroyInFlight":       {tests: []string{"TestRoutedForwarding_DetermineDestroyInFlight"}},
 	"StorageType":                    {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_StorageType_Forwards"}},
 
 	// Added by unit 5b, with their forwarding test in snapshot_test.go.

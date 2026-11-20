@@ -22,8 +22,8 @@ func vmrestFixture(t *testing.T) (*VMREST, string) {
 	s := NewVMREST(t, "n1")
 	s.Tasks = []TaskRow{
 		{UPID: "UPID:n1:A:A:A:qmdestroy:690:root@pam:", Type: "qmdestroy", ID: "690", StartTime: 100, Status: "running"},
-		{UPID: "UPID:n1:B:B:B:qmcreate:690:root@pam:", Type: "qmcreate", ID: "690", StartTime: 90, Status: "stopped", EndTime: 95},
-		{UPID: "UPID:n1:C:C:C:qmstart:691:root@pam:", Type: "qmstart", ID: "691", StartTime: 80, Status: "stopped", EndTime: 85},
+		{UPID: "UPID:n1:B:B:B:qmcreate:690:root@pam:", Type: "qmcreate", ID: "690", StartTime: 90, Status: "stopped", EndTime: 95, Saved: true},
+		{UPID: "UPID:n1:C:C:C:qmstart:691:root@pam:", Type: "qmstart", ID: "691", StartTime: 80, Status: "stopped", EndTime: 85, Saved: true},
 	}
 	srv := s.Server()
 	t.Cleanup(srv.Close)
@@ -65,6 +65,14 @@ func TestVMREST_F1_LimitIsHonouredAndZeroMeansNothing(t *testing.T) {
 
 // F2: source partitions the log — active and archive are genuinely different
 // sets, as measured on a live node at one moment.
+//
+// 🔴 F2 IS NOT THE PIN FOR WHICH BIT DECIDES THE CUT. Its 3/1/2 counts are what
+// BOTH partitions produce on this fixture — the running row is the only
+// unsaved row and the two terminal rows are saved — so they survive the
+// EndTime-cut mutant (M27: serveTaskList reverting to "active = EndTime == 0,
+// archive = EndTime != 0"). Do not cite F2 as evidence the cut is by Saved;
+// TestVMREST_F2b_PartitionIsBySavedNotEndTime is, because it plants the row
+// that separates the two cuts: finished (EndTime > 0) yet not archived.
 func TestVMREST_F2_SourcePartitionsTheSet(t *testing.T) {
 	_, u := vmrestFixture(t)
 	for _, tc := range []struct {
@@ -83,6 +91,101 @@ func TestVMREST_F2_SourcePartitionsTheSet(t *testing.T) {
 	if len(all) == len(act) {
 		t.Errorf("source=all and source=active returned the same count (%d): the parameter is not partitioning", len(all))
 	}
+}
+
+// F2b: THE PIN for the partition. PVE's active/archive cut is the `saved` bit,
+// not whether the task has ended: a finished task stays in the active file —
+// with its endtime and status — until it has been written to the archive
+// index. So:
+//
+//	running             (EndTime 0, Saved false)  active only
+//	finished-unarchived (EndTime>0, Saved false)  active only   <- separates the cuts
+//	finished-archived   (EndTime>0, Saved true)   archive only
+//
+// The middle row is the whole test. Under an EndTime cut it would land in the
+// archive half and be absent from `source=active`; under the Saved cut it is the
+// other way round. F2's counts cannot tell (see F2).
+func TestVMREST_F2b_PartitionIsBySavedNotEndTime(t *testing.T) {
+	s := NewVMREST(t, "n1")
+	s.Tasks = []TaskRow{
+		{UPID: "run", Type: "qmdestroy", ID: "690", StartTime: 300, Status: "RUNNING"},
+		{UPID: "unarch", Type: "qmdestroy", ID: "690", StartTime: 200, Status: "OK", EndTime: 250},
+		{UPID: "arch", Type: "qmdestroy", ID: "690", StartTime: 100, Status: "OK", EndTime: 150, Saved: true},
+	}
+	srv := s.Server()
+	defer srv.Close()
+	ids := func(source string) []string {
+		q := ""
+		if source != "" {
+			q = "source=" + source + "&"
+		}
+		code, rows := getRows(t, srv.URL+"/api2/json/nodes/n1/tasks?"+q+"limit=99")
+		if code != 200 {
+			t.Fatalf("source=%q: HTTP %d", source, code)
+		}
+		var out []string
+		for _, r := range rows {
+			out = append(out, r["upid"].(string))
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, tc := range []struct {
+		source string
+		want   []string
+	}{
+		{"active", []string{"run", "unarch"}},
+		{"archive", []string{"arch"}},
+		{"all", []string{"arch", "run", "unarch"}},
+		{"", []string{"arch"}}, // absent source is archive, PVE's default
+	} {
+		if got := ids(tc.source); !slices.Equal(got, tc.want) {
+			t.Errorf("source=%q returned %v, want %v", tc.source, got, tc.want)
+		}
+	}
+	// The finished-unarchived row keeps its endtime and status on the wire: it
+	// is terminal BY ENDTIME while living in the active half.
+	_, rows := getRows(t, srv.URL+"/api2/json/nodes/n1/tasks?source=active&limit=99")
+	for _, r := range rows {
+		if r["upid"] == "unarch" {
+			if r["status"] != "OK" || r["endtime"] == nil {
+				t.Errorf("finished-unarchived row = %v, want status OK and an endtime", r)
+			}
+		}
+		if r["upid"] == "run" {
+			if _, ok := r["endtime"]; ok || r["status"] != "RUNNING" {
+				t.Errorf("running row = %v, want status RUNNING and no endtime", r)
+			}
+		}
+	}
+}
+
+// F4b: the fixture REFUSES `start`, which is STRICTER than PVE. PVE's schema
+// defines `start` and honours it; this fixture answers it with the unknown-
+// parameter 400 because the production determination must never send it (a
+// non-zero `start` skips filter-passing rows before the limit test, so a short
+// page would stop meaning "exhausted"), and honouring it — or, as before,
+// silently ignoring it — would let a query that sends it pass here. The wire
+// compare in the consumer is the real closure; this keeps the fixture honest.
+func TestVMREST_F4b_StartIsRefusedStricterThanPVE(t *testing.T) {
+	s, u := vmrestFixture(t)
+	for _, q := range []string{"start=0", "start=5"} {
+		resp, err := http.Get(u + "/api2/json/nodes/n1/tasks?source=all&limit=9&" + q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 400 || !strings.Contains(string(b), "property is not defined in schema") {
+			t.Errorf("%s: HTTP %d %s; want the unknown-parameter 400", q, resp.StatusCode, b)
+		}
+	}
+	// Control: the same query without `start` is served, so the 400 above is
+	// the parameter and not a broken fixture.
+	if code, rows := getRows(t, u+"/api2/json/nodes/n1/tasks?source=all&limit=9"); code != 200 || len(rows) == 0 {
+		t.Errorf("control without start: HTTP %d, %d rows; want 200 and rows", code, len(rows))
+	}
+	_ = s
 }
 
 // F3: vmid and typefilter are honoured.
@@ -155,6 +258,26 @@ func TestVMREST_F5_ProbeMay403WhileTheTaskListStill200s(t *testing.T) {
 	if !strings.Contains(string(b), "Sys.Audit") {
 		t.Errorf("probe body %s does not name Sys.Audit", b)
 	}
+	// ONLY a 403 names the privilege. A fixture that wrote the Sys.Audit
+	// wording for every non-200 code would make a classifier that matches the
+	// body's text indistinguishable from one that reads the status code, and
+	// would put "Sys.Audit" in the body of a 401 and a 500.
+	for _, code := range []int{http.StatusUnauthorized, http.StatusInternalServerError} {
+		s.NodeStatus = code
+		resp, err := http.Get(u + "/api2/json/nodes/n1/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != code {
+			t.Errorf("probe scripted %d answered HTTP %d", code, resp.StatusCode)
+		}
+		if strings.Contains(string(b), "Sys.Audit") {
+			t.Errorf("probe scripted %d carries the privilege wording: %s", code, b)
+		}
+	}
+	s.NodeStatus = http.StatusForbidden
 	code, rows := getRows(t, u+"/api2/json/nodes/n1/tasks?source=all&limit=99")
 	if code != 200 || len(rows) == 0 {
 		t.Errorf("task list under a 403 probe: HTTP %d, %d rows; want 200 and a non-empty list", code, len(rows))
@@ -239,6 +362,12 @@ func TestVMREST_F7_DispatchIsReflectedIntoTheTaskList(t *testing.T) {
 			}
 			if _, ok := row["endtime"]; ok {
 				t.Errorf("reflected row carries endtime %v: it must be NON-terminal", row["endtime"])
+			}
+			// The spelling PVE serves: Tasks.pm gives a running row the literal
+			// RUNNING. A reflected "running" trains a status-keyed classifier on a
+			// spelling PVE never emits.
+			if row["status"] != "RUNNING" {
+				t.Errorf("reflected row status = %v, want exactly RUNNING", row["status"])
 			}
 			if _, arch := getRows(t, srv.URL+"/api2/json/nodes/n1/tasks?source=archive&vmid=690&limit=99"); len(arch) != 0 {
 				t.Errorf("source=archive returned %d rows: a non-terminal reflection leaked into the archive half", len(arch))
@@ -372,8 +501,8 @@ func TestVMREST_F10_FilterComposesBeforeLimit(t *testing.T) {
 			// limit-then-filter truncates the match away before the filter
 			// can see it.
 			s.Tasks = []TaskRow{
-				{UPID: "u1", Type: "qmcreate", ID: "691", StartTime: 10, Status: "stopped", EndTime: 11},
-				{UPID: "u2", Type: "qmstart", ID: "691", StartTime: 20, Status: "stopped", EndTime: 21},
+				{UPID: "u1", Type: "qmcreate", ID: "691", StartTime: 10, Status: "stopped", EndTime: 11, Saved: true},
+				{UPID: "u2", Type: "qmstart", ID: "691", StartTime: 20, Status: "stopped", EndTime: 21, Saved: true},
 				{UPID: "u3", Type: "qmdestroy", ID: "690", StartTime: 30, Status: "running"},
 			}
 			srv := s.Server()

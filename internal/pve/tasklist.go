@@ -62,7 +62,7 @@ type TaskListQuery struct {
 	Source string // required: one of the TaskList* constants
 	Limit  int    // required, > 0
 	VMID   string // optional decimal vmid; "" sends no vmid filter
-	Since  int64  // optional unix seconds; 0 = no window. Applied client-side
+	Since  int64  // validated but NOT sent and NOT applied by TaskList; only FindTaskUPID windows on its own since. 0 = none
 }
 
 // ErrTaskListQuery is returned for every malformed TaskListQuery. It is a

@@ -399,6 +399,13 @@ func (c *RoutedClient) RawRequest(ctx context.Context, method, path string, para
 	return c.rest.RawRequest(ctx, method, path, params)
 }
 
+// DetermineDestroyInFlight asks PVE, through this target's own node, whether a
+// destroy of vmid may proceed — see Client.DetermineDestroyInFlight. The node
+// is bound here so a caller cannot ask about one node and read another.
+func (c *RoutedClient) DetermineDestroyInFlight(ctx context.Context, vmid int) *InFlightDetermination {
+	return c.rest.DetermineDestroyInFlight(ctx, c.target.Node, vmid)
+}
+
 // SetVMConfigField sets one VM config field on this target's VM, routing
 // over REST or the standing SSH vector depending on
 // sshexec.RootOnlyFields — the caller never chooses.
