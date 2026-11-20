@@ -33,3 +33,4 @@
 /pveforge.toml
 /pveforge.toml.lock
 /pveforge.toml.locks/
+/.agents/
