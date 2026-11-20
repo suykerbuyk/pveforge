@@ -406,6 +406,37 @@ func (c *RoutedClient) DetermineDestroyInFlight(ctx context.Context, vmid int) *
 	return c.rest.DetermineDestroyInFlight(ctx, c.target.Node, vmid)
 }
 
+// FreeProof is the strict cluster-wide free-proof for vmid — see
+// Client.FreeProof. It reads /cluster/nextid, which is not node-scoped.
+func (c *RoutedClient) FreeProof(ctx context.Context, vmid int) FreeResult {
+	return c.rest.FreeProof(ctx, vmid)
+}
+
+// DestroyEnd reads how the destroy task upid (dispatched against this target's
+// node) ended, by exact exit string — see Client.DestroyEnd. The node is bound
+// here so a caller cannot ask about one node and read another.
+func (c *RoutedClient) DestroyEnd(ctx context.Context, vmid int, upid string) (*DestroyEnd, error) {
+	return c.rest.DestroyEnd(ctx, c.target.Node, vmid, upid)
+}
+
+// PlacementOf names the node the cluster-wide resource list places vmid on, for
+// detail only — see Client.PlacementOf.
+func (c *RoutedClient) PlacementOf(ctx context.Context, vmid int) Placement {
+	return c.rest.PlacementOf(ctx, vmid)
+}
+
+// ClusterNodes reads the member list, with this target's node as the roster
+// node — see Client.ClusterNodes.
+func (c *RoutedClient) ClusterNodes(ctx context.Context) NodeSet {
+	return c.rest.ClusterNodes(ctx, c.target.Node)
+}
+
+// JudgeGone decides whether the destroy of vmid is proven, with this target's
+// node as the roster node — see Client.JudgeGone.
+func (c *RoutedClient) JudgeGone(ctx context.Context, vmid int, ev GoneEvidence) *GoneVerdict {
+	return c.rest.JudgeGone(ctx, c.target.Node, vmid, ev)
+}
+
 // SetVMConfigField sets one VM config field on this target's VM, routing
 // over REST or the standing SSH vector depending on
 // sshexec.RootOnlyFields — the caller never chooses.

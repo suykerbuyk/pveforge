@@ -122,7 +122,7 @@ type VMDestroy struct {
 // confirmed against a live host (see pve.NotFound's own caveat on where
 // PVE puts the message).
 func isMissingVMError(err error, vmid int) bool {
-	return pve.NotFound(err, pve.Subject{Fragment: fmt.Sprintf("qemu-server/%d.conf", vmid)})
+	return pve.VMConfigMissing(err, vmid)
 }
 
 // fetchVMConfig issues GET /nodes/{node}/qemu/{vmid}/config via RawRequest,

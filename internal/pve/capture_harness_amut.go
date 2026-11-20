@@ -11,11 +11,8 @@ package pve
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -138,40 +135,4 @@ func (sp *UPIDSpelling) Check(exp ExpectUPID) error {
 		return fmt.Errorf("UPID %q spelling: %s", sp.UPID, strings.Join(miss, "; "))
 	}
 	return nil
-}
-
-// ---- item 69: CaptureTaskExitStatus -------------------------------------
-
-// TaskExitStatus is one item-69 capture read from PVE's OWN task-status
-// endpoint (not the client's WaitForTask wrapper — hazard #5).
-type TaskExitStatus struct {
-	UPID       string `json:"upid"`
-	Status     string `json:"status"`
-	ExitStatus string `json:"exitstatus"`
-	IsWarnings bool   `json:"is_warnings"`
-}
-
-// CaptureTaskExitStatus GETs PVE's own /nodes/{n}/tasks/{upid}/status
-// (url.PathEscape the UPID, goneproof.go:47) and records the raw exitstatus,
-// reporting whether it is EXACTLY `WARNINGS: <n>` (taskExitWarnings,
-// task.go:118) — an `OK` or any trailing byte makes IsWarnings false.
-func (c *Client) CaptureTaskExitStatus(ctx context.Context, node, upid string) (*TaskExitStatus, error) {
-	raw, err := c.RawRequest(ctx, http.MethodGet,
-		fmt.Sprintf("/nodes/%s/tasks/%s/status", url.PathEscape(node), url.PathEscape(upid)), nil)
-	if err != nil {
-		return nil, fmt.Errorf("capture task exitstatus for %q on %q: %w", upid, node, err)
-	}
-	var st struct {
-		Status     string `json:"status"`
-		ExitStatus string `json:"exitstatus"`
-	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, fmt.Errorf("capture task exitstatus for %q on %q: status shape: %w", upid, node, err)
-	}
-	return &TaskExitStatus{
-		UPID:       upid,
-		Status:     st.Status,
-		ExitStatus: st.ExitStatus,
-		IsWarnings: taskExitWarnings.MatchString(st.ExitStatus),
-	}, nil
 }

@@ -3,6 +3,7 @@ package pve
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -82,6 +83,17 @@ func NotFound(err error, s Subject) bool {
 		return regexp.MustCompile(`(?i:\b(?:` + nounsPattern(s.Nouns) + `))\s+(?:'` + q + `'|"` + q + `")\s+(?i:` + missingPhrase + `)`).MatchString(answer)
 	}
 	return false
+}
+
+// VMConfigMissing reports whether err is PVE's own answer saying the config
+// of QEMU guest vmid does not exist ("Configuration file
+// 'nodes/<node>/qemu-server/<vmid>.conf' does not exist"). It is NotFound on
+// the vmid-specific config-path fragment, and the ONE home of that fragment
+// (idempotent's isMissingVMError and the gone-proof's presence read both call
+// it). A 403 is NOT a match: PVE checks VM.Audit before it looks for the file,
+// so a token that cannot see a VM reads 403 whether it exists or not.
+func VMConfigMissing(err error, vmid int) bool {
+	return NotFound(err, Subject{Fragment: fmt.Sprintf("qemu-server/%d.conf", vmid)})
 }
 
 // pveAnswer returns "<Status>: <body>" of the typed PVE answer in err's

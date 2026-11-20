@@ -123,7 +123,7 @@ type InFlightDetermination struct {
 // "WARNINGS: 1", an error string, "unexpected status", an empty status and any
 // near-spelling are all not OK — a destroy that left a disk behind reads
 // WARNINGS, and a permissive comparison would report it destroyed.
-func (r TaskRow) EndedOK() bool { return r.Status == "OK" }
+func (r TaskRow) EndedOK() bool { return exactOK(r.Status) }
 
 // inFlightQuery is the determination's request, built purely so its shape can
 // be asserted without a server. It sends source=all (a running task lives only
@@ -158,6 +158,36 @@ func determine(ctx context.Context, c *Client, node string, vmid, limit int, bud
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
+	view, refusal := nodeDestroyView(ctx, c, node, vmid, limit)
+	if refusal != nil {
+		return refuse(refusal)
+	}
+	d := &InFlightDetermination{Proceed: true}
+	if view.Newest != nil {
+		row := *view.Newest
+		d.LastDestroy = &row
+		d.LastDestroyEndedOK = row.EndedOK()
+	}
+	return d
+}
+
+// nodeView is what one node's task index says about one vmid: the newest
+// TERMINAL qmdestroy, or nil when none is visible. It carries no verdict. A
+// node whose view cannot be established, or that shows a non-terminal
+// hazardous task, is not a nodeView at all: nodeDestroyView returns a refusal.
+type nodeView struct {
+	Newest *TaskRow
+}
+
+// nodeDestroyView is the determination's per-node read, and the ONE place it
+// lives: the visibility probe, the task-list query, the type-and-id row loop,
+// the truncation refusal and the newest-destroy pick. determine calls it for
+// the roster node; the gone-proof's cross-node scan (goneproof.go) calls it for
+// every member. It is factored out of determine, never copied, so a rule fixed
+// here is fixed for both.
+//
+// It applies no budget of its own: the caller's ctx bounds it.
+func nodeDestroyView(ctx context.Context, c *Client, node string, vmid, limit int) (*nodeView, *InFlightRefusal) {
 	// Step 2 of the decision order: the visibility precondition. A 200 from an
 	// owner-filtered task list is the measured failure mode, so ask PVE whether
 	// this token is an auditor of the node BEFORE trusting the list. Nodes.pm's
@@ -173,13 +203,13 @@ func determine(ctx context.Context, c *Client, node string, vmid, limit int, bud
 	if _, err := c.RawRequest(ctx, http.MethodGet, statusPath, nil); err != nil {
 		if code, ok := HTTPStatus(err); ok && code == http.StatusForbidden {
 			priv := fmt.Sprintf("Sys.Audit on /nodes/%s", node)
-			return refuse(&InFlightRefusal{
+			return nil, &InFlightRefusal{
 				Situation: SituationUnreadable, Node: node, VMID: vmid,
 				Read: "GET " + statusPath, ReadErr: err.Error(), Privilege: priv,
 				Condition: fmt.Sprintf("grant this token %s, then re-run: without it the task list is filtered to the token's own tasks and cannot show whether a destroy of vmid %d is in flight", priv, vmid),
-			})
+			}
 		}
-		return unreadable(node, vmid, "GET "+statusPath, err.Error())
+		return nil, unreadableRefusal(node, vmid, "GET "+statusPath, err.Error())
 	}
 
 	// The task list's path is NOT spelled here: TaskList is the module's one
@@ -187,7 +217,7 @@ func determine(ctx context.Context, c *Client, node string, vmid, limit int, bud
 	listRead := "task list for node " + node
 	page, err := c.TaskList(ctx, inFlightQueryLimit(node, vmid, limit))
 	if err != nil {
-		return unreadable(node, vmid, listRead, err.Error())
+		return nil, unreadableRefusal(node, vmid, listRead, err.Error())
 	}
 
 	want := strconv.Itoa(vmid)
@@ -202,7 +232,7 @@ func determine(ctx context.Context, c *Client, node string, vmid, limit int, bud
 		}
 		if sit, hazardous := hazardousTypes[r.Type]; hazardous {
 			if !r.Terminal() {
-				return refuse(inFlightRefusal(sit, node, vmid, r))
+				return nil, inFlightRefusal(sit, node, vmid, r)
 			}
 		}
 		if r.Type == "qmdestroy" && r.Terminal() && betterDestroy(r, newest) {
@@ -215,20 +245,13 @@ func determine(ctx context.Context, c *Client, node string, vmid, limit int, bud
 	// exhausted while a page of exactly limit may be the head of a longer one.
 	// A specific refusal above wins over this generic one.
 	if page.Truncated {
-		return refuse(&InFlightRefusal{
+		return nil, &InFlightRefusal{
 			Situation: SituationUnreadable, Node: node, VMID: vmid, Read: listRead,
 			ReadErr:   fmt.Sprintf("the task list for vmid %d returned a full page of %d rows and may be truncated, so it cannot show that nothing is in flight", vmid, len(page.Rows)),
 			Condition: fmt.Sprintf("re-run once the retained task log for node %s holds fewer than %d tasks that match vmid %d; a full page is never read as \"nothing in flight\"", node, limit, vmid),
-		})
+		}
 	}
-
-	d := &InFlightDetermination{Proceed: true}
-	if newest != nil {
-		row := *newest
-		d.LastDestroy = &row
-		d.LastDestroyEndedOK = row.EndedOK()
-	}
-	return d
+	return &nodeView{Newest: newest}, nil
 }
 
 // betterDestroy reports whether r should replace cur as the newest terminal
@@ -250,11 +273,11 @@ func refuse(r *InFlightRefusal) *InFlightDetermination {
 	return &InFlightDetermination{Refusal: r}
 }
 
-func unreadable(node string, vmid int, read, readErr string) *InFlightDetermination {
-	return refuse(&InFlightRefusal{
+func unreadableRefusal(node string, vmid int, read, readErr string) *InFlightRefusal {
+	return &InFlightRefusal{
 		Situation: SituationUnreadable, Node: node, VMID: vmid, Read: read, ReadErr: readErr,
 		Condition: fmt.Sprintf("re-run once %s can be read completely; \"cannot ask\" is not \"nothing in flight\" for vmid %d", read, vmid),
-	})
+	}
 }
 
 func inFlightRefusal(sit Situation, node string, vmid int, r TaskRow) *InFlightRefusal {

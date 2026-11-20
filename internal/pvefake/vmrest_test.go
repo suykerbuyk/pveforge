@@ -406,7 +406,7 @@ func TestVMREST_F8_ReflectionIsOptIn(t *testing.T) {
 }
 
 // F9: the remaining scripted surfaces answer as specified — the free-proof in
-// both directions, the placement fixture, the config 404, and the stall.
+// both directions, the placement fixture, the missing config (PVE's 500), and the stall.
 func TestVMREST_F9_TheOtherScriptedSurfaces(t *testing.T) {
 	s, u := vmrestFixture(t)
 
@@ -432,20 +432,21 @@ func TestVMREST_F9_TheOtherScriptedSurfaces(t *testing.T) {
 		t.Errorf("nextid free: HTTP %d %s; want 200 echoing the vmid", resp.StatusCode, b)
 	}
 
-	// placement: the ONLY way this server models another node.
+	// placement: "which node is this guest on" (another member's task index is a Peer).
 	s.Resources = `[{"type":"qemu","vmid":690,"node":"n2"}]`
 	if _, rows := getRows(t, u+"/api2/json/cluster/resources?type=vm"); len(rows) != 1 || rows[0]["node"] != "n2" {
 		t.Errorf("placement: %v, want one qemu row on n2", rows)
 	}
 
-	// config: "" means a 404.
+	// config: "" is PVE's real missing-config answer — a 500 whose message names
+	// the vmid-specific config path (see TestVMREST_G2) — and NOT a 404.
 	resp, err = http.Get(u + "/api2/json/nodes/n1/qemu/690/config")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Errorf("config with VMConfig unset: HTTP %d, want 404", resp.StatusCode)
+	if resp.StatusCode != 500 {
+		t.Errorf("config with VMConfig unset: HTTP %d, want 500", resp.StatusCode)
 	}
 
 	// the task collection can be refused independently of the probe.

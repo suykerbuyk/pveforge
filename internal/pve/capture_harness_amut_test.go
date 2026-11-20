@@ -4,7 +4,6 @@ package pve
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -117,30 +116,4 @@ func TestUPIDSpelling(t *testing.T) {
 			t.Error("want an error")
 		}
 	})
-}
-
-// item 69: exitstatus is WARNINGS only when it is EXACTLY `WARNINGS: <n>`.
-func TestCaptureTaskExitStatus(t *testing.T) {
-	ctx := context.Background()
-	const upid = "UPID:pvh-n1:0001:0002:66AC0000:vzdump::root@pam:"
-	for _, tc := range []struct {
-		exit string
-		want bool
-	}{
-		{"WARNINGS: 3", true},
-		{"WARNINGS: 0", true},
-		{"OK", false},
-		{"WARNINGS: 3x", false},
-		{"WARNINGS: 3\n", false},
-		{"WARNINGS:3", false},
-	} {
-		body, _ := json.Marshal(map[string]any{"data": map[string]any{"status": "stopped", "exitstatus": tc.exit, "upid": upid}})
-		got, err := amutClient(t, "200 OK", string(body)).CaptureTaskExitStatus(ctx, "pvh-n1", upid)
-		if err != nil {
-			t.Fatalf("%q: %v", tc.exit, err)
-		}
-		if got.IsWarnings != tc.want {
-			t.Errorf("exitstatus %q: IsWarnings = %v, want %v", tc.exit, got.IsWarnings, tc.want)
-		}
-	}
 }

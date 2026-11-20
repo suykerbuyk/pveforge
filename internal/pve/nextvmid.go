@@ -93,6 +93,12 @@ func (c *Client) NextVMID(ctx context.Context, pin int, exclude ...int) (int, er
 	return 0, fmt.Errorf("next vmid: no free vmid found within %d attempts past %d", maxNextVMIDWalkAttempts, candidate)
 }
 
+// NOT A FREE-PROOF FOR A DESTROY. vmidFree returns (true, nil) for any non-empty
+// string PVE answers 200 with, so a 200 echoing ANOTHER vmid reads as "free".
+// That is acceptable for the create path's pin check and wrong where a false
+// "free" means "destroyed"; the destroy-retry-safety contract uses FreeProof
+// (freeproof.go), which requires an exact echo. Do not call vmidFree from a
+// gone-proof.
 // vmidFree reports whether vmid is currently free, via PVE's own
 // GET /cluster/nextid?vmid=N check — pveforge's own reimplementation of
 // what go-proxmox's Cluster.CheckID intended, using a proper pointer
@@ -135,6 +141,16 @@ func isVMIDTakenError(err error, vmid int) bool {
 	if err == nil {
 		return false
 	}
-	want := strings.ToLower(fmt.Sprintf("VM %d already exists", vmid))
-	return strings.Contains(strings.ToLower(err.Error()), want)
+	text := strings.ToLower(takenText(err))
+	// 9.2.11: "VM <id> already exists". Master (pve-manager 0b2f7eea): "guest ID
+	// <id> is already in use".
+	for _, want := range []string{
+		strings.ToLower(fmt.Sprintf("VM %d already exists", vmid)),
+		strings.ToLower(fmt.Sprintf("guest ID %d is already in use", vmid)),
+	} {
+		if strings.Contains(text, want) {
+			return true
+		}
+	}
+	return false
 }
