@@ -120,7 +120,7 @@ func TestTaskWarningsNotice_QuotesAndBounds(t *testing.T) {
 }
 
 // A UPID outside PVE's grammar (here, U+2028 in its user field) is refused
-// as an unverifiable read before any poll: exit 1, no notice, and the
+// as an unverifiable read before any poll: exit 3, no notice, and the
 // character never reaches stderr raw.
 func TestRunRoot_UPIDOutsidePVEGrammarIsRefusedBeforeAnyPoll(t *testing.T) {
 	withFastTaskPolls(t)
@@ -132,8 +132,10 @@ func TestRunRoot_UPIDOutsidePVEGrammarIsRefusedBeforeAnyPoll(t *testing.T) {
 	}
 	rosterPath := newAPITaskServer(t, f)
 	code, _, stderr := runRootArgs("api", "post", "--roster", rosterPath, f.mutPath, "qa-pve-01")
-	if code != 1 || !strings.Contains(stderr, "malformed upid") || !strings.Contains(stderr, "unverifiable read") {
-		t.Errorf("exit %d, stderr %q; want exit 1 and the malformed-upid refusal", code, stderr)
+	// 3, not 1: the task was dispatched and nothing observed it (U2: an
+	// outcome-unknown wait exits 3), though pveforge itself refused to poll.
+	if code != 3 || !strings.Contains(stderr, "malformed upid") || !strings.Contains(stderr, "unverifiable read") {
+		t.Errorf("exit %d, stderr %q; want exit 3 and the malformed-upid refusal", code, stderr)
 	}
 	if strings.Contains(stderr, "notice: PVE task") || strings.Contains(stderr, "\u2028") {
 		t.Errorf("stderr %q carries a notice or a raw U+2028", stderr)

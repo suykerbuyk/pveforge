@@ -577,8 +577,12 @@ command tree (`make man`) and held to it byte for byte
   line, elided past 4 KiB.
 - **Exit status.** 0 success, including a printed warning; 1 failure,
   including a usage error (an unknown subcommand, or a bare command group);
-  130 interrupted by SIGINT, 143 by SIGTERM. Asking for help exits 0. `exec`
-  exits with its command's own status once it hands over. A second signal
+  3 the outcome is unknown (a change was dispatched and how it ended was not
+  observed; today `api post`/`put`/`delete`, for a task wait that ran out or
+  could not be completed); 4 refused before anything was dispatched (no
+  command yet); 130 interrupted by SIGINT, 143 by SIGTERM, which win over 3
+  and 4. Asking for help exits 0. `exec` exits with its command's own status
+  once it hands over. A second signal
   kills the process at once; the kernel releases any lock it held. The README
   holds the table, and `cmd/pveforge/readme_test.go` holds it to the code.
 - **Task waits.** A command that gets a PVE task id (a UPID) back waits for the

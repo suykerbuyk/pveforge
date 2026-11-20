@@ -39,7 +39,9 @@ A wait that times out (--wait-timeout, or the 10m0s ceiling) reports an
 outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C (SIGINT)
 or SIGTERM stops the wait and reports it the same way, exiting 130 or 143;
 a second Ctrl-C ends pveforge at once, without a report. Either way, follow
-it up with the UPID printed at dispatch:
+it up with the UPID printed at dispatch. Exit status: 3 when the wait ends
+without the outcome observed (a timeout, a failed poll); 130 or 143 for a
+signal; 1 for a task seen to fail and for any other error:
   pveforge api get /nodes/<node>/tasks/<upid>/status <target-id>
 
 .PP

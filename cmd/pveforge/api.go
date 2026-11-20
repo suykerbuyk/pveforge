@@ -159,6 +159,13 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "notice: --no-wait: not waiting for task %s; its outcome is not checked\n", kvjson.QuoteValue(upid))
 				}
 			} else if err := waitForAPITask(cmd.Context(), client, rawPath, upid, waitTimeout); err != nil {
+				// The task was dispatched. A wait that ended without
+				// observing how it ended exits 3, not 1; a task seen to
+				// fail stays a plain error (1). Only here: the request's own
+				// error above returns before any task exists.
+				if pve.IsTaskOutcomeUnknown(err) {
+					return newOutcomeUnknownError(err)
+				}
 				return err
 			}
 		}
@@ -243,7 +250,9 @@ A wait that times out (--wait-timeout, or the %[1]s ceiling) reports an
 outcome-unknown error: the task MAY STILL BE RUNNING on PVE. Ctrl-C (SIGINT)
 or SIGTERM stops the wait and reports it the same way, exiting 130 or 143;
 a second Ctrl-C ends pveforge at once, without a report. Either way, follow
-it up with the UPID printed at dispatch:
+it up with the UPID printed at dispatch. Exit status: 3 when the wait ends
+without the outcome observed (a timeout, a failed poll); 130 or 143 for a
+signal; 1 for a task seen to fail and for any other error:
   pveforge api get /nodes/<node>/tasks/<upid>/status <target-id>
 
 --no-wait prints the UPID and exits without checking the task. On a path

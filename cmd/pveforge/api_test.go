@@ -757,6 +757,9 @@ type apiTaskFake struct {
 	// onFirstPoll, if set, runs inside the first poll's handler, before it
 	// answers.
 	onFirstPoll func()
+	// mutStatus, if non-zero, is the HTTP status the mutation itself answers
+	// (with a null payload): a dispatch that fails before any task exists.
+	mutStatus int
 
 	all, mutations, polls int32
 
@@ -810,6 +813,11 @@ func newAPITaskServer(t *testing.T, f *apiTaskFake) string {
 			_, _ = fmt.Fprintf(w, `{"data":%s}`, data)
 		case r.URL.Path == base+f.mutPath:
 			atomic.AddInt32(&f.mutations, 1)
+			if f.mutStatus != 0 {
+				w.WriteHeader(f.mutStatus)
+				_, _ = w.Write([]byte(`{"data":null}`))
+				return
+			}
 			_, _ = fmt.Fprintf(w, `{"data":%s}`, f.body)
 		default:
 			_, _ = w.Write([]byte(`{"data":{"status":"running","vmid":100,"digest":"d"}}`))

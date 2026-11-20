@@ -433,11 +433,14 @@ locked; `--unsafe-no-lock` does not change that. On any other path:
 |---|---|
 | `0` | Success, including a command that completed with a printed warning, or completed although it was interrupted after its outcome was observed |
 | `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0 |
+| `3` | The outcome is unknown: the command dispatched a change to PVE and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Exit 3 is what `api post`, `api put` and `api delete` report for a PVE task whose wait ran out or could not be completed (a signal during that wait is 130 or 143 instead). Look the task up by the UPID printed at dispatch. Other commands that wait on a task report the same condition in their error text and exit `1` |
+| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. No command exits 4 yet |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
 
 `exec` exits with these statuses only when it fails before handing over. Once
-it runs the command, the exit status is the command's own.
+it runs the command, the exit status is the command's own, so a `3` or a `4`
+from `exec` is its command's, not pveforge's.
 
 On the first SIGINT or SIGTERM, pveforge stops and finishes any cleanup it had
 started. Unless it was only waiting for a lock or at a prompt, it says on

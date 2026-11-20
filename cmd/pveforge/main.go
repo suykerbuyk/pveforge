@@ -66,7 +66,11 @@ func realMain() int {
 //     text keeps at least its head (boundErrText) — between "interrupted (SIGINT): " and a note that a
 //     change already sent may or may not have been applied.
 //
-// An interrupted run exits 128+signum: 130 for SIGINT, 143 for SIGTERM.
+// An interrupted run exits 128+signum: 130 for SIGINT, 143 for SIGTERM, and
+// that wins over every other status below. A command that returns
+// outcomeUnknownError (a change was dispatched, its outcome not observed)
+// exits 3; one that returns refusedError (nothing was dispatched) exits 4;
+// both are built by the constructors in exitstatus.go. Every other error is 1.
 //
 // It also gives every command a context that reports a PVE task which
 // succeeded with warnings (pve.WithTaskWarnings): pveforge counts such a
@@ -87,10 +91,29 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	}
 	// Bounded first, so the interrupt wrapping below is never what is cut.
 	msg, code := boundErrText(err.Error()), 1
+	// A command's own outcome statuses (exitstatus.go). They come BEFORE the
+	// interrupt block, which overwrites them: a signal is 130/143 whatever the
+	// command had decided (an interrupt after dispatch is outcome-unknown in
+	// substance and exits as a signal).
+	// Outcome-unknown wins whenever an outcomeUnknownError is anywhere in the
+	// chain, so a refusal never claims "dispatched nothing" beside an
+	// unobserved dispatch.
+	var ou outcomeUnknownError
+	unknown := errors.As(err, &ou)
+	if unknown {
+		code = exitOutcomeUnknown
+	}
+	var rf refusedError
+	refused := !unknown && errors.As(err, &rf)
+	if refused {
+		code = exitRefused
+	}
 	var ie interruptError
 	if ctx := root.Context(); ctx != nil && errors.As(context.Cause(ctx), &ie) {
 		code = ie.exitCode()
-		if !errors.Is(err, lock.ErrLockWaitInterrupted) && !errors.Is(err, roster.ErrPromptInterrupted) && !errors.Is(err, errRollbackCompletedWitnessInterrupted) && !errors.Is(err, errVMCreatedTagWaitInterrupted) {
+		// A refusal dispatched nothing, so the note below, that a change may
+		// have been applied, would be false.
+		if !refused && !errors.Is(err, lock.ErrLockWaitInterrupted) && !errors.Is(err, roster.ErrPromptInterrupted) && !errors.Is(err, errRollbackCompletedWitnessInterrupted) && !errors.Is(err, errVMCreatedTagWaitInterrupted) {
 			msg = fmt.Sprintf("interrupted (%s): %s; any change the command had already sent may or may not have been applied", ie, msg)
 		}
 	}
