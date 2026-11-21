@@ -80,6 +80,13 @@ type VMDestroyClient interface {
 //
 // Not a PostApplier: Apply already verifies its own effect (step 3: the VM
 // is confirmed gone) before it returns.
+//
+// Apply has no production caller. Every construction is pinned by
+// internal/sourceguard/vmdestroy_callsites_test.go, which also refuses an
+// allowed construction's value escaping its function (to idempotent.Run, a
+// helper taking an Op, a return, a field): the production destroy is
+// cmd/pveforge/vm_destroy.go runVMDestroy, which uses Read and
+// StatusGatedStop only.
 type VMDestroy struct {
 	Client VMDestroyClient
 	VMID   int

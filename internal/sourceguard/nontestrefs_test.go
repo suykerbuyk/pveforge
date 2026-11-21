@@ -405,3 +405,95 @@ func TestTargetString(t *testing.T) {
 		}
 	}
 }
+
+// TestNonTestReferences_LiteralMatchesExactStringsOnly pins Target.Literal:
+// an interpreted and a raw string whose value is exactly Name, and nothing
+// else — not a longer string, not a different case, not an identifier of
+// the same name, not a concatenation, and not an import path (which is a
+// string literal too). Mutant: drop the BasicLit case, and this matches
+// nothing.
+func TestNonTestReferences_LiteralMatchesExactStringsOnly(t *testing.T) {
+	lit := Target{Literal: true, Name: "DELETE"}
+	res, err := NonTestReferences(Scope{Root: "testdata/literalfunc"}, []Target{lit})
+	if err != nil {
+		t.Fatalf("NonTestReferences: %v", err)
+	}
+	var got []string
+	for _, refs := range res.Refs {
+		for _, r := range refs {
+			got = append(got, fmt.Sprintf("%s:%d", r.File, r.Line))
+			if r.Qualifier != "" {
+				t.Errorf("a literal has no qualifier, got %q", r.Qualifier)
+			}
+		}
+	}
+	sort.Strings(got)
+	if want := "lit.go:10 lit.go:11"; strings.Join(got, " ") != want {
+		t.Errorf("Literal %s matched %v, want exactly [%s]", lit, got, want)
+	}
+
+	// The bare-identifier form must not start matching literals, nor the
+	// Literal form identifiers: they share byName's bucket.
+	res, err = NonTestReferences(Scope{Root: "testdata/literalfunc"}, []Target{{Name: "DELETE"}})
+	if err != nil {
+		t.Fatalf("NonTestReferences: %v", err)
+	}
+	got = nil
+	for _, refs := range res.Refs {
+		for _, r := range refs {
+			got = append(got, fmt.Sprintf("%s:%d", r.File, r.Line))
+		}
+	}
+	sort.Strings(got)
+	if want := "lit.go:14 lit.go:19"; strings.Join(got, " ") != want {
+		t.Errorf("bare DELETE matched %v, want exactly [%s] (the identifier, never a string)", got, want)
+	}
+}
+
+// TestNonTestReferences_LiteralIsItsOwnForm keeps Literal from combining with
+// a qualifier form, and pins its rendering in failure messages.
+func TestNonTestReferences_LiteralIsItsOwnForm(t *testing.T) {
+	for _, bad := range []Target{
+		{Literal: true, ImportPath: "net/http", Name: "DELETE"},
+		{Literal: true, AnyQualifier: true, Name: "DELETE"},
+	} {
+		_, err := NonTestReferences(Scope{Root: "testdata/literalfunc"}, []Target{bad})
+		if err == nil || !strings.Contains(err.Error(), "Literal") {
+			t.Errorf("target %#v: want a Literal-form error, got %v", bad, err)
+		}
+	}
+	if got := (Target{Literal: true, Name: "DELETE"}).String(); got != `"DELETE"` {
+		t.Errorf(`Literal String() = %s, want "DELETE"`, got)
+	}
+}
+
+// TestNonTestReferences_FuncIsTheEnclosingDeclaration pins Ref.Func, which a
+// (file, func)-keyed allow-list depends on. Mutant: return "" from
+// enclosingFunc, and every row below goes wrong.
+func TestNonTestReferences_FuncIsTheEnclosingDeclaration(t *testing.T) {
+	res, err := NonTestReferences(Scope{Root: "testdata/literalfunc"}, []Target{{Literal: true, Name: "MARK"}})
+	if err != nil {
+		t.Fatalf("NonTestReferences: %v", err)
+	}
+	got := map[int]string{}
+	for _, r := range res.Refs["funcs.go"] {
+		got[r.Line] = r.Func
+	}
+	want := map[int]string{
+		9:  "",           // a package-level var initialiser
+		11: "plain",      // a function
+		13: "T.value",    // a value receiver
+		15: "T.pointer",  // a pointer receiver: the * is stripped
+		17: "G.generic",  // a generic receiver: [K] stripped
+		19: "H.generic2", // two type parameters
+		22: "closure",    // a FuncLit belongs to its enclosing FuncDecl
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d refs %v, want %d", len(got), got, len(want))
+	}
+	for line, fn := range want {
+		if got[line] != fn {
+			t.Errorf("funcs.go:%d Func = %q, want %q", line, got[line], fn)
+		}
+	}
+}

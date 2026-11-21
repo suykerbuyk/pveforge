@@ -1,0 +1,4 @@
+Never compiled: testdata. TestVMDestroyCallSites_EveryTargetMatchesTheProbe
+walks this directory as its Root and requires every destroy target, and every
+.go file here except stdlib_delete.go (the slices.Delete control), to yield at
+least one violation. Each file is one idiom, written in production's own shape.

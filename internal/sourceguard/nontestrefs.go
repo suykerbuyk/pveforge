@@ -43,6 +43,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -51,9 +52,12 @@ import (
 // module's build. A directory with one of these names is skipped UNLESS it is
 // the walk root itself, so this package's own fixtures can live under testdata
 // and still be walked directly by passing the fixture directory as Root.
+// walkNonTest's other skip (a nested module under a top-level dot-directory)
+// is NOT name-based, on purpose: see walkNonTest for why a name skip would
+// hide compilable source.
 var skippedDirNames = map[string]bool{"testdata": true, ".git": true, "vendor": true}
 
-// Target names one symbol to look for. Exactly one of three forms, and the
+// Target names one symbol to look for. Exactly one of four forms, and the
 // form is what stops a bare name colliding with a qualified one:
 //
 //	Target{Name: "x"}                               a bare identifier `x` that
@@ -62,6 +66,12 @@ var skippedDirNames = map[string]bool{"testdata": true, ".git": true, "vendor": 
 //	Target{ImportPath: "net/http", Name: "Client"}  a selector whose left side
 //	                                                is THIS file's import name
 //	                                                for net/http — alias-proof
+//	Target{Literal: true, Name: "DELETE"}           a string literal whose
+//	                                                unquoted value is EXACTLY
+//	                                                Name ("DELETE" or `DELETE`;
+//	                                                not "DELETEX", not an
+//	                                                identifier DELETE, not an
+//	                                                import path)
 type Target struct {
 	// ImportPath, when set, matches a selector whose left-hand side is an
 	// identifier this file imports that path as, whatever it is named
@@ -71,7 +81,14 @@ type Target struct {
 	// receiver variable or a field. It is the only way to reach a method
 	// call, whose receiver's type parsing alone cannot know.
 	AnyQualifier bool
-	// Name is the identifier, or the selector's Sel. Required.
+	// Literal matches a string literal (interpreted or raw) whose value is
+	// exactly Name. It is how a guard sees a method or symbol spelled as
+	// DATA — RawRequest(ctx, "DELETE", …), MethodByName("DestroyVM") —
+	// which no identifier form can. Exact, never a substring: a computed
+	// string ("DEL"+"ETE") is out of its reach.
+	Literal bool
+	// Name is the identifier, the selector's Sel, or the literal's value.
+	// Required.
 	Name string
 }
 
@@ -81,6 +98,8 @@ func (t Target) String() string {
 		return t.ImportPath + "." + t.Name
 	case t.AnyQualifier:
 		return "*." + t.Name
+	case t.Literal:
+		return strconv.Quote(t.Name)
 	default:
 		return t.Name
 	}
@@ -92,6 +111,9 @@ func (t Target) validate() error {
 	}
 	if t.ImportPath != "" && t.AnyQualifier {
 		return fmt.Errorf("sourceguard: target %q sets both ImportPath and AnyQualifier; use one form", t)
+	}
+	if t.Literal && (t.ImportPath != "" || t.AnyQualifier) {
+		return fmt.Errorf("sourceguard: target %q sets Literal with ImportPath or AnyQualifier; a literal has no qualifier, use one form", t)
 	}
 	return nil
 }
@@ -122,6 +144,19 @@ type Ref struct {
 	// method call is the receiver expression and not a package. It is empty
 	// for a bare identifier.
 	Qualifier string
+	// Func is the top-level function declaration the ref sits in: "Name"
+	// for a function, "Recv.Name" for a method (the receiver's type name,
+	// with any * and type parameters stripped, so (c *T[K]) M is "T.M").
+	// A function literal belongs to the declaration that encloses it, so a
+	// cobra RunE closure is attributed to its constructor. It is "" at
+	// package level: a var initialiser, a type or interface declaration.
+	// Several `func init()` or `func _()` in one file share one key, as
+	// they share one name: a guard keyed on Func counts them together.
+	//
+	// It is what lets a guard key an allow-list on (file, function) rather
+	// than on the file: a file-level allow cannot see a second function, a
+	// wrapper, added to an allowed file.
+	Func string
 	// Allowed reports whether an AllowDir or AllowFile permitted this ref.
 	Allowed bool
 }
@@ -263,6 +298,12 @@ func NonTestReferences(scope Scope, targets []Target) (Result, error) {
 		if lerr != nil {
 			return lerr
 		}
+		// An import path is a string literal too; it names a package, never
+		// a value, so a Literal target must not match it.
+		importLit := map[*ast.BasicLit]bool{}
+		for _, im := range file.Imports {
+			importLit[im.Path] = true
+		}
 
 		// A selector's Sel is itself an *ast.Ident and ast.Inspect visits
 		// both, so a bare-name target would otherwise match the right-hand
@@ -284,6 +325,7 @@ func NonTestReferences(scope Scope, targets []Target) (Result, error) {
 				File:      rel,
 				Line:      fset.Position(pos).Line,
 				Qualifier: qual,
+				Func:      enclosingFunc(file, pos),
 				Allowed:   allowed,
 			})
 		}
@@ -311,7 +353,20 @@ func NonTestReferences(scope Scope, targets []Target) (Result, error) {
 					return true
 				}
 				for _, t := range byName[node.Name] {
-					if t.ImportPath == "" && !t.AnyQualifier {
+					if t.ImportPath == "" && !t.AnyQualifier && !t.Literal {
+						add(t, node.Pos(), "")
+					}
+				}
+			case *ast.BasicLit:
+				if node.Kind != token.STRING || importLit[node] {
+					return true
+				}
+				v, uerr := strconv.Unquote(node.Value)
+				if uerr != nil {
+					return true
+				}
+				for _, t := range byName[v] {
+					if t.Literal {
 						add(t, node.Pos(), "")
 					}
 				}
@@ -328,6 +383,43 @@ func NonTestReferences(scope Scope, targets []Target) (Result, error) {
 		return zero, fmt.Errorf("sourceguard: NonTestReferences parsed no non-test .go files under %s — wrong Root?", scope.Root)
 	}
 	return res, nil
+}
+
+// enclosingFunc names the top-level FuncDecl whose span holds pos, in Ref.Func's
+// form, or "" when pos is at package level.
+func enclosingFunc(file *ast.File, pos token.Pos) string {
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || pos < fd.Pos() || pos >= fd.End() {
+			continue
+		}
+		if fd.Recv == nil || len(fd.Recv.List) == 0 {
+			return fd.Name.Name
+		}
+		return recvTypeName(fd.Recv.List[0].Type) + "." + fd.Name.Name
+	}
+	return ""
+}
+
+// recvTypeName strips a receiver type expression to its type's name:
+// *T, T[K], *T[K, V] are all "T".
+func recvTypeName(e ast.Expr) string {
+	for {
+		switch x := e.(type) {
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return fmt.Sprintf("%T", e)
+		}
+	}
 }
 
 // importNames maps file's qualifier identifiers to the import paths they

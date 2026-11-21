@@ -115,6 +115,10 @@ func (c *Client) StopVM(ctx context.Context, node string, vmid int) (string, err
 // guest. Its two callers happen to destroy guests they never started, but
 // nothing enforces that. Do not read the gated Op's posture onto it.
 //
+// Every reference to it is pinned, (file, function, count), by
+// internal/sourceguard/vmdestroy_callsites_test.go; the one production
+// caller is cmd/pveforge/vm_destroy.go runVMDestroy.
+//
 // Returns the UPID of the PVE task the destroy call kicks off, for the
 // caller to hand to WaitForTask.
 func (c *Client) DestroyVM(ctx context.Context, node string, vmid int, purge bool) (string, error) {

@@ -230,8 +230,9 @@ func TestVMDestroy_NoLocalRecordDecidesOrAppears(t *testing.T) {
 }
 
 // M60-M62 as SOURCE pins: the idioms that must not be pasted into the verb.
-// This is a test in cmd/pveforge, not an edit to internal/sourceguard (U7 owns
-// the DestroyVM call-site guard).
+// This is a test in cmd/pveforge, not an edit to internal/sourceguard: the
+// module-wide DestroyVM call-site guard is
+// internal/sourceguard/vmdestroy_callsites_test.go (U7).
 func TestVMDestroy_SourcePins(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "vm_destroy.go", nil, parser.SkipObjectResolution)
