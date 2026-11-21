@@ -287,7 +287,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 		"api", "api/delete", "api/get", "api/post", "api/put",
 		"bootstrap",
 		"completion", "completion/bash", "completion/fish", "completion/powershell", "completion/zsh",
-		"discover", "discover/device", "discover/network", "discover/node", "discover/storage", "discover/vm",
+		"discover", "discover/device", "discover/network", "discover/node", "discover/storage", "discover/vm", "doctor",
 		"exec",
 		"group", "group/ensure",
 		"harness", "harness/build", "harness/golden", "harness/probe", "harness/reset", "harness/vm",

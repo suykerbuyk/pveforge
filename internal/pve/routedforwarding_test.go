@@ -1914,6 +1914,7 @@ var routedClientSeam = map[string]seamEntry{
 	"PlacementOf":                    {tests: []string{"TestRoutedForwarding_GoneProofMethods"}},
 	"ClusterNodes":                   {tests: []string{"TestRoutedForwarding_GoneProofMethods"}},
 	"JudgeGone":                      {tests: []string{"TestRoutedForwarding_GoneProofMethods"}},
+	"CheckVerb":                      {tests: []string{"TestRoutedForwarding_CheckVerb"}},
 	"StorageType":                    {tests: []string{"TestRoutedForwarding_NodeBinding", "TestRoutedClient_StorageType_Forwards"}},
 
 	// Added by unit 5b, with their forwarding test in snapshot_test.go.

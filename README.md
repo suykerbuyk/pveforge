@@ -52,6 +52,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `vm destroy` | Destroy the VM you name and prove it is gone; re-running resolves an outcome left unknown |
 | `vm snapshot list` / `create` / `delete` / `rollback` | List, create and delete a VM's snapshots; roll back to the newest one and prove the guest came back |
 | `node get`, `storage get`, `network get` | Read a node, storage backend, or network interface |
+| `doctor <target> [--vmid N]` | Report which privileges `vm destroy` needs and which the token holds (token over REST, GET only; exit 4 unless every row is held) |
 | `network set`, `network bridge create` / `destroy` | Change node-level network interfaces |
 | `storage orphans` | Diff claimed against actual storage volumes |
 | `storage create` | Create a cluster-wide storage definition, idempotently; refuses a differing one |
@@ -523,7 +524,7 @@ Residuals the command states rather than hides:
 | `0` | Success, including a command that completed with a printed warning, or completed although it was interrupted after its outcome was observed |
 | `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0 |
 | `3` | The outcome is unknown: the command dispatched a change to PVE and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Exit 3 is what `api post`, `api put`, `api delete` and `vm destroy` report (a signal during the wait is 130 or 143 instead). Look the task up by the UPID printed at dispatch, or re-run `vm destroy`. The other commands that wait on a task (`vm create`, the snapshot and network commands) report the same condition in their error text and still exit `1` |
-| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. `vm destroy` is the command that exits 4 |
+| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. `vm destroy` and `doctor` are the commands that exit 4; `doctor` exits 4 when any privilege is missing, unknown or not checked, so pass `--vmid` to check the VM privileges, or grant what is missing |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
 

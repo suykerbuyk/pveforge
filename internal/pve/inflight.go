@@ -3,8 +3,6 @@ package pve
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 )
@@ -199,16 +197,17 @@ func nodeDestroyView(ctx context.Context, c *Client, node string, vmid, limit in
 	// and the typed GetNode read cannot tell them apart at all: a token client
 	// collapses both to the bare sentinel. The privilege is named from the
 	// code, never by echoing PVE's body.
-	statusPath := fmt.Sprintf("/nodes/%s/status", url.PathEscape(node))
-	if _, err := c.RawRequest(ctx, http.MethodGet, statusPath, nil); err != nil {
-		if code, ok := HTTPStatus(err); ok && code == http.StatusForbidden {
-			priv := fmt.Sprintf("Sys.Audit on /nodes/%s", node)
-			return nil, &InFlightRefusal{
-				Situation: SituationUnreadable, Node: node, VMID: vmid,
-				Read: "GET " + statusPath, ReadErr: err.Error(), Privilege: priv,
-				Condition: fmt.Sprintf("grant this token %s, then re-run: without it the task list is filtered to the token's own tasks and cannot show whether a destroy of vmid %d is in flight", priv, vmid),
-			}
+	statusPath, verdict, err := c.NodeStatusRead(ctx, node)
+	switch verdict {
+	case VerdictHeld:
+	case VerdictMissing:
+		priv := fmt.Sprintf("Sys.Audit on /nodes/%s", node)
+		return nil, &InFlightRefusal{
+			Situation: SituationUnreadable, Node: node, VMID: vmid,
+			Read: "GET " + statusPath, ReadErr: err.Error(), Privilege: priv,
+			Condition: fmt.Sprintf("grant this token %s, then re-run: without it the task list is filtered to the token's own tasks and cannot show whether a destroy of vmid %d is in flight", priv, vmid),
 		}
+	default:
 		return nil, unreadableRefusal(node, vmid, "GET "+statusPath, err.Error())
 	}
 

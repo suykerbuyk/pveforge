@@ -431,6 +431,12 @@ func (c *RoutedClient) ClusterNodes(ctx context.Context) NodeSet {
 	return c.rest.ClusterNodes(ctx, c.target.Node)
 }
 
+// CheckVerb judges every requirement of verb against this target's node, over
+// REST only — see Client.CheckVerb.
+func (c *RoutedClient) CheckVerb(ctx context.Context, verb string, vmid int) ([]RequirementResult, error) {
+	return c.rest.CheckVerb(ctx, verb, c.target.Node, vmid)
+}
+
 // JudgeGone decides whether the destroy of vmid is proven, with this target's
 // node as the roster node — see Client.JudgeGone.
 func (c *RoutedClient) JudgeGone(ctx context.Context, vmid int, ev GoneEvidence) *GoneVerdict {

@@ -181,6 +181,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newGroupCmd())
 	root.AddCommand(newACLCmd())
 	root.AddCommand(newAccessCmd())
+	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newSchemaCmd())
 	// cobra adds these two only inside Execute; add them now so the walk
 	// below covers completion's group as well.

@@ -1,6 +1,7 @@
 package pvefake
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,14 @@ type VMREST struct {
 	// hazard a visibility precondition exists for, and it is scripted here
 	// independently on purpose.
 	NodeStatus int
+
+	// Permissions is the token's own effective tree, path -> privilege ->
+	// propagate, served by GET /access/permissions. With ?path=P the answer is
+	// keyed by exactly P (an empty object when nothing is held there), as PVE
+	// answers. PermissionsStatus is the status code, 0 meaning 200. The route is
+	// STRICT: any query parameter but path, or a non-GET, fails the test.
+	Permissions       map[string]map[string]bool
+	PermissionsStatus int
 
 	// TasksStatus is the status code the task COLLECTION answers with; 0
 	// means 200. Independent of NodeStatus.
@@ -352,6 +361,9 @@ func (s *VMREST) handler() http.Handler {
 			}
 			s.reflect("qmdestroy", vmidFromPath(r.URL.Path), s.DestroyUPID)
 			_, _ = fmt.Fprintf(w, `{"data":%q}`, s.DestroyUPID)
+
+		case r.URL.Path == base+"/access/permissions":
+			s.servePermissions(w, r)
 
 		case r.URL.Path == base+"/cluster/nextid":
 			vmid := r.URL.Query().Get("vmid")
@@ -732,4 +744,50 @@ func joinRows(rows []TaskRow) string {
 func pveErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_, _ = fmt.Fprintf(w, `{"message":%q,"data":null}`, msg)
+}
+
+// servePermissions answers GET /access/permissions. Strict by design: a request
+// the production client must never make (a write, a parameter PVE's schema here
+// is not asked for) fails the test instead of being answered plausibly.
+func (s *VMREST) servePermissions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.t.Errorf("pvefake VMREST: %s /access/permissions: only GET is served", r.Method)
+		pveErr(w, http.StatusMethodNotAllowed, "unscripted")
+		return
+	}
+	for k := range r.URL.Query() {
+		if k != "path" {
+			s.t.Errorf("pvefake VMREST: /access/permissions got an unscripted parameter %q", k)
+			pveErr(w, http.StatusBadRequest, "unscripted")
+			return
+		}
+	}
+	if s.PermissionsStatus != 0 && s.PermissionsStatus != http.StatusOK {
+		pveErr(w, s.PermissionsStatus, "permissions refused")
+		return
+	}
+	tree := map[string]map[string]bool{}
+	if p := r.URL.Query().Get("path"); p != "" {
+		tree[p] = map[string]bool{}
+		for priv, flag := range s.Permissions[p] {
+			tree[p][priv] = flag
+		}
+	} else {
+		for p, privs := range s.Permissions {
+			tree[p] = privs
+		}
+	}
+	out := make(map[string]map[string]int, len(tree))
+	for p, privs := range tree {
+		out[p] = map[string]int{}
+		for priv, flag := range privs {
+			if flag {
+				out[p][priv] = 1
+			} else {
+				out[p][priv] = 0
+			}
+		}
+	}
+	b, _ := json.Marshal(out)
+	_, _ = fmt.Fprintf(w, `{"data":%s}`, b)
 }

@@ -580,7 +580,8 @@ command tree (`make man`) and held to it byte for byte
   3 the outcome is unknown (a change was dispatched and how it ended was not
   observed; `api post`/`put`/`delete`, for a task wait that ran out or could
   not be completed, and `vm destroy`); 4 refused before anything was
-  dispatched (`vm destroy`); 130 interrupted by SIGINT, 143 by SIGTERM, which win over 3
+  dispatched (`vm destroy`, and `doctor` when a privilege is missing, unknown or not
+  checked: pass `--vmid`, or grant what is missing); 130 interrupted by SIGINT, 143 by SIGTERM, which win over 3
   and 4. Asking for help exits 0. `exec` exits with its command's own status
   once it hands over. A second signal
   kills the process at once; the kernel releases any lock it held. The README
@@ -974,7 +975,7 @@ holds this table to every runnable command's annotation, both ways):
 |---|---|
 | destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `api post`, `api put`, `api delete`, `network bridge destroy`, `storage create`, `storage alloc`, `storage free-orphans`, `vm snapshot delete`, `vm snapshot rollback`, `vm destroy`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe`, `harness golden`, `harness reset`, `harness build` |
 | mutating | `roster pin-tls`, `vm create`, `vm set`, `vm snapshot create`, `network set`, `network bridge create`, `storage set-content`, `user ensure`, `group ensure`, `harness vm snapshot create` |
-| safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `access keys`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
+| safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `access keys`, `doctor`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
 
 Cobra's own `help` and `completion` commands carry no tier.
 

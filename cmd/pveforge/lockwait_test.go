@@ -214,6 +214,7 @@ var lockingCommands = []string{
 	"pveforge api post",
 	"pveforge api put",
 	"pveforge bootstrap",
+	"pveforge doctor",
 	"pveforge group ensure",
 	"pveforge harness build",
 	"pveforge harness golden",
