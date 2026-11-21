@@ -192,6 +192,33 @@ func ValidateTokenGrants(ctx context.Context, c *Client, want []Grant) error {
 		}
 	}
 
+	ex := &existence{c: c}
+	return JudgeTree(ctx, want, privs, tree, members, held, ex.check, c.PathPermissions)
+}
+
+// ExistsFunc answers whether the object at a member-shaped ACL path (/vms/<n>,
+// /storage/<id>) exists; PathPermsFunc reads the permissions a token holds at
+// exactly one path. They are what JudgeTree's pool-membership clause and its
+// presence loop need beyond the tree itself, injected so the judgement is a
+// function of what it is given.
+type (
+	ExistsFunc    func(ctx context.Context, path string) (bool, error)
+	PathPermsFunc func(ctx context.Context, path string) (map[string]bool, error)
+)
+
+// JudgeTree is the post-read half of ValidateTokenGrants, moved verbatim: the
+// upper bound over tree (every (path, privilege, propagate) must be conferred
+// by a requested grant, else ErrScopeTooWide) and presence at each requested
+// path (ErrWrongScope), with the same verdict order. privs[i] is want[i]'s
+// privilege set, members[i] its resolved pool membership (nil: unresolved),
+// and held caches ?path= answers already read. existsFn is called only for a
+// path that fails the bound solely through unresolved pool membership, which
+// needs a /pool/ grant in want; pathPerms only for a grant path not in held.
+//
+// Both ValidateTokenGrants and the enable-vm-destroy verb's whole-tree
+// precondition call it, so the comparison exists once: a rule fixed here is
+// fixed for both, and a planted inversion fails both suites.
+func JudgeTree(ctx context.Context, want []Grant, privs []map[string]bool, tree map[string]map[string]bool, members []map[string]bool, held map[string]map[string]bool, existsFn ExistsFunc, pathPerms PathPermsFunc) error {
 	// The bound. A path whose privileges only a pool grant would confer, and
 	// that is not a member of the resolved pool, is too wide only if the
 	// object exists: an absent one is an orphaned pool entry (a config gone
@@ -199,7 +226,6 @@ func ValidateTokenGrants(ctx context.Context, c *Client, want []Grant) error {
 	// cannot see, and gets no verdict. A definite ErrScopeTooWide
 	// on any path wins over such a non-verdict, so the scan goes on past it.
 	var wide, unsure error
-	ex := &existence{c: c}
 	for _, path := range sortedKeys(tree) {
 		var unsourced []string
 		for _, priv := range sortedKeys(tree[path]) {
@@ -211,8 +237,8 @@ func ValidateTokenGrants(ctx context.Context, c *Client, want []Grant) error {
 			continue
 		}
 		if onlyMembership(want, privs, path, unsourced, tree[path]) {
-			exists, err := ex.check(ctx, path)
-			if err != nil || !exists {
+			found, err := existsFn(ctx, path)
+			if err != nil || !found {
 				if unsure == nil {
 					if err == nil {
 						err = fmt.Errorf("validate token grants: %w: at %s the token holds %s through pool membership, but %s is not a member of the pool and does not exist or is not visible to the token (an orphaned pool entry, whose config is gone?)", ErrUnverifiableRead, path, strings.Join(unsourced, ","), path)
@@ -233,7 +259,7 @@ func ValidateTokenGrants(ctx context.Context, c *Client, want []Grant) error {
 		h, ok := held[g.Path]
 		if !ok {
 			var err error
-			if h, err = c.PathPermissions(ctx, g.Path); err != nil {
+			if h, err = pathPerms(ctx, g.Path); err != nil {
 				return fmt.Errorf("validate token grants: %w", readFailure("read permissions at "+g.Path, err))
 			}
 		}

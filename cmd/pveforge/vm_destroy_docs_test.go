@@ -242,7 +242,7 @@ func TestGuide_VMDestroyPrivilegeMatchesTheRefusal(t *testing.T) {
 	}
 	// The custom role is PVEVMAdmin's list (read live from PVE 9.2.11) plus
 	// Sys.Audit: 24 privileges, no more, no fewer.
-	m := regexp.MustCompile(`pveum role add PVEForgeVMAdminAudit --privs "([^"]+)"`).FindStringSubmatch(guide)
+	m := regexp.MustCompile(`pveum role add ForgeVMAdminAudit --privs "([^"]+)"`).FindStringSubmatch(guide)
 	if m == nil {
 		t.Fatal("the grant procedure has no `pveum role add` line")
 	}

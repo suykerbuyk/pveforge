@@ -46,6 +46,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `exec <target> -- <command>` | Run a command with the target's API token in its environment |
 | `user ensure`, `group ensure` | Create a PVE user or group, or bring it to the state asked for (as root over SSH) |
 | `acl grant` | Grant a role on a path to a user, group or token (as root over SSH) |
+| `acl enable-vm-destroy` | Give the roster's token the privileges `vm destroy` needs (`Sys.Audit`) without rotating it (as root over SSH) |
 | `access inventory` | List every user, group and ACL entry, and each `@pam` user's account on the node (read as root over SSH) |
 | `access keys` | List pveforge's SSH keys in root's `authorized_keys`, which roster holds each, and each stray's manual removal command (read-only) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
@@ -199,6 +200,12 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
         --no-ssh-key --reprovisioned --host-key-fingerprint SHA256:<console> \
         --token-owner pveforge-harness@pve --token-id build --grant …
 
+  The `--grant /:PVEVMAdmin::1` above gives a token that cannot run `vm destroy`.
+  For one that can, run `pveforge acl enable-vm-destroy qa-pve-07 --role-only`
+  first, then bootstrap with `--grant /:ForgeVMAdminAudit::1`. `--role-only`
+  creates the role and nothing else: a rebuilt node's roster still holds the old
+  token record, which PVE no longer knows, so without the flag the command would
+  take it for a token to upgrade and refuse.
   The second needs its owner, pool and roles recreated first (for the nested
   harness: D5's G1–G3); a rebuild does not keep them. A disposable roster (a
   harness nested target) can instead be moved aside and bootstrapped afresh.
@@ -223,6 +230,9 @@ by `--token-owner` (default: `--pve-user`). It records the token in the roster.
   got; `ssh-keyscan <host> | ssh-keygen -lf -` lists every type served.
 - Re-running `bootstrap` with different grants, or a different owner, can
   replace, revoke or orphan the held token. `--help` describes each case.
+  After `acl enable-vm-destroy`, the token holds `ForgeVMAdminAudit` as well as
+  `PVEVMAdmin`: re-run bootstrap only with `--grant /:ForgeVMAdminAudit::1`,
+  which is `reused`. `--grant /:PVEVMAdmin::1` would revoke it for every holder.
   **The command's own output and its stderr warnings are the record of what
   happened to each token.** Read them.
 
@@ -474,9 +484,11 @@ The token needs `Sys.Audit` on `/nodes/<node>` (PVE filters the task list to a
 token's own tasks without it, and the command refuses rather than trust that
 list), `VM.PowerMgmt` (the stop) and `VM.Allocate` (the destroy). Resolving a
 retry also reads the cluster member list, which needs `Sys.Audit` on `/`.
-`PVEVMAdmin` holds the last two and neither audit privilege; the operator guide
+`PVEVMAdmin` holds the last two and neither audit privilege.
+`pveforge acl enable-vm-destroy <target>` adds `Sys.Audit` to the roster's token
+without revoking or re-minting it; the operator guide
 ([`docs/operations/secrets-and-keys.md`](docs/operations/secrets-and-keys.md),
-procedure 11) shows how to add it.
+procedure 11) describes it and what to run afterwards.
 
 Residuals the command states rather than hides:
 - PVE decides, from a read followed later by a write. Another actor can start a

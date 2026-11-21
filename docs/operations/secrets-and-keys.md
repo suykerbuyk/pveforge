@@ -624,57 +624,120 @@ privileges, and one of them `PVEVMAdmin` lacks:
 
 `PVEVMAdmin` holds the last two. `PVEAuditor` holds `Sys.Audit`. Bootstrap
 refuses two grants on one path, so the token cannot be given both roles on `/`
-through `--grant`; the way is one custom role. Its privileges are
-`PVEVMAdmin`'s exactly, plus `Sys.Audit`, nothing added and nothing dropped.
-`PVEVMAdmin`'s list below was read live from the nested PVE 9.2.11 on
-2026-11-20 (`GET /access/roles/PVEVMAdmin`). Read it again on your own PVE
-before creating the role, because PVE changes its builtin roles between
-releases.
+through `--grant`; the way is one custom role holding `PVEVMAdmin`'s privileges
+plus `Sys.Audit`, added to the token as a second ACL row.
 
-1. **Read the builtin role** as root on the node, and compare it with the list
-   here:
+**Use the command.** It does all of this, reads PVE's own state first, and
+refuses anything it cannot make safe:
 
-   ```
-   pveum role list --output-format json
-   ```
+```
+pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml --dry-run
+pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml
+pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml --role-only
+```
 
-2. **Create the role** as root on the node. Its privileges are the 23 of
-   `PVEVMAdmin` plus `Sys.Audit`:
+- It ensures the role `ForgeVMAdminAudit` (or `--role NAME`): exactly
+  `PVEVMAdmin`'s privileges **as read from your PVE now**, plus `Sys.Audit`,
+  checked against `Administrator`'s (PVE's own list of every valid privilege).
+  It prints them. PVE refuses to create any role whose id starts with `PVE` in
+  any case (`API2/Role.pm`, since libpve-access-control 8.0.0), so the role
+  cannot be called `PVEForge…`; the command refuses such a `--role` before it
+  connects.
+- A **fresh or rebuilt** target takes `--role-only`: only the role is ensured, the
+  token's permissions are never read and nothing is added to the token, whatever
+  the roster holds. Mint the token next with `pveforge bootstrap <target>
+  --grant /:ForgeVMAdminAudit::1`. A rebuilt node's roster still holds the old
+  token record, which PVE no longer knows; without `--role-only` the command
+  would take it for a token to upgrade and refuse (`ErrNotVMAdminToken`, nothing
+  written). A roster that holds no token at all gets the role only too.
+- Without `--role-only`, a target whose token holds `PVEVMAdmin` on `/` is **upgraded in place**: the
+  role is added to it with `pveum acl modify / --tokens … --roles … --propagate
+  1`. The token is not revoked and not re-minted; its secret and its
+  `PVEVMAdmin` row are kept. Every other roster holding the token keeps working.
+- Before writing anything it predicts the token's whole effective permission
+  tree after the grant and checks it twice: the validator's own comparison
+  against `/:ForgeVMAdminAudit::1` must accept it (so a later bootstrap would
+  call the token `reused`), and the grant must widen the token by no privilege
+  but `Sys.Audit`. It refuses, writing nothing, a token that does not already
+  hold `PVEVMAdmin`'s privileges (it never widens a limited token), one with a
+  grant below `/` that a later bootstrap would call too wide, and one that
+  inherits `Administrator` (a `root@pam` token with no ACL row of its own). A
+  role of that name that exists with a different privilege set is refused too:
+  PVE's role update replaces the set, and other principals may hold it.
+- It verifies by reading the token's **effective permissions** back, not the
+  ACL row. For a token owned by a non-root user, PVE intersects the token's
+  privileges with the owner's, so the owner itself must hold `Sys.Audit` on `/`
+  with propagate 1; the command never grants the owner.
+- It holds bootstrap's per-target lock for the write, so a bootstrap of the same
+  target on the same roster waits (`--lock-wait` bounds it). PVE has no
+  compare-and-set: another root session that edits the role between the
+  command's read and its write is detected afterwards (the role is re-read and
+  must equal the derived set, and the token's actual tree must still be one
+  `bootstrap --grant /:ForgeVMAdminAudit::1` accepts and a widening of at most
+  `Sys.Audit`), and the error names the exact `pveum acl delete` that takes the
+  grant back. The command deletes nothing itself. A tree that differs from the
+  command's prediction but holds that invariant (a pool member path, say) is a
+  success with a `note:` on stderr.
+- Run again, it changes nothing (`already enabled`): that needs the token's own
+  ACL row for the role on `/` with propagate 1, the role equal to the derived
+  set, and the token's effective permissions holding all of it.
 
-   ```
-   pveum role add PVEForgeVMAdminAudit --privs "VM.Allocate,VM.Audit,VM.Backup,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.GuestAgent.Audit,VM.GuestAgent.FileRead,VM.GuestAgent.FileSystemMgmt,VM.GuestAgent.FileWrite,VM.GuestAgent.Unrestricted,VM.Migrate,VM.PowerMgmt,VM.Replicate,VM.Snapshot,VM.Snapshot.Rollback,Sys.Audit"
-   ```
+**Which bootstrap command is safe afterwards.** A token is validated by its
+**effective permissions**, never by its ACL rows (`internal/pve/validate.go`),
+and a verdict about a held token that PVE still lists REVOKES it
+(`internal/bootstrap/rotation.go`, `tokenPhase`; only a 401/403 refuses
+instead). Measured on the real validator over the repo's live fixtures:
 
-3. **Add it to the live token, without rotating the token.** An additional ACL
-   row keeps the token, its secret and its `PVEVMAdmin` row:
+| The token holds | `bootstrap --grant /:ForgeVMAdminAudit::1` | `bootstrap --grant /:PVEVMAdmin::1` |
+|---|---|---|
+| `ForgeVMAdminAudit` only (minted that way, path A) | **reused** | `ErrWrongScope`: **revokes** |
+| `PVEVMAdmin` + `ForgeVMAdminAudit` (upgraded, path B) | **reused** | `ErrScopeTooWide`: **revokes** |
+| `PVEVMAdmin` only, not upgraded (path C) | `ErrWrongScope`: **revokes** | reused |
 
-   ```
-   pveum acl modify / --tokens 'root@pam!pveforge' --roles PVEForgeVMAdminAudit --propagate 1
-   ```
+After the upgrade, re-run bootstrap only with `--grant /:ForgeVMAdminAudit::1`.
+`--grant /:PVEVMAdmin::1`, the example elsewhere in this guide, would now
+revoke the token for every holder. On a token that has **not** been upgraded,
+`--grant /:ForgeVMAdminAudit::1` revokes it too: that is why the command exists.
+The union role is deliberate: a role holding `Sys.Audit` alone would leave NO
+`--grant` list that is `reused`, since bootstrap allows one grant per path. Its
+cost is drift: after a PVE release widens `PVEVMAdmin`, the command refuses (the
+role no longer equals the derived set) and `--grant /:ForgeVMAdminAudit::1` on a
+token holding both rows becomes `ErrScopeTooWide`; check `PVEVMAdmin` before
+upgrading PVE.
 
-4. **Verify**, against a VM that does not exist. The command reads and refuses
-   without dispatching anything (`outcome=refused`, exit 4, and
-   `B5-absent-without-task` when every privilege is held):
+**Verify**, against a VM that does not exist. The command reads and refuses
+without dispatching anything (`outcome=refused`, exit 4, and
+`B5-absent-without-task` when every privilege is held):
 
-   ```
-   pveforge vm destroy qa-pve-07 999998 --roster ./pveforge.toml --yes
-   ```
+```
+pveforge vm destroy qa-pve-07 999998 --roster ./pveforge.toml --yes
+```
 
-**Do not add the privilege by re-running bootstrap with the new role.** A
-token is validated by its effective privileges (`internal/pve/validate.go`),
-and the two ways a held token can differ from a re-run's grants end
-differently (`internal/bootstrap/rotation.go`, `tokenPhase`):
+**Manual fallback**, when the command cannot run. As root on the node, read the
+builtin role and compare:
 
-- **After step 3 the held set is WIDER than `PVEForgeVMAdminAudit` alone**: the
-  token still holds its `PVEVMAdmin` row as well. That is `ErrScopeTooWide`,
-  and a bootstrap re-run REVOKES the token while PVE still lists it, for every
-  holder, then mints a replacement (procedure 5).
-- **A token that LACKS something the role confers** (before step 3, if you
-  re-ran bootstrap first) is `ErrWrongScope`. That revokes only when the token
-  is also absent from PVE.
+```
+pveum role list --output-format json
+```
 
-So do not re-run bootstrap against the live token to add this. This was
-derived by reading those two files, not rehearsed on a fake bootstrap PVE.
+Create the role, with `PVEVMAdmin`'s privileges plus `Sys.Audit` (the 23 below
+were read live from PVE 9.2.11 on 2026-11-20; read yours again, PVE changes its
+builtin roles between releases). The name must not start with `PVE`:
+
+```
+pveum role add ForgeVMAdminAudit --privs "VM.Allocate,VM.Audit,VM.Backup,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.GuestAgent.Audit,VM.GuestAgent.FileRead,VM.GuestAgent.FileSystemMgmt,VM.GuestAgent.FileWrite,VM.GuestAgent.Unrestricted,VM.Migrate,VM.PowerMgmt,VM.Replicate,VM.Snapshot,VM.Snapshot.Rollback,Sys.Audit"
+```
+
+Add it to the token, without rotating it. An additional ACL row keeps the
+token, its secret and its `PVEVMAdmin` row:
+
+```
+pveum acl modify / --tokens 'root@pam!pveforge' --roles ForgeVMAdminAudit --propagate 1
+```
+
+The manual route has none of the command's checks (a descendant grant, an
+inherited `Administrator`, a drifted role). Afterwards the table above applies
+unchanged.
 
 What this does NOT do: nothing here protects against naming the wrong VM
 correctly. `vm destroy` has no VMID band, ledger, pool or tag guard.

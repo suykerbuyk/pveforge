@@ -65,6 +65,12 @@ var rootWriterSites = []struct {
 	{"cmd/pveforge/vm.go", tgtClusterGst, 2},           // the check and the visibility wait
 	{"cmd/pveforge/storage.go", tgtClusterGst, 1},      // the cluster-wide shared-storage free's root enumeration
 	{"internal/bootstrap/access.go", tgtACLModify, 1},
+	// acl enable-vm-destroy (vmdestroygrant.go): two root reads (the role list,
+	// a user's or token's whole permission tree) and ONE write, enableWrite,
+	// which screens its argv to exactly two shapes before pveumWrite. It never
+	// reaches aclModify (internal/sourceguard/enablegrant_guard_test.go).
+	{"internal/bootstrap/vmdestroygrant.go", tgtPveum, 2},
+	{"internal/bootstrap/vmdestroygrant.go", tgtPveumWrite, 1},
 }
 
 // TestRootAccessWriters_OnlyAtTheirSites: no non-test file calls a root

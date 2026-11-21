@@ -443,6 +443,14 @@ func (c *Client) RolePrivileges(ctx context.Context, role string) ([]string, err
 	return privs, nil
 }
 
+// DecodePermissionTree is decodePermTree for a caller that holds the same
+// payload from another channel: `pveum user permissions <id>` prints exactly
+// GET /access/permissions' data object, and the enable-vm-destroy verb reads
+// a token's whole tree that way as root. One strict decoder, not a second.
+func DecodePermissionTree(raw []byte) (map[string]map[string]bool, error) {
+	return decodePermTree(json.RawMessage(raw))
+}
+
 // decodePermTree strictly decodes a {"<path>":{"<Priv>":flag}} payload.
 // Error text never echoes a server-supplied name that failed its check.
 func decodePermTree(raw json.RawMessage) (map[string]map[string]bool, error) {

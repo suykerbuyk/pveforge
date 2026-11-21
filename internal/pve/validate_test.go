@@ -678,3 +678,92 @@ func TestD5Fixtures(t *testing.T) {
 		}
 	}
 }
+
+// JudgeTree is ValidateTokenGrants' post-read half, moved so the
+// enable-vm-destroy verb can judge a PREDICTED tree with the same code. These
+// rows are plan roles-grants-plan-FINAL.md §3.5.4d and C5, run on the repo's
+// live fixtures; the first three were EXECUTED during planning. They are
+// permanent here because a planted inversion inside JudgeTree must fail both
+// this suite (via TestValidateTokenGrants) and the verb's T11.
+func TestJudgeTree_C5AndPredictedTrees(t *testing.T) {
+	var live map[string]map[string]bool
+	{
+		var raw map[string]map[string]int
+		if err := json.Unmarshal([]byte(liveTree(t)), &raw); err != nil {
+			t.Fatal(err)
+		}
+		live = map[string]map[string]bool{}
+		for p, m := range raw {
+			live[p] = map[string]bool{}
+			for k, v := range m {
+				live[p][k] = v == 1
+			}
+		}
+	}
+	var vmRaw map[string]int
+	if err := json.Unmarshal([]byte(liveVMAdmin(t)), &vmRaw); err != nil {
+		t.Fatal(err)
+	}
+	vm := map[string]bool{}
+	for p := range vmRaw {
+		vm[p] = true
+	}
+	union := map[string]bool{"Sys.Audit": true}
+	for p := range vm {
+		union[p] = true
+	}
+	add := func(tree map[string]map[string]bool, privs map[string]bool) map[string]map[string]bool {
+		out := map[string]map[string]bool{}
+		for p, m := range tree {
+			out[p] = map[string]bool{}
+			for k, v := range m {
+				out[p][k] = v
+			}
+			for k := range privs {
+				out[p][k] = true
+			}
+		}
+		return out
+	}
+	judge := func(tree map[string]map[string]bool, privs map[string]bool) error {
+		held := map[string]map[string]bool{"/": tree["/"]}
+		return JudgeTree(context.Background(), []Grant{{Path: "/", Role: "R", Propagate: true}}, []map[string]bool{privs}, tree, nil, held,
+			func(context.Context, string) (bool, error) {
+				return false, errors.New("an existence check was asked for")
+			},
+			func(_ context.Context, p string) (map[string]bool, error) { return tree[p], nil })
+	}
+	both := add(live, union)
+	for name, c := range map[string]struct {
+		tree  map[string]map[string]bool
+		privs map[string]bool
+		want  error
+	}{
+		"PVEVMAdmin + R vs /:R::1 (reused)":                     {both, union, nil},
+		"PVEVMAdmin only vs /:R::1 (WrongScope: revokes)":       {live, union, ErrWrongScope},
+		"PVEVMAdmin + R vs /:PVEVMAdmin::1 (TooWide: revokes)":  {both, vm, ErrScopeTooWide},
+		"PVEVMAdmin only vs /:PVEVMAdmin::1 (reused)":           {live, vm, nil},
+		"predicted tree of a limited token (only VM.Audit)":     {add(map[string]map[string]bool{"/": {"VM.Audit": true}, "/vms": {"VM.Audit": true}}, union), union, nil},
+		"descendant override Datastore.Audit at /storage/local": {withPath(both, "/storage/local", map[string]bool{"Datastore.Audit": true}), union, ErrScopeTooWide},
+		"Administrator-wide tree":                               {add(live, map[string]bool{"Sys.Audit": true, "Sys.Modify": true, "Permissions.Modify": true}), union, ErrScopeTooWide},
+	} {
+		got := judge(c.tree, c.privs)
+		if c.want == nil && got != nil || c.want != nil && !errors.Is(got, c.want) {
+			t.Errorf("%s: got %v, want %v", name, got, c.want)
+		}
+	}
+	// The existence callback is fail-closed for the verb's one grant: a tree
+	// the bound rejects on a plain extra privilege never reaches it.
+	if err := judge(withPath(both, "/vms/100", map[string]bool{"Pool.Audit": true}), union); !errors.Is(err, ErrScopeTooWide) {
+		t.Errorf("an extra privilege at /vms/100 must be TooWide without any existence check, got %v", err)
+	}
+}
+
+func withPath(tree map[string]map[string]bool, path string, set map[string]bool) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for p, m := range tree {
+		out[p] = m
+	}
+	out[path] = set
+	return out
+}

@@ -355,6 +355,7 @@ stderr; stdout is unchanged and the exit status is still 0.`,
 func newACLCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "acl", Short: "Grant PVE ACL entries (written as root over SSH)"}
 	cmd.AddCommand(newACLGrantCmd())
+	cmd.AddCommand(newACLEnableVMDestroyCmd())
 	return cmd
 }
 

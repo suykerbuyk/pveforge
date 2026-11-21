@@ -60,6 +60,11 @@ var TakerFiles = map[string]string{
 	// PinTLS takes the per-target bootstrap lock, so pin-tls and a
 	// bootstrap of one target cannot interleave.
 	"internal/bootstrap/pintls.go": "github.com/suykerbuyk/pveforge/internal/bootstrap",
+	// EnableVMDestroy takes the same per-target bootstrap lock across its
+	// write and read-back, so `acl enable-vm-destroy` and a bootstrap of one
+	// target cannot interleave (the bootstrap can remove the token being
+	// granted to).
+	"internal/bootstrap/vmdestroygrant.go": "github.com/suykerbuyk/pveforge/internal/bootstrap",
 }
 
 // taskWaitTarget is every call of a method named WaitForTask: the pve

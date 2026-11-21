@@ -1,0 +1,100 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-acl-enable-vm-destroy - Give the roster's token the privileges `vm destroy` needs, without rotating it
+
+
+.SH SYNOPSIS
+\fBpveforge acl enable-vm-destroy <target-id> [--role NAME] [--dry-run] [--role-only] [flags]\fP
+
+
+.SH DESCRIPTION
+Make the target's roster token able to run "pveforge vm destroy": add Sys.Audit,
+which PVEVMAdmin lacks, as root over SSH with pveum. The token is NOT revoked or
+re-minted: its secret and its existing grants are kept.
+
+.PP
+It ensures a role (default ForgeVMAdminAudit, or --role) holding exactly PVEVMAdmin's
+privileges, read from PVE now, plus Sys.Audit, and adds it to the token on /
+with propagate 1, additively. The role id may not start with "pve" in any case
+(PVE refuses it). The privileges are printed.
+.IP \(bu 2
+With --role-only (the order for a fresh or rebuilt target) only the role is
+ensured: the token's permissions are never read and nothing is added to it,
+whatever the roster holds. Then mint the token with:
+pveforge bootstrap  --grant /:ForgeVMAdminAudit::1
+A rebuilt node's roster still holds the old token record, which PVE no
+longer knows: without --role-only the command would treat it as a token to
+upgrade and refuse. A roster that holds no token at all gets the role only
+too.
+.IP \(bu 2
+Otherwise a target whose token already holds PVEVMAdmin on / is upgraded in
+place.
+
+.PP
+After the upgrade, bootstrap --grant /:ForgeVMAdminAudit::1 is reused (nothing changes).
+bootstrap --grant /:PVEVMAdmin::1 would now REVOKE the token for every holder:
+its privileges are wider than PVEVMAdmin's. Do not run it.
+
+.PP
+Refused, with nothing written:
+  - a role of that name that exists with a different privilege set (PVE's role
+    update replaces a set other principals may hold; fix it by hand);
+  - a token that does not already hold PVEVMAdmin's privileges (this verb never
+    widens a limited token), one with a grant below / that a later bootstrap
+    would call too wide, or one inheriting Administrator (root@pam with no
+    token ACL);
+  - a role that would confer an escalating privilege (Permissions.Modify, User.Modify, Sys.Modify, Realm.Allocate, Sys.Console, VM.Monitor, Realm.AllocateUser, Datastore.Allocate, Mapping.Modify).
+
+.PP
+The write is verified by reading the token's effective permissions back, not
+the ACL row: a token owned by a non-root user must have Sys.Audit itself, and
+this verb never grants the owner. If the role is no longer exactly the derived
+set afterwards, or the token's actual permissions break the invariant the grant
+was judged by (bootstrap --grant /:R::1 would not accept them, or the token
+gained more than Sys.Audit: a concurrent root editor), the error names the
+pveum acl delete that takes the grant back; pveforge deletes nothing. A tree
+that merely differs from the prediction but holds the invariant is a success
+with a note on stderr.
+The roles are read just before the write: PVE has no compare-and-set, so an
+edit by another root session between the read and the write is detected after
+the fact, not prevented. The command holds bootstrap's per-target lock for the
+write. --dry-run reads, judges and prints what it would send.
+
+
+.SH OPTIONS
+\fB--dry-run\fP[=false]
+	read and judge everything, print the commands that would be sent, write nothing
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for enable-vm-destroy
+
+.PP
+\fB--host-key-fingerprint\fP=""
+	the target's SSH host key fingerprint as you verified it, SHA256:<base64> exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves.
+
+.PP
+\fB--lock-wait\fP=0s
+	how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time
+
+.PP
+\fB--no-ssh-key\fP[=false]
+	connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key
+
+.PP
+\fB--role\fP=""
+	the role to ensure and grant (default ForgeVMAdminAudit); its id may not start with "pve" in any case
+
+.PP
+\fB--role-only\fP[=false]
+	ensure and validate the role only: never read the token's permissions and never add the role to it, whatever the roster holds (the order for a fresh or rebuilt target: this, then bootstrap --grant /:ForgeVMAdminAudit::1)
+
+.PP
+\fB--roster\fP=""
+	path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)
+
+
+.SH SEE ALSO
+\fBpveforge-acl(1)\fP

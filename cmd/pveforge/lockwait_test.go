@@ -209,6 +209,7 @@ func TestBootstrap_LockWaitBoundsTargetLock(t *testing.T) {
 // and so must carry --lock-wait. Pinned by name so a new locking command
 // is a deliberate addition here.
 var lockingCommands = []string{
+	"pveforge acl enable-vm-destroy",
 	"pveforge api delete",
 	"pveforge api get",
 	"pveforge api post",

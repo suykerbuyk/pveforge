@@ -283,7 +283,7 @@ func TestRunRootSuccess_Schema(t *testing.T) {
 	walk(root, "")
 	want := []string{
 		"access", "access/inventory", "access/keys",
-		"acl", "acl/grant",
+		"acl", "acl/enable-vm-destroy", "acl/grant",
 		"api", "api/delete", "api/get", "api/post", "api/put",
 		"bootstrap",
 		"completion", "completion/bash", "completion/fish", "completion/powershell", "completion/zsh",
