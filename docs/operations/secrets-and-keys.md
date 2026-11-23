@@ -627,14 +627,37 @@ refuses two grants on one path, so the token cannot be given both roles on `/`
 through `--grant`; the way is one custom role holding `PVEVMAdmin`'s privileges
 plus `Sys.Audit`, added to the token as a second ACL row.
 
-**Use the command.** It does all of this, reads PVE's own state first, and
-refuses anything it cannot make safe:
+**Run one command.** It reads PVE's own state, shows the plan, asks, writes, and
+then checks the result the way `pveforge doctor` does:
 
 ```
-pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml --dry-run
 pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml
-pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml --role-only
 ```
+
+Answer `y` at `Proceed? [y/N]`. The report carries `ready` and `verdict`; read
+them together (they are the same decision). Ready is `vm destroy privileges are
+ready on <node>`; otherwise the verdict names the exact rows still missing or
+unknown and the exit is 1. An exit 1 whose verdict says the check did not run
+(`ready=false`) means the check itself could not be read: nothing was verified,
+and it does not mean `vm destroy` works. `after_rule` says which bootstrap form
+is safe afterwards. There is nothing to run before or after it.
+
+- `--yes` answers the question, for scripts. `--yes` writes the plan the locked
+  re-read decides, screened to the same two command shapes; nothing is
+  confirmed, so there is no confirmed-plan comparison under `--yes`. With no
+  terminal and no `--yes`, a run that would write is refused (exit 4) with
+  nothing written; a run that would write nothing (already enabled) never asks.
+- `--dry-run` prints the plan and stops: it never asks, never writes and runs no
+  check. `--role-only` is the order for a **fresh or rebuilt** target (below).
+- The check is node-level (`Sys.Audit` on the roster node's `/nodes/<node>` and on
+  `/`); `--vmid N` adds the VM privileges on one VM. "Ready" means those
+  privilege reads succeed, not that every VM can be destroyed; `vm destroy`
+  still decides each VM.
+- A token with its own override row on `/nodes` or on any `/nodes/<n>` can be
+  upgraded and still not ready: the upgrade reports each such node path as a
+  missing `Sys.Audit` row, the exit is 1, and nothing more is written. If a later
+  `vm destroy` refuses on another member's node and `acl enable-vm-destroy`
+  answers "already enabled", check the token's own ACL rows on that node.
 
 - It ensures the role `ForgeVMAdminAudit` (or `--role NAME`): exactly
   `PVEVMAdmin`'s privileges **as read from your PVE now**, plus `Sys.Audit`,
@@ -677,7 +700,7 @@ pveforge acl enable-vm-destroy qa-pve-07 --roster ./pveforge.toml --role-only
   `Sys.Audit`), and the error names the exact `pveum acl delete` that takes the
   grant back. The command deletes nothing itself. A tree that differs from the
   command's prediction but holds that invariant (a pool member path, say) is a
-  success with a `note:` on stderr.
+  success with a `notes` entry in the report.
 - Run again, it changes nothing (`already enabled`): that needs the token's own
   ACL row for the role on `/` with propagate 1, the role equal to the derived
   set, and the token's effective permissions holding all of it.
@@ -698,6 +721,7 @@ After the upgrade, re-run bootstrap only with `--grant /:ForgeVMAdminAudit::1`.
 `--grant /:PVEVMAdmin::1`, the example elsewhere in this guide, would now
 revoke the token for every holder. On a token that has **not** been upgraded,
 `--grant /:ForgeVMAdminAudit::1` revokes it too: that is why the command exists.
+
 The union role is deliberate: a role holding `Sys.Audit` alone would leave NO
 `--grant` list that is `reused`, since bootstrap allows one grant per path. Its
 cost is drift: after a PVE release widens `PVEVMAdmin`, the command refuses (the
@@ -705,7 +729,7 @@ role no longer equals the derived set) and `--grant /:ForgeVMAdminAudit::1` on a
 token holding both rows becomes `ErrScopeTooWide`; check `PVEVMAdmin` before
 upgrading PVE.
 
-**Verify**, against a VM that does not exist. The command reads and refuses
+**Optional proof** (the command's own `verdict` already answers whether `vm destroy` is ready), against a VM that does not exist. `vm destroy` reads and refuses
 without dispatching anything (`outcome=refused`, exit 4, and
 `B5-absent-without-task` when every privilege is held):
 

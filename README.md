@@ -46,7 +46,7 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `exec <target> -- <command>` | Run a command with the target's API token in its environment |
 | `user ensure`, `group ensure` | Create a PVE user or group, or bring it to the state asked for (as root over SSH) |
 | `acl grant` | Grant a role on a path to a user, group or token (as root over SSH) |
-| `acl enable-vm-destroy` | Give the roster's token the privileges `vm destroy` needs (`Sys.Audit`) without rotating it (as root over SSH) |
+| `acl enable-vm-destroy [--yes] [--dry-run] [--role-only] [--vmid N]` | Give the roster's token the privileges `vm destroy` needs (`Sys.Audit`) without rotating it (as root over SSH): prints the plan, asks `Proceed? [y/N]` (`--yes` skips it; with no terminal and no `--yes` a run that would write is refused, exit 4), writes, then reports, in `ready` and `verdict`, whether `vm destroy`'s own privilege reads now succeed (or the rows still missing; exit 1 when not ready or the check could not run) |
 | `access inventory` | List every user, group and ACL entry, and each `@pam` user's account on the node (read as root over SSH) |
 | `access keys` | List pveforge's SSH keys in root's `authorized_keys`, which roster holds each, and each stray's manual removal command (read-only) |
 | `vm create` / `get` / `set` | Create a VM at the VMID you name; read one; set or delete config fields |
@@ -486,7 +486,15 @@ list), `VM.PowerMgmt` (the stop) and `VM.Allocate` (the destroy). Resolving a
 retry also reads the cluster member list, which needs `Sys.Audit` on `/`.
 `PVEVMAdmin` holds the last two and neither audit privilege.
 `pveforge acl enable-vm-destroy <target>` adds `Sys.Audit` to the roster's token
-without revoking or re-minting it; the operator guide
+without revoking or re-minting it. It is one command and one question: it shows
+the plan, asks `Proceed? [y/N]`, writes, and runs the same check `pveforge
+doctor` makes: its report carries `ready` and `verdict` (read together), naming
+the exact rows still missing, and the bootstrap form that is safe afterwards.
+Ready means the privilege reads on the roster node and `/` (node-level unless
+`--vmid`), not that every VM can be destroyed; an exit 1 whose verdict says the
+check did not run means nothing was verified. `--yes` writes the plan the locked
+re-read decides; nothing is confirmed, so there is no confirmed-plan comparison. A refused `vm destroy` whose
+`Sys.Audit` read PVE answered 403 names this command as its `fix`. The operator guide
 ([`docs/operations/secrets-and-keys.md`](docs/operations/secrets-and-keys.md),
 procedure 11) describes it and what to run afterwards.
 
@@ -534,9 +542,9 @@ Residuals the command states rather than hides:
 | Status | Meaning |
 |---|---|
 | `0` | Success, including a command that completed with a printed warning, or completed although it was interrupted after its outcome was observed |
-| `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0 |
+| `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0. `acl enable-vm-destroy` also exits 1 when it wrote the grant, or found it already in place, and `vm destroy`'s reads still do not all succeed (the report's `wrote` and `ready` say which) |
 | `3` | The outcome is unknown: the command dispatched a change to PVE and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Exit 3 is what `api post`, `api put`, `api delete` and `vm destroy` report (a signal during the wait is 130 or 143 instead). Look the task up by the UPID printed at dispatch, or re-run `vm destroy`. The other commands that wait on a task (`vm create`, the snapshot and network commands) report the same condition in their error text and still exit `1` |
-| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. `vm destroy` and `doctor` are the commands that exit 4; `doctor` exits 4 when any privilege is missing, unknown or not checked, so pass `--vmid` to check the VM privileges, or grant what is missing |
+| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. `vm destroy`, `doctor` and `acl enable-vm-destroy` are the commands that exit 4; `doctor` exits 4 when any privilege is missing, unknown or not checked, so pass `--vmid` to check the VM privileges, or grant what is missing; `acl enable-vm-destroy` exits 4 when its plan was declined at the prompt, or there was no terminal to ask on and no `--yes` |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
 

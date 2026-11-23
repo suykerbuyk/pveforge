@@ -7,6 +7,7 @@ import (
 	"io"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -102,6 +103,13 @@ type destroyReport struct {
 	Error            string `json:"error,omitempty"`
 	Privilege        string `json:"privilege,omitempty"`
 	Condition        string `json:"condition,omitempty"`
+	// Fix is the one command that grants what a refused read lacked, present
+	// only on a refusal whose Privilege is a Sys.Audit that PVE answered 403
+	// for: `doctor`'s own remedy, from the same format string.
+	Fix string `json:"fix,omitempty"`
+	// rosterNode is the node the token's client is bound to (not rendered): a
+	// refusal naming another member's /nodes/<m> gets a different fix.
+	rosterNode string
 }
 
 // bound cuts every PVE-derived string field with boundErrText BEFORE Render:
@@ -110,7 +118,7 @@ type destroyReport struct {
 func (r *destroyReport) bound() {
 	for _, p := range []*string{&r.Situation, &r.Reason, &r.UPID, &r.ExitStatus, &r.InflightUPID, &r.InflightType,
 		&r.StopUPID, &r.PriorUPID, &r.PriorExitStatus, &r.Node, &r.OtherNode, &r.Observed, &r.Read, &r.Error,
-		&r.Privilege, &r.Condition} {
+		&r.Privilege, &r.Condition, &r.Fix} {
 		*p = boundErrText(*p)
 	}
 }
@@ -139,6 +147,33 @@ func (d destroyResult) err() error {
 
 // errText is an error's text, bounded: the one place a PVE-derived error
 // becomes a report field.
+// fixFor is the remedy a refusal names: doctor's, for a Sys.Audit privilege
+// PVE refused (Privilege is set only from a 403, never from a 5xx, a timeout, a
+// truncated list or a lock), and nothing for any other refusal.
+func fixFor(privilege, target, rosterNode string) string {
+	if !strings.HasPrefix(privilege, "Sys.Audit") {
+		return ""
+	}
+	fix := fmt.Sprintf(doctorFixFmt, target)
+	// A refusal on ANOTHER member's node: the grant on / already reaches every
+	// node, so if the token holds the role, the command answers "already
+	// enabled" and the cause is the token's own override row on that node.
+	// Say so, so the operator is not sent in a loop.
+	if node, ok := strings.CutPrefix(privilege, "Sys.Audit on /nodes/"); ok && node != "" && node != rosterNode {
+		fix += fmt.Sprintf("; if it reports already enabled, check the token's own ACL rows on /nodes/%s: an override there hides Sys.Audit", node)
+	}
+	return fix
+}
+
+// withFix names the remedy on a refusal, in the report and in the error text.
+func (d destroyResult) withFix() destroyResult {
+	if fix := fixFor(d.rep.Privilege, d.rep.Target, d.rep.rosterNode); fix != "" {
+		d.rep.Fix = fix
+		d.cause = fmt.Errorf("%w; run: %s", d.cause, fix)
+	}
+	return d
+}
+
 func errText(err error) string {
 	if err == nil {
 		return ""
@@ -279,7 +314,7 @@ func lockRefused(target string, vmid int, err error) destroyResult {
 func runVMDestroy(ctx context.Context, d destroyDeps, in destroyInput) destroyResult {
 	client, vmid := d.client, in.vmid
 	node := client.Node()
-	base := destroyReport{Target: d.target, VMID: vmid}
+	base := destroyReport{Target: d.target, VMID: vmid, rosterNode: node}
 
 	// Steps 2 and 3: the visibility probe and the in-flight determination.
 	det := client.DetermineDestroyInFlight(ctx, vmid)
@@ -395,7 +430,7 @@ func refusedFromInFlight(base destroyReport, r *pve.InFlightRefusal) destroyResu
 		rep.InflightUPID, rep.InflightType = r.UPID, r.TaskType
 		rep.Observed = fmt.Sprintf("a non-terminal %s task %s for vm %d is in flight on node %s", r.TaskType, r.UPID, r.VMID, r.Node)
 	}
-	return destroyResult{rep: rep, cause: fmt.Errorf("vm destroy: vm %d: refused (%s): %s; %s", base.VMID, rep.Situation, rep.Observed, r.Condition)}
+	return destroyResult{rep: rep, cause: fmt.Errorf("vm destroy: vm %d: refused (%s): %s; %s", base.VMID, rep.Situation, rep.Observed, r.Condition)}.withFix()
 }
 
 // mapVerdict maps U5's verdict to an outcome:
@@ -443,7 +478,7 @@ func mapVerdict(base destroyReport, v *pve.GoneVerdict, dispatched bool) destroy
 	default: // GoneUnreadable, and any value this switch does not know: fail closed
 		rep.Situation = "B10"
 	}
-	return destroyResult{rep: rep, cause: fmt.Errorf("vm destroy: vm %d: refused (%s): %s; %s", base.VMID, rep.Situation, v.Observed, v.Condition)}
+	return destroyResult{rep: rep, cause: fmt.Errorf("vm destroy: vm %d: refused (%s): %s; %s", base.VMID, rep.Situation, v.Observed, v.Condition)}.withFix()
 }
 
 // answeredDefinitively reports whether err is PVE's own answer that a worker

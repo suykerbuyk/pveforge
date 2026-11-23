@@ -32,12 +32,16 @@ type enableHost struct {
 	roles map[string][]string
 	rows  []string // extra roles on / for the token
 	log   []string
+	// nodeOverride adds the token's own flag-0 row for a role holding only
+	// PVEVMAdmin's privileges on /nodes/pve1: the role it gets on / never
+	// reaches that path, so Sys.Audit stays absent there after the upgrade.
+	nodeOverride bool
 }
 
 func newEnableHost() *enableHost {
 	admin := append(slices.Clone(enableVMAdmin), "Sys.Audit", "Sys.Modify", "Permissions.Modify", "VM.Monitor")
 	sort.Strings(admin)
-	return &enableHost{roles: map[string][]string{"PVEVMAdmin": slices.Clone(enableVMAdmin), "Administrator": admin}}
+	return &enableHost{roles: map[string][]string{"PVEVMAdmin": slices.Clone(enableVMAdmin), "Administrator": admin, "VMOnly": slices.Clone(enableVMAdmin)}}
 }
 
 func (h *enableHost) exec(cmd string) (string, string, int) {
@@ -62,6 +66,9 @@ func (h *enableHost) exec(cmd string) (string, string, int) {
 		for _, r := range h.rows {
 			rows = append(rows, map[string]any{"path": "/", "roleid": r, "type": "token", "ugid": "root@pam!pveforge", "propagate": 1})
 		}
+		if h.nodeOverride {
+			rows = append(rows, map[string]any{"path": "/nodes/pve1", "roleid": "VMOnly", "type": "token", "ugid": "root@pam!pveforge", "propagate": 0})
+		}
 		b, _ := json.Marshal(rows)
 		return string(b), "", 0
 	case strings.HasPrefix(cmd, "pveum user permissions"):
@@ -77,6 +84,13 @@ func (h *enableHost) exec(cmd string) (string, string, int) {
 		tree := map[string]map[string]int{}
 		for _, p := range []string{"/", "/access", "/access/groups", "/nodes", "/pool", "/sdn", "/storage", "/vms"} {
 			tree[p] = priv
+		}
+		if h.nodeOverride {
+			only := map[string]int{}
+			for _, p := range h.roles["VMOnly"] {
+				only[p] = 1
+			}
+			tree["/nodes/pve1"] = only
 		}
 		b, _ := json.Marshal(tree)
 		return string(b), "", 0
@@ -111,9 +125,11 @@ func (h *enableHost) writes() []string {
 
 func enableSetup(t *testing.T) (string, *enableHost) {
 	t.Helper()
-	h := newEnableHost()
-	path, _, _ := accessSetupExec(t, nil, h.exec)
-	return path, h
+	// Every real run is non-interactive here and ends in the verdict, which
+	// reads the token's REST side: flowEnv serves it, coupled to root's writes.
+	setNoTTY(t)
+	e := newFlowEnv(t)
+	return e.roster, e.host
 }
 
 func TestACLEnableVMDestroy_DryRunWritesNothing(t *testing.T) {
@@ -128,7 +144,7 @@ func TestACLEnableVMDestroy_DryRunWritesNothing(t *testing.T) {
 	if len(h.log) == 0 {
 		t.Fatal("vacuous: root ran nothing")
 	}
-	for _, want := range []string{"dry run", "would run: pveum role add 'ForgeVMAdminAudit'", "would run: pveum acl modify '/' --tokens 'root@pam!pveforge' --roles 'ForgeVMAdminAudit' --propagate 1", "widening: Sys.Audit"} {
+	for _, want := range []string{"dry_run=true", "pveum role add 'ForgeVMAdminAudit'", "pveum acl modify '/' --tokens 'root@pam!pveforge' --roles 'ForgeVMAdminAudit' --propagate 1", `widened=["Sys.Audit"]`} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)
 		}
@@ -138,7 +154,7 @@ func TestACLEnableVMDestroy_DryRunWritesNothing(t *testing.T) {
 // Without --dry-run the same run writes, in order, then is a no-op.
 func TestACLEnableVMDestroy_WritesThenIsIdempotent(t *testing.T) {
 	path, h := enableSetup(t)
-	code, stdout, stderr := runRootArgs("acl", "enable-vm-destroy", "--roster", path, "qa-pve-01")
+	code, stdout, stderr := runRootArgs("acl", "enable-vm-destroy", "--roster", path, "--yes", "qa-pve-01")
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
@@ -147,11 +163,11 @@ func TestACLEnableVMDestroy_WritesThenIsIdempotent(t *testing.T) {
 		w[1] != "pveum acl modify '/' --tokens 'root@pam!pveforge' --roles 'ForgeVMAdminAudit' --propagate 1" {
 		t.Fatalf("writes = %q", w)
 	}
-	if !strings.Contains(stdout, "gains ForgeVMAdminAudit on / (widening: Sys.Audit)") || strings.Contains(stdout, "dry run") {
+	if !strings.Contains(stdout, "outcome=upgraded") || !strings.Contains(stdout, `widened=["Sys.Audit"]`) || strings.Contains(stdout, "dry_run") {
 		t.Errorf("stdout:\n%s", stdout)
 	}
-	code, stdout, stderr = runRootArgs("acl", "enable-vm-destroy", "--roster", path, "qa-pve-01")
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "already enabled") || len(h.writes()) != 2 {
+	code, stdout, stderr = runRootArgs("acl", "enable-vm-destroy", "--roster", path, "--yes", "qa-pve-01")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "outcome=already_enabled") || len(h.writes()) != 2 {
 		t.Fatalf("second run: exit %d, stdout %q, stderr %q, writes %q", code, stdout, stderr, h.writes())
 	}
 }
@@ -160,7 +176,7 @@ func TestACLEnableVMDestroy_WritesThenIsIdempotent(t *testing.T) {
 // role is refused before root is dialed (no command at all).
 func TestACLEnableVMDestroy_RoleFlagIsWired(t *testing.T) {
 	path, h := enableSetup(t)
-	code, stdout, stderr := runRootArgs("acl", "enable-vm-destroy", "--roster", path, "--role", "ForgeCustomRole", "qa-pve-01")
+	code, stdout, stderr := runRootArgs("acl", "enable-vm-destroy", "--roster", path, "--yes", "--role", "ForgeCustomRole", "qa-pve-01")
 	if code != 0 {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
@@ -185,7 +201,7 @@ func TestACLEnableVMDestroy_TierAndFlags(t *testing.T) {
 	if got := cmd.Annotations[mutationAnnotationKey]; got != mutationDestructive {
 		t.Fatalf("tier = %q, want destructive", got)
 	}
-	for _, f := range []string{"role", "dry-run", "no-ssh-key", "host-key-fingerprint", "roster", "lock-wait"} {
+	for _, f := range []string{"role", "dry-run", "role-only", "yes", "vmid", "output", "no-ssh-key", "host-key-fingerprint", "roster", "lock-wait"} {
 		if cmd.Flags().Lookup(f) == nil {
 			t.Errorf("flag --%s is missing", f)
 		}
@@ -248,7 +264,7 @@ func TestDocs_T12_NoIllegalRoleNames(t *testing.T) {
 // a token and the host would let it be upgraded.
 func TestACLEnableVMDestroy_RoleOnlyFlagIsWired(t *testing.T) {
 	path, h := enableSetup(t)
-	code, stdout, stderr := runRootArgs("acl", "enable-vm-destroy", "--roster", path, "--role-only", "qa-pve-01")
+	code, stdout, stderr := runRootArgs("acl", "enable-vm-destroy", "--roster", path, "--yes", "--role-only", "qa-pve-01")
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
@@ -261,7 +277,7 @@ func TestACLEnableVMDestroy_RoleOnlyFlagIsWired(t *testing.T) {
 			t.Errorf("--role-only read or wrote the token's side: %q", c)
 		}
 	}
-	if !strings.Contains(stdout, "role ForgeVMAdminAudit ready; mint the token with: pveforge bootstrap qa-pve-01 --grant /:ForgeVMAdminAudit::1") {
+	if !strings.Contains(stdout, "next=mint the token with: pveforge bootstrap qa-pve-01 --grant /:ForgeVMAdminAudit::1") {
 		t.Errorf("stdout:\n%s", stdout)
 	}
 }

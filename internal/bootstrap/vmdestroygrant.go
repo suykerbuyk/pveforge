@@ -112,6 +112,10 @@ var (
 	// ErrEnableScreen: a command the verb was about to send is not one of the
 	// two shapes it may send. A programming error; nothing was sent.
 	ErrEnableScreen = errors.New("enable-vm-destroy refused to send a command that is not one of its two shapes")
+	// ErrPlanChangedSinceConfirm: the commands this run would now send are not
+	// the ones the operator confirmed (the role or the grant changed between
+	// the plan and the lock). Nothing was written; re-run to see the new plan.
+	ErrPlanChangedSinceConfirm = errors.New("the plan changed since it was confirmed")
 )
 
 // vmRoleIDRE is PVE's verify_rolename (AccessControl.pm); pvePrefixRE the
@@ -169,6 +173,13 @@ type EnableVMDestroyRequest struct {
 	// token the verb is granting to). Both are required unless DryRun.
 	RosterPath string
 	TargetID   string
+	// ExpectPlan is the commands (EnableVMDestroyResult.Planned of a dry run)
+	// the operator confirmed. When non-nil, a run that finds something to
+	// write must be about to send exactly these commands, else it refuses with
+	// ErrPlanChangedSinceConfirm before its first write. A run that finds
+	// nothing left to write is not a mismatch: it reports what it found. nil
+	// means no confirmation was asked (--yes) and nothing is compared.
+	ExpectPlan []string
 }
 
 // EnableVMDestroyResult is what the verb did, or with DryRun would do.
@@ -187,6 +198,11 @@ type EnableVMDestroyResult struct {
 	DryRun  bool
 	// Planned is the commands a dry run would send, as they would be sent.
 	Planned []string
+	// AuditNotEffective is the paths (/nodes and /nodes/<n>) where, after a
+	// successful grant, the token's effective permissions still lack Sys.Audit:
+	// vm destroy's first read refuses on those nodes although the grant is
+	// correct. Structured, so a caller never matches a note string to learn it.
+	AuditNotEffective []string
 	// Notes are informational: the written grant held the invariant but the
 	// token's actual tree differs from the prediction (the paths are named).
 	Notes []string
@@ -282,6 +298,9 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 	if tokenID == "" {
 		res.Outcome = EnableRoleOnly
 		if !haveRole {
+			if err := checkExpectedPlan(req, []string{renderEnable(1, p)}); err != nil {
+				return nil, err
+			}
 			res.RoleCreated = true
 			if err := a.ensureRole(ctx, p, req.DryRun, res); err != nil {
 				return nil, err
@@ -324,6 +343,13 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 	}
 	res.Outcome = EnableUpgraded
 	res.Widened = widenedBy(tree, predicted)
+	would := []string{renderEnable(2, p)}
+	if !haveRole {
+		would = []string{renderEnable(1, p), would[0]}
+	}
+	if err := checkExpectedPlan(req, would); err != nil {
+		return nil, err
+	}
 
 	if !haveRole {
 		res.RoleCreated = true
@@ -391,11 +417,23 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 	// succeed while destroy would still refuse on that node. Say so; the grant
 	// is correct and nothing more is written.
 	if missing := nodePathsLackingAudit(actual); len(missing) > 0 {
+		res.AuditNotEffective = missing
 		res.Notes = append(res.Notes, fmt.Sprintf("Sys.Audit is not effective at [%s], where vm destroy's status read needs it: vm destroy will refuse on those nodes; run: pveforge doctor %s",
 			strings.Join(missing, ","), req.TargetID))
 	}
 	res.Widened = widenedBy(tree, actual)
 	return res, nil
+}
+
+// checkExpectedPlan refuses, before any write, a run whose commands are not
+// the confirmed ones. The comparison is on the rendered command lines, the
+// same strings a dry run prints and the write path sends.
+func checkExpectedPlan(req EnableVMDestroyRequest, would []string) error {
+	if req.ExpectPlan == nil || slices.Equal(req.ExpectPlan, would) {
+		return nil
+	}
+	return fmt.Errorf("%w: %d command(s) were confirmed and this run would now send %d different one(s); nothing was written, re-run to see the current plan",
+		ErrPlanChangedSinceConfirm, len(req.ExpectPlan), len(would))
 }
 
 // nodePathsLackingAudit returns /nodes and every /nodes/<n> path in the tree

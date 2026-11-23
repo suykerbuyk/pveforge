@@ -415,10 +415,14 @@ func TestEnable_NoteWhereSysAuditIsNotEffectiveOnANodePath(t *testing.T) {
 	if len(res.Notes) != 1 || !strings.Contains(res.Notes[0], "[/nodes/pve1]") || !strings.Contains(res.Notes[0], "pveforge doctor qa-pve-01") || !strings.Contains(res.Notes[0], "vm destroy will refuse") {
 		t.Fatalf("want one note naming /nodes/pve1 and doctor, got %q", res.Notes)
 	}
+	// The same fact, STRUCTURED: callers never match the note's text.
+	if len(res.AuditNotEffective) != 1 || res.AuditNotEffective[0] != "/nodes/pve1" {
+		t.Fatalf("AuditNotEffective = %q, want [/nodes/pve1]", res.AuditNotEffective)
+	}
 	// Path B (nothing overrides the node paths) carries no such note.
 	g := newGrantFake()
 	res, err = newEnableRun(t, g).do()
-	if err != nil || len(res.Notes) != 0 {
+	if err != nil || len(res.Notes) != 0 || len(res.AuditNotEffective) != 0 {
 		t.Fatalf("path B: %+v, %v", res, err)
 	}
 	if got := nodePathsLackingAudit(map[string]map[string]bool{"/nodes": {"Sys.Audit": false}, "/nodes/a": {"VM.Audit": true}, "/vms": {}}); len(got) != 1 || got[0] != "/nodes/a" {
