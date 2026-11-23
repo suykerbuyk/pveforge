@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
+
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 )
 
 // currentPseudoSnapshot is the name PVE gives the synthetic entry its
@@ -290,12 +292,12 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name
 	// reported and sent untrimmed: this refuses padded variants, it does
 	// not silently rewrite what the caller asked for.
 	if strings.EqualFold(strings.TrimSpace(name), currentPseudoSnapshot) {
-		return &ErrReservedSnapshotName{VMID: vmid, Name: name}
+		return dispatch.Refuse(ctx, &ErrReservedSnapshotName{VMID: vmid, Name: name})
 	}
 	// PVE's other reserved name, refused the same way: trimmed, in any case,
 	// before any request (see pendingReservedName, and its caveat).
 	if strings.EqualFold(strings.TrimSpace(name), pendingReservedName) {
-		return &ErrReservedSnapshotName{VMID: vmid, Name: name}
+		return dispatch.Refuse(ctx, &ErrReservedSnapshotName{VMID: vmid, Name: name})
 	}
 
 	// Step 2. Through listSnapshotsVerifiable, not ListSnapshots: this is a
@@ -304,11 +306,14 @@ func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name
 	// no collision and let the POST through.
 	existing, err := c.listSnapshotsVerifiable(ctx, node, vmid)
 	if err != nil {
-		return fmt.Errorf("create snapshot %q on vm %d: %w", name, vmid, err)
+		// Before the POST, the first write: a refusal that changed nothing.
+		return dispatch.Refuse(ctx, fmt.Errorf("create snapshot %q on vm %d: %w", name, vmid, err))
 	}
 	for _, s := range realSnapshots(existing) {
 		if s.Name == name {
-			return &ErrSnapshotExists{VMID: vmid, Name: name}
+			// Raised while the write gate is still closed (the POST below is
+			// the first write), so this is exit 4; the verb never decides it.
+			return dispatch.Refuse(ctx, &ErrSnapshotExists{VMID: vmid, Name: name})
 		}
 	}
 
@@ -508,12 +513,12 @@ func (c *Client) NewerSnapshots(ctx context.Context, node string, vmid int, targ
 		return nil, fmt.Errorf("newer snapshots of vm %d: snapshot name is required", vmid)
 	}
 	if isPseudoEntryName(target) {
-		return nil, fmt.Errorf("newer snapshots of vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: target})
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("newer snapshots of vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: target}))
 	}
 
 	snaps, err := c.listSnapshotsVerifiable(ctx, node, vmid)
 	if err != nil {
-		return nil, fmt.Errorf("newer snapshots of vm %d: %w", vmid, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("newer snapshots of vm %d: %w", vmid, err))
 	}
 	real := realSnapshots(snaps)
 
@@ -525,7 +530,7 @@ func (c *Client) NewerSnapshots(ctx context.Context, node string, vmid int, targ
 		}
 	}
 	if found == nil {
-		return nil, fmt.Errorf("newer snapshots of vm %d: snapshot %q not found", vmid, target)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("newer snapshots of vm %d: snapshot %q not found", vmid, target))
 	}
 
 	newer := make([]*proxmox.VirtualMachineSnapshot, 0, len(real))
@@ -534,8 +539,8 @@ func (c *Client) NewerSnapshots(ctx context.Context, node string, vmid int, targ
 			continue
 		}
 		if s.Snaptime == found.Snaptime {
-			return nil, fmt.Errorf("newer snapshots of vm %d: %q has the same snaptime as %q (%d); pveforge cannot determine which is newer, so this rollback cannot be pre-flighted",
-				vmid, s.Name, target, found.Snaptime)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("newer snapshots of vm %d: %q has the same snaptime as %q (%d); pveforge cannot determine which is newer, so this rollback cannot be pre-flighted",
+				vmid, s.Name, target, found.Snaptime))
 		}
 		if s.Snaptime > found.Snaptime {
 			newer = append(newer, s)
@@ -604,7 +609,7 @@ func (c *Client) Rollback(ctx context.Context, node string, vmid int, name strin
 		return fmt.Errorf("rollback vm %d: snapshot name is required", vmid)
 	}
 	if isPseudoEntryName(name) {
-		return fmt.Errorf("rollback vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: name})
+		return dispatch.Refuse(ctx, fmt.Errorf("rollback vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: name}))
 	}
 
 	newer, err := c.NewerSnapshots(ctx, node, vmid, name)
@@ -616,7 +621,7 @@ func (c *Client) Rollback(ctx context.Context, node string, vmid int, name strin
 		for i, s := range newer {
 			names[i] = s.Name
 		}
-		return &ErrNotNewestSnapshot{VMID: vmid, Target: name, Newer: names}
+		return dispatch.Refuse(ctx, &ErrNotNewestSnapshot{VMID: vmid, Target: name, Newer: names})
 	}
 
 	path := fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s/rollback", url.PathEscape(node), vmid, url.PathEscape(name))
@@ -692,13 +697,14 @@ func (c *Client) CascadeDeleteSnapshots(ctx context.Context, node string, vmid i
 			return nil, fmt.Errorf("cascade delete snapshots of vm %d: snapshot name %d of %d is blank", vmid, i+1, len(names))
 		}
 		if isPseudoEntryName(n) {
-			return nil, fmt.Errorf("cascade delete snapshots of vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: n})
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("cascade delete snapshots of vm %d: %w", vmid, &ErrReservedSnapshotName{VMID: vmid, Name: n}))
 		}
 	}
 
 	before, err := c.listSnapshotsVerifiable(ctx, node, vmid)
 	if err != nil {
-		return nil, fmt.Errorf("cascade delete snapshots of vm %d: pre-state read: %w", vmid, err)
+		// Before the first DELETE: nothing was changed.
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("cascade delete snapshots of vm %d: pre-state read: %w", vmid, err))
 	}
 	present := make(map[string]bool)
 	for _, s := range realSnapshots(before) {

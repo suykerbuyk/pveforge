@@ -49,7 +49,7 @@ func InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authori
 	defer func() { _ = client.Close() }()
 
 	line := strings.TrimRight(authorizedKeyLine, "\n")
-	res, err := client.Run(ctx, buildIdempotentAppendScript(line))
+	res, err := client.Run(WithWrite(ctx), buildIdempotentAppendScript(line))
 	if err != nil {
 		return nil, fmt.Errorf("install pubkey: run remote script: %w", err)
 	}

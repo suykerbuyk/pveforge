@@ -24,6 +24,7 @@ import (
 const bNode = "qa-pve-07"
 
 type bfake struct {
+	reqLog
 	mu sync.Mutex
 
 	statusJSON string         // storage /status override
@@ -33,6 +34,8 @@ type bfake struct {
 	noISO      map[int]bool   // a node auto ISO missing
 	noImport   bool           // the import image missing
 	createFail map[int]bool   // CreateVM returns 500 for a VMID
+	poolType   string         // if set, the pool lists a created VM with THIS member type (the guard after create then refuses: not a qemu member)
+	poolNode   string         // if set, the pool lists a created VM on THIS node (the tag guard after create then refuses)
 
 	statusUsed       string       // storage `used` the status reports (baseline); default "0"
 	usedAfterDestroy string       // if set, `used` the status reports once any destroy ran (C5 leftover)
@@ -50,6 +53,9 @@ type bfake struct {
 func (f *bfake) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.see(w, r) {
+		return
+	}
 	if f.tags == nil {
 		f.tags = map[int]string{}
 		f.createForm = map[int]url.Values{}
@@ -120,7 +126,15 @@ func (f *bfake) handler(w http.ResponseWriter, r *http.Request) {
 		var ms []string
 		for _, v := range []int{690, 691, 692} {
 			if (f.pre[v] || f.created[v]) && !f.destroyed[v] {
-				ms = append(ms, fmt.Sprintf(`{"type":"qemu","vmid":%d,"node":%q}`, v, bNode))
+				node := bNode
+				if f.poolNode != "" && f.created[v] {
+					node = f.poolNode
+				}
+				typ := "qemu"
+				if f.poolType != "" && f.created[v] {
+					typ = f.poolType
+				}
+				ms = append(ms, fmt.Sprintf(`{"type":%q,"vmid":%d,"node":%q}`, typ, v, node))
 			}
 		}
 		data(`[{"poolid":"pveforge-harness","members":[` + strings.Join(ms, ",") + `]}]`)

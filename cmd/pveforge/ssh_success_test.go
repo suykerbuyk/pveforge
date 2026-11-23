@@ -407,8 +407,12 @@ func TestNetworkBridgeCreate_ExistingOtherType_RefusedThroughRunRoot(t *testing.
 
 	code, stdout, stderr := runRootArgs("network", "bridge", "create", "--roster", rosterPath,
 		"--management-bridge", mgmt, "qa-pve-01", iface, "mtu=9000")
-	if code != 1 {
-		t.Fatalf("exit %d, want 1; stdout %q, stderr %q", code, stdout, stderr)
+	// 4, not 1 (contract plan §3.5): the refusal is Preflight's, before the
+	// stage, and "nothing staged" is what the exit status now says too.
+	// TestExit4_NetworkBridgeCreate_TypeMismatch_RefusedBeforeAnyWrite holds
+	// it to the three write logs.
+	if code != 4 {
+		t.Fatalf("exit %d, want 4; stdout %q, stderr %q", code, stdout, stderr)
 	}
 	if stdout != "" {
 		t.Errorf("stdout = %q, want nothing: neither created nor already up to date", stdout)

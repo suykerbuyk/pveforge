@@ -11,6 +11,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
@@ -58,12 +59,12 @@ func newBootstrapCmd() *cobra.Command {
 			// secret.
 			grants, err := bootstrap.ParseGrants(grantSpecs)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// And the target id: one the roster would refuse (see
 			// roster.ValidateTargetID) must not cost two prompts either.
 			if err := roster.ValidateTargetID(args[0]); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// And a pin that was GIVEN must be one, an empty value included:
 			// internal/bootstrap reads "" as trust on first use, so
@@ -71,19 +72,19 @@ func newBootstrapCmd() *cobra.Command {
 			// otherwise silently mean no pin at all.
 			if cmd.Flags().Changed("host-key-fingerprint") {
 				if err := sshexec.CheckFingerprint(hostKeyFP); err != nil {
-					return fmt.Errorf("--host-key-fingerprint: %w", err)
+					return dispatch.Refuse(cmd.Context(), fmt.Errorf("--host-key-fingerprint: %w", err))
 				}
 			}
 			// And the owner, for the same reason: a userid pveforge cannot
 			// own a token with must not cost the operator two prompts.
 			if tokenOwner != "" {
 				if err := bootstrap.CheckTokenOwner(tokenOwner); err != nil {
-					return err
+					return dispatch.Refuse(cmd.Context(), err)
 				}
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// Every refusal that needs no secret, before ANY prompt: the
 			// roster fields they read (its host, node, insecure_tls, pins,
@@ -96,23 +97,23 @@ func newBootstrapCmd() *cobra.Command {
 				NoSSHKey: noSSHKey, SSHTOFU: sshTOFU,
 				Reprovisioned: reprovisioned, HostKeyFingerprint: hostKeyFP, RosterPath: rosterPath,
 			}); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// A roster with no secret yet takes its passphrase from this run:
 			// asked for twice when it is prompted for.
 			rawPassphrase, err := bootstrapPassphrase(cmd.Context(), rosterPath)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// Before the PVE password is asked for: a mistyped roster
 			// passphrase must not cost a second prompt, let alone a dial.
 			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			pvePassword, err := promptPVEPassword(cmd.Context())
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 
 			opts := bootstrap.Options{

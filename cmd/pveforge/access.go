@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
@@ -50,12 +51,34 @@ func openRootAccess(cmd *cobra.Command, targetID string, noSSHKey, tokenView boo
 	return a, t, closeAll, err
 }
 
+// openRootAccessForWrite is openRootAccess for a verb that WRITES (user ensure,
+// group ensure, acl grant): the refusals openRootAccess makes about what the
+// operator asked (a target holding no SSH key without --no-ssh-key, a
+// malformed or mismatched --host-key-fingerprint) are exit 4 there, because
+// nothing has been dialed and the run's write gate is closed. A read-only verb
+// (access keys, access inventory) never uses it: it can never exit 4.
+func openRootAccessForWrite(cmd *cobra.Command, targetID string, noSSHKey, tokenView bool) (*bootstrap.RootAccess, *roster.Target, func(), error) {
+	a, t, _, closeAll, err := openRootAccessAndRESTRefusing(cmd, targetID, noSSHKey, tokenView, func(err error) error {
+		return dispatch.Refuse(cmd.Context(), err)
+	})
+	return a, t, closeAll, err
+}
+
 // openRootAccessAndREST is openRootAccess that also returns the token's
 // RoutedClient it built (nil when the target holds no token, or tokenView
 // is false), so a command that needs both root and the REST client loads
 // the roster and resolves its passphrase once. A target that holds no SSH
 // key is refused, unless noSSHKey, before the passphrase is asked for.
 func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenView bool) (*bootstrap.RootAccess, *roster.Target, *pve.RoutedClient, func(), error) {
+	return openRootAccessAndRESTRefusing(cmd, targetID, noSSHKey, tokenView, func(err error) error { return err })
+}
+
+// openRootAccessAndRESTRefusing is openRootAccessAndREST with refuse applied
+// to the refusals it makes about the operator's own request (no SSH key,
+// fingerprint flag, pin mismatch). Failures of the environment (the roster, a
+// missing target, the passphrase, a key that will not decrypt, the REST client)
+// are returned as they are.
+func openRootAccessAndRESTRefusing(cmd *cobra.Command, targetID string, noSSHKey, tokenView bool, refuse func(error) error) (*bootstrap.RootAccess, *roster.Target, *pve.RoutedClient, func(), error) {
 	rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -69,7 +92,7 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 		return nil, nil, nil, nil, fmt.Errorf("target %q not found in roster %s", targetID, rosterPath)
 	}
 	if !noSSHKey && t.SSH == nil {
-		return nil, nil, nil, nil, fmt.Errorf("target %q holds no SSH key: pass --no-ssh-key to connect as root with the PVE password for this run", targetID)
+		return nil, nil, nil, nil, refuse(fmt.Errorf("target %q holds no SSH key: pass --no-ssh-key to connect as root with the PVE password for this run", targetID))
 	}
 	// The pin every connection is checked against, settled before the
 	// passphrase is asked for and before anything is dialed. A target that
@@ -85,12 +108,12 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 	// as no pin, trusting the host key on first use.
 	if cmd.Flags().Changed("host-key-fingerprint") {
 		if err := sshexec.CheckFingerprint(pin); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint: %w", err)
+			return nil, nil, nil, nil, refuse(fmt.Errorf("--host-key-fingerprint: %w", err))
 		}
 	}
 	if t.SSH != nil && t.SSH.HostKeyFingerprint != "" {
 		if pin != "" && pin != t.SSH.HostKeyFingerprint {
-			return nil, nil, nil, nil, fmt.Errorf("--host-key-fingerprint %s is not the host key target %q is pinned to (%s); nothing was dialed", pin, targetID, t.SSH.HostKeyFingerprint)
+			return nil, nil, nil, nil, refuse(fmt.Errorf("--host-key-fingerprint %s is not the host key target %q is pinned to (%s); nothing was dialed", pin, targetID, t.SSH.HostKeyFingerprint))
 		}
 		pin = t.SSH.HostKeyFingerprint
 	}
@@ -120,6 +143,15 @@ func openRootAccessAndREST(cmd *cobra.Command, targetID string, noSSHKey, tokenV
 	}
 	a := bootstrap.NewRootAccess(opts, newAccessTransport())
 	return a, t, rest, func() { _ = a.Close(); closeREST() }, nil
+}
+
+// refuseBeforeWrite marks err as a refusal made before anything was sent: exit
+// 4 while the run's write gate is still closed (dispatch.Refuse). The access
+// verbs call it for what they reject about the operator's request, at a point
+// in the verb that precedes every pveum write; it cannot claim 4 after a write,
+// because Refuse returns the plain error once a write funnel has opened the gate.
+func refuseBeforeWrite(cmd *cobra.Command, err error) error {
+	return dispatch.Refuse(cmd.Context(), err)
 }
 
 // optionalText returns a flag's value when it was given, refusing a value
@@ -194,27 +226,36 @@ pveforge out of the target.
 
 If the change is made but its result cannot be re-read afterwards, or is
 re-read without every requested value, a one-line warning is printed on
-stderr; stdout is unchanged and the exit status is still 0.`,
+stderr; stdout is unchanged and the exit status is still 0.
+
+Exit status: 0 when done; 4 when the run is refused before anything was sent to
+the target (an invalid value, a refusal above, a group refused for the escalating role it holds, the roster token's own user, a lock-wait timeout, a
+--host-key-fingerprint that is malformed or is not the target's pin, a target
+holding no SSH key without --no-ssh-key): nothing on the PVE host and nothing
+in the roster file was changed; 3 when the pveum write was sent and ran out of
+time, so its outcome is unknown (re-running is safe); 1 for every other
+failure, a failed read included, and for anything that goes wrong after the
+write was sent.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetID, userID := args[0], args[1]
 			if err := pve.CheckUserID(userID); err != nil {
-				return err
+				return refuseBeforeWrite(cmd, err)
 			}
 			if enable && disable {
-				return errors.New("--enable and --disable are mutually exclusive")
+				return refuseBeforeWrite(cmd, errors.New("--enable and --disable are mutually exclusive"))
 			}
 			comment, err := optionalText(cmd, "comment")
 			if err != nil {
-				return err
+				return refuseBeforeWrite(cmd, err)
 			}
 			email, err := optionalText(cmd, "email")
 			if err != nil {
-				return err
+				return refuseBeforeWrite(cmd, err)
 			}
 			for _, g := range groups {
 				if err := pve.CheckGroupID(g); err != nil {
-					return fmt.Errorf("--group: %w", err)
+					return refuseBeforeWrite(cmd, fmt.Errorf("--group: %w", err))
 				}
 			}
 			var want *bool
@@ -225,7 +266,7 @@ stderr; stdout is unchanged and the exit status is still 0.`,
 			if err != nil {
 				return err
 			}
-			access, t, closeAll, err := openRootAccess(cmd, targetID, noSSHKey, true)
+			access, t, closeAll, err := openRootAccessForWrite(cmd, targetID, noSSHKey, true)
 			if err != nil {
 				return err
 			}
@@ -233,10 +274,10 @@ stderr; stdout is unchanged and the exit status is still 0.`,
 			if t.Token != nil {
 				if own, _, _ := strings.Cut(t.Token.ID, "!"); strings.EqualFold(own, userID) {
 					if disable {
-						return fmt.Errorf("refusing to disable %s: it owns the roster's own token %s, so pveforge would lock itself out of %s", userID, t.Token.ID, targetID)
+						return refuseBeforeWrite(cmd, fmt.Errorf("refusing to disable %s: it owns the roster's own token %s, so pveforge would lock itself out of %s", userID, t.Token.ID, targetID))
 					}
 					if len(groups) > 0 {
-						return fmt.Errorf("refusing --group for %s: it owns the roster's own token %s, and joining a group grants it that group's ACLs", userID, t.Token.ID)
+						return refuseBeforeWrite(cmd, fmt.Errorf("refusing --group for %s: it owns the roster's own token %s, and joining a group grants it that group's ACLs", userID, t.Token.ID))
 					}
 				}
 			}
@@ -307,22 +348,31 @@ are set on its users (user ensure --group).
 
 If the change is made but its result cannot be re-read afterwards, or is
 re-read without every requested value, a one-line warning is printed on
-stderr; stdout is unchanged and the exit status is still 0.`,
+stderr; stdout is unchanged and the exit status is still 0.
+
+Exit status: 0 when done; 4 when the run is refused before anything was sent to
+the target (an invalid value, a refusal above, a lock-wait timeout, a
+--host-key-fingerprint that is malformed or is not the target's pin, a target
+holding no SSH key without --no-ssh-key): nothing on the PVE host and nothing
+in the roster file was changed; 3 when the pveum write was sent and ran out of
+time, so its outcome is unknown (re-running is safe); 1 for every other
+failure, a failed read included, and for anything that goes wrong after the
+write was sent.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetID, groupID := args[0], args[1]
 			if err := pve.CheckGroupID(groupID); err != nil {
-				return err
+				return refuseBeforeWrite(cmd, err)
 			}
 			comment, err := optionalText(cmd, "comment")
 			if err != nil {
-				return err
+				return refuseBeforeWrite(cmd, err)
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
 				return err
 			}
-			access, _, closeAll, err := openRootAccess(cmd, targetID, noSSHKey, true)
+			access, _, closeAll, err := openRootAccessForWrite(cmd, targetID, noSSHKey, true)
 			if err != nil {
 				return err
 			}
@@ -390,7 +440,19 @@ The checks hold only for the roles, groups and users as read just before the
 grant. A grant to a group reaches every member, including one who joins
 later; a role widened (pveum role modify) after the grant widens it. Nothing
 serialises acl grant against user ensure, or either against changes made
-outside pveforge.`,
+outside pveforge.
+
+Exit status: 0 when done; 4 when the run is refused before anything was sent to
+the target (an invalid value, a refusal above, every role, group and principal refusal above, a lock-wait timeout, a
+--host-key-fingerprint that is malformed or is not the target's pin, a target
+holding no SSH key without --no-ssh-key): nothing on the PVE host and nothing
+in the roster file was changed; 3 when the pveum write was sent and ran out of
+time, so its outcome is unknown (re-running is safe); 1 for every other
+failure, a failed read included, and for anything that goes wrong after the
+write was sent.
+
+A grant whose read-back does not hold its entry, or that fails after the first
+pveum acl modify was sent, is exit 1, never 4: something may already be granted.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var principals []bootstrap.Principal
@@ -400,16 +462,16 @@ outside pveforge.`,
 				}
 			}
 			if len(principals) != 1 {
-				return errors.New("give exactly one of --user, --group or --token")
+				return refuseBeforeWrite(cmd, errors.New("give exactly one of --user, --group or --token"))
 			}
 			if len(grants) == 0 {
-				return errors.New("acl grant requires at least one --grant PATH:ROLE[:PRIVS[:PROPAGATE]]")
+				return refuseBeforeWrite(cmd, errors.New("acl grant requires at least one --grant PATH:ROLE[:PRIVS[:PROPAGATE]]"))
 			}
 			parsed, err := bootstrap.ParseGrants(grants)
 			if err != nil {
-				return err
+				return refuseBeforeWrite(cmd, err)
 			}
-			access, _, closeAll, err := openRootAccess(cmd, args[0], noSSHKey, true)
+			access, _, closeAll, err := openRootAccessForWrite(cmd, args[0], noSSHKey, true)
 			if err != nil {
 				return err
 			}

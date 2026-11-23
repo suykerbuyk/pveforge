@@ -56,6 +56,7 @@ var parallelAllowed = []struct{ pkg, why string }{
 	{"internal/device", "pure functions over their inputs"},
 	{"internal/discover", "pure functions over their inputs"},
 	{"internal/kvjson", "pure rendering"},
+	{"internal/dispatch", "pure state over a gate each test creates for itself; no process-global state"},
 	{"internal/tlspin", "pure functions over their inputs; each test makes its own keys and its own httptest servers"},
 	{"cmd/pveforge-harness-pins", "run over a roster file in the test's own directory; no process-global state"},
 	{"internal/lock/lockguard", "a static source guard"},

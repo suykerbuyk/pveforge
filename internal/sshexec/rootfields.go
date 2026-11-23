@@ -64,7 +64,7 @@ func (c *Client) SetVMConfigField(ctx context.Context, vmid int, field, value st
 		return fmt.Errorf("set vm config field: invalid field name %q", field)
 	}
 	cmd := fmt.Sprintf("qm set %s --%s %s", ShellQuote(strconv.Itoa(vmid)), field, ShellQuote(value))
-	res, err := c.Run(WithCommandTimeout(ctx, QMSetTimeout), cmd)
+	res, err := c.Run(WithWrite(WithCommandTimeout(ctx, QMSetTimeout)), cmd)
 	if err != nil {
 		return fmt.Errorf("set vm %d field %q: %w", vmid, field, err)
 	}
@@ -85,7 +85,7 @@ func (c *Client) DeleteVMConfigField(ctx context.Context, vmid int, field string
 		return fmt.Errorf("delete vm config field: invalid field name %q", field)
 	}
 	cmd := fmt.Sprintf("qm set %s --delete %s", ShellQuote(strconv.Itoa(vmid)), ShellQuote(field))
-	res, err := c.Run(WithCommandTimeout(ctx, QMSetTimeout), cmd)
+	res, err := c.Run(WithWrite(WithCommandTimeout(ctx, QMSetTimeout)), cmd)
 	if err != nil {
 		return fmt.Errorf("delete vm %d field %q: %w", vmid, field, err)
 	}

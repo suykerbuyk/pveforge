@@ -278,12 +278,12 @@ func TestVMSnapshot_S2_Create(t *testing.T) {
 	}
 	for _, name := range []string{"current", "Pending"} {
 		before := len(f.got())
-		if code, _, stderr := snap(rp, "create", "qa-pve-01", "100", name); code != 1 || !strings.Contains(stderr, "reserved") || len(f.got()) != before {
+		if code, _, stderr := snap(rp, "create", "qa-pve-01", "100", name); code != 4 || !strings.Contains(stderr, "reserved") || len(f.got()) != before {
 			t.Errorf("create %q: exit %d, %d request(s), stderr %q; want a refusal before any request", name, code, len(f.got())-before, stderr)
 		}
 	}
 	posts := f.count("POST " + snapBase + "/snapshot")
-	if code, _, stderr := snap(rp, "create", "qa-pve-01", "100", "a"); code != 1 || !strings.Contains(stderr, "already exists") || f.count("POST "+snapBase+"/snapshot") != posts {
+	if code, _, stderr := snap(rp, "create", "qa-pve-01", "100", "a"); code != 4 || !strings.Contains(stderr, "already exists") || f.count("POST "+snapBase+"/snapshot") != posts {
 		t.Errorf("an existing name: exit %d, stderr %q; want a refusal with no POST", code, stderr)
 	}
 }
@@ -330,7 +330,7 @@ func TestVMSnapshot_S4_RollbackRefusesNewer(t *testing.T) {
 	f := newSnapshotFake(t, "a", "b", "c")
 	rp := f.start()
 	code, stdout, stderr := snap(rp, "rollback", "qa-pve-01", "100", "a")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, `2 newer snapshots exist`) ||
+	if code != 4 || stdout != "" || !strings.Contains(stderr, `2 newer snapshots exist`) ||
 		!strings.Contains(stderr, "to discard them first, run: pveforge vm snapshot delete 'qa-pve-01' 100 'c' 'b'") {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
@@ -496,8 +496,14 @@ func TestVMSnapshot_S10_LockWaitBoundsEveryCommand(t *testing.T) {
 		{"delete", "qa-pve-01", "100", "b"},
 		{"rollback", "qa-pve-01", "100", "b"},
 	} {
-		if code, _, stderr := snap(rp, append(args, "--lock-wait", "20ms")...); code != 1 || !strings.Contains(stderr, "lock") {
-			t.Errorf("%s: exit %d, stderr %q; want a lock timeout", args[0], code, stderr)
+		// A mutating verb's lock timeout is exit 4 (nothing was dispatched, the
+		// lock files are bookkeeping); list is a read, so its timeout is 1.
+		wantCode := 4
+		if args[0] == "list" {
+			wantCode = 1
+		}
+		if code, _, stderr := snap(rp, append(args, "--lock-wait", "20ms")...); code != wantCode || !strings.Contains(stderr, "lock") {
+			t.Errorf("%s: exit %d, stderr %q; want exit %d and a lock timeout", args[0], code, stderr, wantCode)
 		}
 	}
 	if n := len(f.got()); n != 0 {
@@ -580,7 +586,7 @@ func TestVMSnapshot_S16_DeleteRefusesCurrent(t *testing.T) {
 	for _, name := range []string{"current", " current "} {
 		f := newSnapshotFake(t, "a")
 		rp := f.start()
-		if code, _, stderr := snap(rp, "delete", "qa-pve-01", "100", "a", name); code != 1 || !strings.Contains(stderr, "reserved") || len(f.got()) != 0 {
+		if code, _, stderr := snap(rp, "delete", "qa-pve-01", "100", "a", name); code != 4 || !strings.Contains(stderr, "reserved") || len(f.got()) != 0 {
 			t.Errorf("delete %q: exit %d, %d request(s), stderr %q", name, code, len(f.got()), stderr)
 		}
 	}
@@ -744,7 +750,7 @@ func TestVMSnapshot_RBStop_NotFoundAbortsBeforeRollback(t *testing.T) {
 	f := newSnapshotFake(t, "a") // "a" exists; "zzz" does not
 	rp := f.start()
 	code, stdout, stderr := snap(rp, "rollback", "qa-pve-01", "100", "zzz")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "is not in the snapshot list") {
+	if code != 4 || stdout != "" || !strings.Contains(stderr, "is not in the snapshot list") {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	if n := f.count("POST " + snapBase + "/snapshot/"); n != 0 {
@@ -761,7 +767,7 @@ func TestVMSnapshot_RBStop_PreReadErrorAbortsBeforeRollback(t *testing.T) {
 	f.listFail = true
 	rp := f.start()
 	code, stdout, _ := snap(rp, "rollback", "qa-pve-01", "100", "a")
-	if code != 1 || stdout != "" {
+	if code != 4 || stdout != "" {
 		t.Fatalf("exit %d, stdout %q; want a non-zero abort on the failed pre-read", code, stdout)
 	}
 	if n := f.count("POST " + snapBase + "/snapshot/a/rollback"); n != 0 {

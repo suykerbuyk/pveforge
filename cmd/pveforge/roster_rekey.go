@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"path/filepath"
 	"strings"
 
@@ -44,22 +45,23 @@ then seal the new passphrase into hack/harness/secrets.age.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			old, err := rekeyOldPassphrase(cmd.Context())
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// Before the new passphrase is asked for: a roster with nothing
 			// to rekey, or a wrong current passphrase, must not cost two
 			// more prompts.
 			if err := roster.CheckRekey(path, old); err != nil {
-				return fmt.Errorf("rekey %s: %w", path, err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("rekey %s: %w", path, err))
 			}
 			next, err := rekeyNewPassphrase(cmd.Context())
 			if err != nil {
-				return fmt.Errorf("rekey %s: %w", path, err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("rekey %s: %w", path, err))
 			}
+			dispatch.Open(cmd.Context()) // a roster write
 			res, err := roster.Rekey(path, old, next)
 			if err != nil {
 				return fmt.Errorf("rekey %s: %w", path, err)

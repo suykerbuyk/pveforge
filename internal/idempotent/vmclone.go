@@ -98,6 +98,27 @@ type VMClone struct {
 	// target, name, pool, snapname. "newid" need not be present: CloneVM
 	// stamps NewVMID onto the form authoritatively either way.
 	Params url.Values
+
+	// preflighted is set by Preflight, which ran Apply's two refusals before
+	// the write gate opened, so Apply does not repeat their reads.
+	preflighted bool
+}
+
+var _ Preflighter = (*VMClone)(nil)
+
+// Preflight runs the refusals Apply documents as coming "before the clone
+// call": a duplicated "full" and the linked-clone storage pre-check. Run
+// calls it before opening the write gate, so each is a refusal that changed
+// nothing (exit 4); the same checks inside Apply would run with the gate
+// already open. Apply then skips them (preflighted), so a Run reads the
+// storage types once.
+func (op *VMClone) Preflight(ctx context.Context) error {
+	op.preflighted = false
+	if err := op.refusals(ctx); err != nil {
+		return err
+	}
+	op.preflighted = true
+	return nil
 }
 
 // Read reports whether NewVMID already answers to something on this
@@ -154,6 +175,26 @@ func (op *VMClone) Satisfied(current string) bool {
 // constraint to enforce, so applying the check there would refuse
 // perfectly valid cross-storage-type full clones for no reason.
 func (op *VMClone) Apply(ctx context.Context) error {
+	if !op.preflighted {
+		if err := op.refusals(ctx); err != nil {
+			return err
+		}
+	}
+	op.preflighted = false
+
+	upid, err := op.Client.CloneVM(ctx, op.SourceVMID, op.NewVMID, op.Params)
+	if err != nil {
+		return fmt.Errorf("vm clone: vm %d to %d: %w", op.SourceVMID, op.NewVMID, err)
+	}
+
+	if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
+		return fmt.Errorf("vm clone: vm %d to %d: %w", op.SourceVMID, op.NewVMID, err)
+	}
+	return nil
+}
+
+// refusals is everything Apply checks before the clone call (see Apply).
+func (op *VMClone) refusals(ctx context.Context) error {
 	// A duplicate "full" is refused outright rather than resolved. Params
 	// is a url.Values — a multi-valued map — and Get returns only the
 	// FIRST value, so Add("full","1") followed by Add("full","0") would
@@ -177,15 +218,6 @@ func (op *VMClone) Apply(ctx context.Context) error {
 		if err := op.checkLinkedCloneStorage(ctx); err != nil {
 			return err
 		}
-	}
-
-	upid, err := op.Client.CloneVM(ctx, op.SourceVMID, op.NewVMID, op.Params)
-	if err != nil {
-		return fmt.Errorf("vm clone: vm %d to %d: %w", op.SourceVMID, op.NewVMID, err)
-	}
-
-	if err := op.Client.WaitForTask(ctx, op.Client.Node(), upid); err != nil {
-		return fmt.Errorf("vm clone: vm %d to %d: %w", op.SourceVMID, op.NewVMID, err)
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"net"
 	"net/http"
 	"net/url"
@@ -306,6 +307,13 @@ func (g accessWriteGuard) RoundTrip(req *http.Request) (*http.Response, error) {
 	next := g.next
 	if next == nil {
 		next = http.DefaultTransport
+	}
+	// The write gate (internal/dispatch): any method but GET and HEAD is a
+	// request that can change PVE state, and it is about to leave the process.
+	// Opened AFTER the /access refusal above (a request the guard itself
+	// refuses sends nothing) and immediately before the send.
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		dispatch.Open(req.Context())
 	}
 	return next.RoundTrip(req)
 }

@@ -97,7 +97,7 @@ func (c *Client) SetBridgePortIsolated(ctx context.Context, tap string, isolated
 		onOff = "on"
 	}
 	cmd := fmt.Sprintf("bridge link set dev %s isolated %s", ShellQuote(tap), onOff)
-	res, err := c.Run(ctx, cmd)
+	res, err := c.Run(WithWrite(ctx), cmd)
 	if err != nil {
 		return fmt.Errorf("set bridge port isolated for %s: %w", tap, err)
 	}

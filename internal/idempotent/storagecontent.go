@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"net/url"
 	"sort"
 	"strings"
@@ -118,7 +119,10 @@ func (op *StorageContentEnsure) Read(ctx context.Context) (string, error) {
 	raw, err := op.Client.GetStorageConfigRaw(ctx, op.Storage)
 	if err != nil {
 		if pve.IsStorageNotFoundError(err) {
-			return "", fmt.Errorf("storage set-content: storage %q does not exist (create it first; set-content does not create a storage): %w", op.Storage, err)
+			// PVE's authoritative "No such storage": a refusal, and (gate still
+			// closed on the first Read) before any write, so exit 4. A re-read
+			// after a write finds the gate open and stays a plain error.
+			return "", dispatch.Refuse(ctx, fmt.Errorf("storage set-content: storage %q does not exist (create it first; set-content does not create a storage): %w", op.Storage, err))
 		}
 		return "", fmt.Errorf("storage set-content: storage %q: read current config: %w", op.Storage, err)
 	}

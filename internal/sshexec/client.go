@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 )
 
 // DialTimeout bounds how long an SSH TCP-connect + handshake may take, so a
@@ -118,6 +120,35 @@ func CommandTimeoutFor(ctx context.Context) time.Duration {
 		return d
 	}
 	return CommandTimeout
+}
+
+type writeKey struct{}
+
+// WithWrite marks ctx as carrying a root-SSH WRITE: the command Run sends
+// under it can change state on the PVE host (a pveum write, a key install or
+// removal, a qm/ip/file write). It is the one thing that distinguishes a write
+// from a read at the funnel: Run opens the run's write gate
+// (internal/dispatch) when it is about to send a marked command, and builds
+// dispatch.Unobserve when a marked command was sent and then timed out. Read
+// sites never set it.
+func WithWrite(ctx context.Context) context.Context {
+	return context.WithValue(ctx, writeKey{}, true)
+}
+
+// IsWrite reports whether ctx carries the WithWrite mark.
+func IsWrite(ctx context.Context) bool {
+	v, _ := ctx.Value(writeKey{}).(bool)
+	return v
+}
+
+// NoteWrite is what Run does at the send point for a marked command: it
+// opens the write gate. It is exported so a test double of an SSH session,
+// which never reaches Run, reports its writes the same way (a fixture asserts
+// the gate agrees with its own write log).
+func NoteWrite(ctx context.Context) {
+	if IsWrite(ctx) {
+		dispatch.Open(ctx)
+	}
 }
 
 type maxOutputKey struct{}
@@ -441,6 +472,12 @@ func (c *Client) Run(parent context.Context, cmd string) (*Result, error) {
 		session = o.session
 	}
 
+	// The command is about to be sent: from here a failure is not "nothing was
+	// sent". A write opens the gate now, after the session opened (so an
+	// ErrNoCommandSent failure above never opens it).
+	write := IsWrite(parent)
+	NoteWrite(parent)
+
 	limit := MaxOutputFor(parent)
 	over := make(chan struct{})
 	once := &sync.Once{}
@@ -455,10 +492,22 @@ func (c *Client) Run(parent context.Context, cmd string) (*Result, error) {
 	select {
 	case <-ctx.Done():
 		c.abandon(session)
-		return nil, ended()
+		err := ended()
+		if write {
+			// A write that was sent and then ran out of time (its own bound
+			// or the caller's deadline or cancel) has an unknown outcome.
+			err = dispatch.Unobserve(err)
+		}
+		return nil, err
 	case <-over:
 		c.abandon(session)
-		return nil, &OutputTooLargeError{Cmd: commandName(cmd), Limit: limit}
+		var err error = &OutputTooLargeError{Cmd: commandName(cmd), Limit: limit}
+		if write {
+			// A write that was sent and whose output overflowed was abandoned
+			// mid-command: what it did is not observed, as for a timeout.
+			err = dispatch.Unobserve(err)
+		}
+		return nil, err
 	case runErr := <-done:
 		_ = session.Close()
 		return finishRun(cmd, runErr, stdout, stderr)

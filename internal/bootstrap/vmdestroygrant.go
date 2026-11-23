@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
@@ -231,8 +232,14 @@ func EnableVMDestroy(ctx context.Context, a *RootAccess, req EnableVMDestroyRequ
 	if role == "" {
 		role = DefaultVMDestroyRole
 	}
+	// Every refusal of this function and of enableVMDestroy that is raised
+	// before the first pveum write goes through dispatch.Refuse: exit 4 while
+	// the run's write gate is closed. A refusal raised after a write (an
+	// ErrPostWriteInvariant, ErrRoleChangedDuringGrant, ...) is built plain, and
+	// Refuse would return it plain anyway once a write has opened the gate. A
+	// read that fails is not a refusal and stays exit 1.
 	if err := checkVMDestroyRole(role); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	tokenID := a.opts.OwnToken
 	if req.RoleOnly {
@@ -240,7 +247,7 @@ func EnableVMDestroy(ctx context.Context, a *RootAccess, req EnableVMDestroyRequ
 	}
 	if tokenID != "" {
 		if err := pve.CheckTokenID(tokenID); err != nil {
-			return nil, err
+			return nil, dispatch.Refuse(ctx, err)
 		}
 	}
 	if !req.DryRun && (req.RosterPath == "" || req.TargetID == "") {
@@ -255,7 +262,9 @@ func EnableVMDestroy(ctx context.Context, a *RootAccess, req EnableVMDestroyRequ
 		// effective read-back.
 		unlock, err := lock.Mutation(ctx, req.RosterPath, lock.ObjectKey{TargetID: req.TargetID, Kind: "bootstrap", ID: "token"})
 		if err != nil {
-			return nil, fmt.Errorf("enable-vm-destroy %s: acquire the per-target bootstrap lock: %w", req.TargetID, err)
+			// The lock files are bookkeeping, not a mutation: a lock-wait timeout
+			// here is before this verb's first write (contract plan D5).
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("enable-vm-destroy %s: acquire the per-target bootstrap lock: %w", req.TargetID, err))
 		}
 		defer func() { _ = unlock() }()
 		// The token id the command was set up with was read from the roster
@@ -268,8 +277,8 @@ func EnableVMDestroy(ctx context.Context, a *RootAccess, req EnableVMDestroyRequ
 				return nil, fmt.Errorf("enable-vm-destroy %s: re-read the roster's token under the lock: %w", req.TargetID, err)
 			}
 			if cur != a.opts.OwnToken {
-				return nil, fmt.Errorf("%w: %s held %q when this run started and holds %q now; nothing was changed, run it again",
-					ErrTokenChangedUnderLock, req.TargetID, a.opts.OwnToken, cur)
+				return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s held %q when this run started and holds %q now; nothing was changed, run it again",
+					ErrTokenChangedUnderLock, req.TargetID, a.opts.OwnToken, cur))
 			}
 		}
 	}
@@ -282,14 +291,14 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 	if err != nil {
 		return nil, err
 	}
-	d, err := deriveRoleSet(roles)
+	d, err := deriveRoleSetGated(ctx, roles)
 	if err != nil {
 		return nil, err
 	}
 	live, haveRole := roles[role]
 	if haveRole {
 		if missing, extra := setDiff(d, live); len(missing) > 0 || len(extra) > 0 {
-			return nil, roleConflict(role, missing, extra)
+			return nil, dispatch.Refuse(ctx, roleConflict(role, missing, extra))
 		}
 	}
 	p := enableParams{role: role, privs: d, tokenID: tokenID}
@@ -299,7 +308,7 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 		res.Outcome = EnableRoleOnly
 		if !haveRole {
 			if err := checkExpectedPlan(req, []string{renderEnable(1, p)}); err != nil {
-				return nil, err
+				return nil, dispatch.Refuse(ctx, err)
 			}
 			res.RoleCreated = true
 			if err := a.ensureRole(ctx, p, req.DryRun, res); err != nil {
@@ -333,13 +342,13 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 
 	predicted, err := predictTree(tree, ownerTree, acls, tokenID, d)
 	if err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	if err := judgePredicted(predicted, tree, role, d); err != nil {
 		if ownerTree != nil && errors.Is(err, ErrUpgradeWouldNotConverge) {
 			err = fmt.Errorf("%w; the token's owner %s is not root@pam, and PVE intersects a privilege-separated token with its owner, so the owner itself must hold the role's privileges on / with propagate 1 (this verb never grants the owner)", err, owner)
 		}
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	res.Outcome = EnableUpgraded
 	res.Widened = widenedBy(tree, predicted)
@@ -348,7 +357,7 @@ func (a *RootAccess) enableVMDestroy(ctx context.Context, req EnableVMDestroyReq
 		would = []string{renderEnable(1, p), would[0]}
 	}
 	if err := checkExpectedPlan(req, would); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 
 	if !haveRole {
@@ -463,6 +472,15 @@ func roleConflict(role string, missing, extra []string) error {
 // the role is granted to pveforge's own token, and a future PVEVMAdmin that
 // gained one must make the verb refuse, never self-grant it.
 func deriveRoleSet(roles map[string][]string) ([]string, error) {
+	return deriveRoleSetGated(context.Background(), roles)
+}
+
+// deriveRoleSetGated is deriveRoleSet with the run's context, so that the two
+// refusals it makes about the set it derived (an unknown privilege, an
+// escalating one) are exit 4 while the write gate is closed. The two "cannot
+// derive" errors (a role missing from the list) are read failures in substance
+// and stay plain.
+func deriveRoleSetGated(ctx context.Context, roles map[string][]string) ([]string, error) {
 	vm, ok := roles[vmAdminRoleName]
 	if !ok || len(vm) == 0 {
 		return nil, fmt.Errorf("the role list has no %s (or it holds no privileges): cannot derive the role", vmAdminRoleName)
@@ -481,11 +499,11 @@ func deriveRoleSet(roles map[string][]string) ([]string, error) {
 	}
 	sort.Strings(d)
 	if missing, _ := setDiff(d, admin); len(missing) > 0 {
-		return nil, fmt.Errorf("%w: [%s] is not in %s's privileges, PVE's list of every valid privilege", ErrUnknownPrivilege, strings.Join(missing, ","), administratorRoleName)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: [%s] is not in %s's privileges, PVE's list of every valid privilege", ErrUnknownPrivilege, strings.Join(missing, ","), administratorRoleName))
 	}
 	if esc := escalating(d); len(esc) > 0 {
-		return nil, fmt.Errorf("%w: %s plus %s would confer %s; refusing to grant an escalating privilege to pveforge's own token",
-			ErrEscalatingRole, vmAdminRoleName, auditPrivilege, strings.Join(esc, ","))
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s plus %s would confer %s; refusing to grant an escalating privilege to pveforge's own token",
+			ErrEscalatingRole, vmAdminRoleName, auditPrivilege, strings.Join(esc, ",")))
 	}
 	return d, nil
 }

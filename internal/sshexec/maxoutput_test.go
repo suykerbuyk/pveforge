@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/pvefake"
 )
 
@@ -177,5 +178,39 @@ func TestFinishRun_NeverReturnsOverflowedOutput(t *testing.T) {
 	_, _ = errb.Write([]byte("ab"))
 	if res, err := finishRun("cmd x", nil, out, errb); err != nil || res.Stdout != "1234" || res.Stderr != "ab" {
 		t.Errorf("within the limit: %+v, %v", res, err)
+	}
+}
+
+// G3: a marked WRITE whose output overflowed was sent and then abandoned, so its
+// outcome is unobserved (exit 3), exactly as for a timeout; an UNMARKED command
+// that overflows stays an ordinary OutputTooLargeError (a read: exit 1). The
+// error still matches ErrOutputTooLarge either way, and the write gate opens
+// for the marked one only.
+func TestRun_MaxOutput_AMarkedWriteThatOverflowsIsUnobserved(t *testing.T) {
+	c := sizedServer(t)
+	const limit = 64 << 10
+	for _, tc := range []struct {
+		name       string
+		write      bool
+		unobserved bool
+	}{{"marked write", true, true}, {"unmarked read", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			gctx, _ := dispatch.With(context.Background())
+			ctx := WithMaxOutput(gctx, limit)
+			if tc.write {
+				ctx = WithWrite(ctx)
+			}
+			res, err := runWithin(t, 5*time.Second, c, ctx, "out 200000")
+			var tooLarge *OutputTooLargeError
+			if res != nil || !errors.Is(err, ErrOutputTooLarge) || !errors.As(err, &tooLarge) {
+				t.Fatalf("res %v, err %v: want OutputTooLargeError and no result", res, err)
+			}
+			if got := dispatch.IsUnobserved(err); got != tc.unobserved {
+				t.Fatalf("unobserved = %v, want %v (err %v)", got, tc.unobserved, err)
+			}
+			if opened := dispatch.Opened(ctx); opened != tc.write {
+				t.Fatalf("gate opened = %v, want %v", opened, tc.write)
+			}
+		})
 	}
 }

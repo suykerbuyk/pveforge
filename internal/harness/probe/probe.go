@@ -6,9 +6,14 @@
 // additive path; lib.sh/probe.sh and the pinned sourceguard tests are
 // untouched.
 //
-// Outcome is classified on STDOUT, never an exit integer (runRoot collapses
-// every error to 1): the success line is `rollback-rule=<rule> storage=<id>`;
-// a refusal and a failure each print a distinct line and write no rule file.
+// Outcome is classified on STDOUT: the success line is
+// `rollback-rule=<rule> storage=<id>`; a refusal and a failure each print a
+// distinct line and write no rule file. Exit status: a refusal before the
+// probe's create (the static layer, preCreate, the lock wait) is 4; any failure
+// after the create is 1, and a create/snapshot/rollback/destroy wait that
+// started and did not observe is 3 (the chain is kept with %w, never flattened).
+// The evidence directory and the harness-state/ rule file are local bookkeeping
+// and never open the write gate (contract plan D18).
 package probe
 
 import (
@@ -28,6 +33,7 @@ import (
 
 	proxmox "github.com/suykerbuyk/go-proxmox"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness/outer"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -89,11 +95,15 @@ func (e *refuseErr) Error() string { return "storage refused: " + e.reason }
 
 func (d *Driver) sayln(s string) { fmt.Fprintln(d.p.Stdout, s) }
 
-// refuse writes the refusal cause to stdout and returns a refuseErr.
-func (d *Driver) refuse(reason string) error {
+// refuse writes the refusal cause to stdout and returns a refuseErr. Every
+// caller is before the probe's create (the static layer and preCreate), so it is
+// dispatch.Refuse'd: exit 4 while the run's write gate is closed, a plain error
+// (exit 1) once any request has changed state. The evidence directory written
+// before it is local bookkeeping, not a mutation.
+func (d *Driver) refuse(ctx context.Context, reason string) error {
 	d.note("REFUSED", "storage "+d.p.Storage+": "+reason)
 	d.sayln("probe: refusing storage " + d.p.Storage + ": " + reason)
-	return &refuseErr{reason}
+	return dispatch.Refuse(ctx, &refuseErr{reason})
 }
 
 // fail writes a failure cause to stdout and returns an error.
@@ -101,6 +111,15 @@ func (d *Driver) fail(reason string) error {
 	d.note("FAILED", reason)
 	d.sayln("probe: FAILED: " + reason)
 	return fmt.Errorf("probe: %s", reason)
+}
+
+// failw is fail for a cause that must stay in the error chain: a task wait that
+// started and did not observe is exit 3 at runRoot, which reads the chain. The
+// printed text and the returned error text are exactly fail(prefix + cause).
+func (d *Driver) failw(prefix string, cause error) error {
+	d.note("FAILED", prefix+cause.Error())
+	d.sayln("probe: FAILED: " + prefix + cause.Error())
+	return fmt.Errorf("probe: %s%w", prefix, cause)
 }
 
 // Run executes the probe. Writes the outcome to stdout; returns nil on a
@@ -120,7 +139,7 @@ func (d *Driver) Run(ctx context.Context) error {
 	}
 	d.evidence("storage-status-before.json", string(raw))
 	if reason := st.Unsuitable(d.p.MinFreeGiB); reason != "" {
-		return d.refuse(reason)
+		return d.refuse(ctx, reason)
 	}
 	d.evidence("storage-type", st.Type)
 	if d.p.StaticOnly {
@@ -139,7 +158,7 @@ func (d *Driver) Run(ctx context.Context) error {
 	// The command holds the VM lock across this whole run (P5: one lock, no
 	// nested idempotent.Run). Deferred cleanup on a failure path runs on a
 	// FRESH detached context (P3).
-	defer d.cleanup()
+	defer d.cleanup(ctx)
 
 	rule, err := d.empirical(ctx)
 	if err != nil {
@@ -169,10 +188,10 @@ func (d *Driver) preCreate(ctx context.Context, st outer.StorageStatus) (int64, 
 		return 0, d.fail(err.Error())
 	}
 	if members.has(vmid) {
-		return 0, d.refuse(fmt.Sprintf("VM %d already exists in pool %s: the probe runs only before the build", vmid, d.cfg.Pool))
+		return 0, d.refuse(ctx, fmt.Sprintf("VM %d already exists in pool %s: the probe runs only before the build", vmid, d.cfg.Pool))
 	}
 	if err := outer.VMIDFree(ctx, d.client, vmid); err != nil {
-		return 0, d.refuse(fmt.Sprintf("VMID %d is not free in the cluster: %v", vmid, err))
+		return 0, d.refuse(ctx, fmt.Sprintf("VMID %d is not free in the cluster: %v", vmid, err))
 	}
 	content, err := d.client.RawRequest(ctx, http.MethodGet, outer.ContentPath(d.cfg.Node, d.p.Storage), url.Values{"vmid": {strconv.Itoa(vmid)}})
 	if err != nil {
@@ -183,14 +202,14 @@ func (d *Driver) preCreate(ctx context.Context, st outer.StorageStatus) (int64, 
 		return 0, d.fail(fmt.Sprintf("storage %s: the content answer has an unexpected shape", d.p.Storage))
 	}
 	if len(arr) != 0 {
-		return 0, d.refuse("it already holds volumes of VM " + strconv.Itoa(vmid) + " (a leftover)")
+		return 0, d.refuse(ctx, "it already holds volumes of VM "+strconv.Itoa(vmid)+" (a leftover)")
 	}
 	if !members.empty() {
-		return 0, d.refuse(fmt.Sprintf("pool %s is not empty: the probe runs on an empty harness storage, before the build", d.cfg.Pool))
+		return 0, d.refuse(ctx, fmt.Sprintf("pool %s is not empty: the probe runs on an empty harness storage, before the build", d.cfg.Pool))
 	}
 	baseline, err := outer.BaselineUsed(st, d.p.Storage)
 	if err != nil {
-		return 0, d.refuse(err.Error())
+		return 0, d.refuse(ctx, err.Error())
 	}
 	return baseline, nil
 }
@@ -201,12 +220,12 @@ func (d *Driver) preCreate(ctx context.Context, st outer.StorageStatus) (int64, 
 func (d *Driver) empirical(ctx context.Context) (string, error) {
 	// Create + tag (screened, probe-only; P5).
 	if err := d.createAndTag(ctx); err != nil {
-		return "", d.fail(err.Error())
+		return "", d.failw("", err)
 	}
 	// From here 690 is a tagged member: change verbs may be guarded.
 	for _, name := range []string{"s1", "s2"} {
 		if err := d.snapshot(ctx, name); err != nil {
-			return "", d.fail(err.Error())
+			return "", d.failw("", err)
 		}
 	}
 	// Rollback s1 while s2 exists → classify on the STORAGE's response
@@ -217,11 +236,14 @@ func (d *Driver) empirical(ctx context.Context) (string, error) {
 	// non-latest rollback and would only ever report pveforge POLICY
 	// (rollback-latest-only). reset.sh issues raw rollback POSTs the same way.
 	if err := d.guard(ctx, outer.ModeChange); err != nil {
-		return "", d.fail(err.Error())
+		return "", d.failw("", err)
 	}
-	rule, failedReason := classifyStorageRollback(d.rawRollback(ctx, "s1"))
+	rbErr := d.rawRollback(ctx, "s1")
+	rule, _ := classifyStorageRollback(rbErr)
 	if rule == "" {
-		return "", d.fail("the rollback of s1 while s2 exists failed for an unrecognised reason: " + failedReason)
+		// rbErr is non-nil here (nil classifies as rollback-any); its chain is kept
+		// so an unobserved rollback wait is exit 3.
+		return "", d.failw("the rollback of s1 while s2 exists failed for an unrecognised reason: ", rbErr)
 	}
 	if rule == "rollback-latest-only" {
 		if err := d.refusedRollbackLockCheck(ctx); err != nil {
@@ -233,22 +255,22 @@ func (d *Driver) empirical(ctx context.Context) (string, error) {
 	// Cascade (success path MAY use CascadeDeleteSnapshots; a failure stops
 	// the probe — P11): delete s2, roll back to s1, delete s1.
 	if err := d.guard(ctx, outer.ModeChange); err != nil {
-		return "", d.fail(err.Error())
+		return "", d.failw("", err)
 	}
 	if _, err := d.client.CascadeDeleteSnapshots(ctx, vmid, []string{"s2"}); err != nil {
-		return "", d.fail(fmt.Sprintf("cascade: delete s2: %v", err))
+		return "", d.failw("cascade: delete s2: ", err)
 	}
 	if err := d.rollback(ctx, "s1"); err != nil {
-		return "", d.fail(fmt.Sprintf("cascade: rollback to s1: %v", err))
+		return "", d.failw("cascade: rollback to s1: ", err)
 	}
 	if _, err := d.client.CascadeDeleteSnapshots(ctx, vmid, []string{"s1"}); err != nil {
-		return "", d.fail(fmt.Sprintf("cascade: delete s1: %v", err))
+		return "", d.failw("cascade: delete s1: ", err)
 	}
 
 	// Destroy LEAF (P1): StatusGatedStop → raw DELETE both params → VMGone.
 	upid, err := d.destroyLeaf(ctx)
 	if err != nil {
-		return "", d.fail(err.Error())
+		return "", d.failw("", err)
 	}
 	d.mainUPID = upid
 	d.evidence("destroy.out", upid)
@@ -596,16 +618,18 @@ func (d *Driver) writeRule(rule string) error {
 
 // ---- cleanup (P3): fresh detached context, ledger-gated, main-path UPID ----
 
-func (d *Driver) cleanup() {
+func (d *Driver) cleanup(cmdCtx context.Context) {
 	if d.gone || !d.created {
 		// Success, or we never created 690: nothing this run must undo. (If
 		// a VM 690 appeared un-ledgered, the pre-create/guard refusal already
 		// reported it; cleanup never destroys an un-ledgered VM — P3.)
 		return
 	}
-	// A FRESH detached, bounded context (P3): a signal cancels cmd.Context,
-	// so cleanup must not observe it or the destroy+report would no-op.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// A detached, bounded context (P3): a signal cancels cmd.Context, so
+	// cleanup must not observe it or the destroy+report would no-op. It is
+	// derived from context.WithoutCancel(the command's ctx), never from
+	// context.Background(), so the write gate stays visible to the teardown.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(cmdCtx), 5*time.Minute)
 	defer cancel()
 	d.cleanupTeardown(ctx)
 }

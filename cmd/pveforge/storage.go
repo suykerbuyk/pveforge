@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"strconv"
 	"strings"
 
@@ -78,7 +79,7 @@ and does NOT remove a content type.`,
 
 		op := &idempotent.StorageContentEnsure{Client: client, Storage: args[1], ContentType: args[2]}
 		if err := op.Validate(); err != nil {
-			return err
+			return dispatch.Refuse(cmd.Context(), err) // nothing sent: exit 4
 		}
 
 		// The same {TargetID, "storage", <name>} key every other storage
@@ -159,7 +160,7 @@ optional (PVE infers it from the storage type when omitted).`,
 		// Explicit, ahead of Run, like `storage create`: Run skips Apply (and
 		// its internal Validate) on the already-satisfied path.
 		if err := op.Validate(); err != nil {
-			return err
+			return dispatch.Refuse(cmd.Context(), err) // nothing sent: exit 4
 		}
 
 		key := lock.ObjectKey{TargetID: args[0], Kind: "storage", ID: args[1]}
@@ -279,7 +280,8 @@ func newStorageFreeOrphansCmd() *cobra.Command {
 			}
 			pairs, err := pve.ClusterQemuPairs(guests, online)
 			if err != nil {
-				return fmt.Errorf("storage free-orphans: refusing — %w", err)
+				// the shared-storage membership gate: a determination, reads only
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("storage free-orphans: refusing — %w", err))
 			}
 			op.ClusterPairs = pairs
 		} else {
@@ -295,7 +297,7 @@ func newStorageFreeOrphansCmd() *cobra.Command {
 			return fmt.Errorf("storage free-orphans: refusing — could not read cluster quorum for node %q: %w", t.Node, err)
 		}
 		if !quorate {
-			return fmt.Errorf("storage free-orphans: refusing — node %q is not quorate; its VM list may be stale and the free could delete a live VM's disk", t.Node)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("storage free-orphans: refusing — node %q is not quorate; its VM list may be stale and the free could delete a live VM's disk", t.Node))
 		}
 		// Residual (rides every free path, now scaled cluster-wide for shared
 		// storage): quorum is necessary, not sufficient; the post-quorate pmxcfs
@@ -407,7 +409,7 @@ refuses the duplicate), but STILL refuses a differing definition.`,
 		// already exists. Running it here means a zfspool with no pool= is
 		// refused whether or not the storage is already there.
 		if err := op.Validate(); err != nil {
-			return err
+			return dispatch.Refuse(cmd.Context(), err) // nothing sent: exit 4
 		}
 
 		// The lock key — the same {TargetID, "storage", <name>} key `storage

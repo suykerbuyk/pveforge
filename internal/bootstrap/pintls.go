@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -40,17 +41,17 @@ func capturePin(ctx context.Context, session SSHSession, api APIValidator, host 
 	// Bounded in size as well as time: a node answers with one certificate.
 	res, err := session.Run(sshexec.WithMaxOutput(ctx, tlspin.MaxCaptureOutput), tlspin.CaptureCommand(capturePort))
 	if errors.Is(err, sshexec.ErrOutputTooLarge) {
-		return "", fmt.Errorf("%w: the node's answer exceeded %d bytes, far more than one certificate; nothing was written: %w", ErrTLSCapture, tlspin.MaxCaptureOutput, err)
+		return "", dispatch.Refuse(ctx, fmt.Errorf("%w: the node's answer exceeded %d bytes, far more than one certificate; nothing was written: %w", ErrTLSCapture, tlspin.MaxCaptureOutput, err))
 	}
 	if err != nil {
 		return "", fmt.Errorf("%w: run the capture: %w", ErrTLSCapture, err)
 	}
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("%w: the capture exited %d (is openssl on the node, and is pveproxy listening on 127.0.0.1:%d? pass --capture-port if not)", ErrTLSCapture, res.ExitCode, capturePort)
+		return "", dispatch.Refuse(ctx, fmt.Errorf("%w: the capture exited %d (is openssl on the node, and is pveproxy listening on 127.0.0.1:%d? pass --capture-port if not)", ErrTLSCapture, res.ExitCode, capturePort))
 	}
 	captured, _, err := tlspin.ParseCapture([]byte(res.Stdout))
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrTLSCapture, err)
+		return "", dispatch.Refuse(ctx, fmt.Errorf("%w: %w", ErrTLSCapture, err))
 	}
 	return checkServed(ctx, api, host, apiPort, captured, verifyChain)
 }
@@ -65,7 +66,7 @@ func checkServed(ctx context.Context, api APIValidator, host string, apiPort int
 		return "", fmt.Errorf("read the TLS key %s:%d serves: %w", host, apiPort, err)
 	}
 	if served != want {
-		return "", fmt.Errorf("%w: %s:%d serves %s, the node %s; this run wrote no TLS pin, SSH auth or token to the roster, and sent no token (something else answers at this address, or a TLS-terminating proxy fronts the node: connect to the node directly)", ErrTLSPinMismatch, host, apiPort, served, want)
+		return "", dispatch.Refuse(ctx, fmt.Errorf("%w: %s:%d serves %s, the node %s; this run wrote no TLS pin, SSH auth or token to the roster, and sent no token (something else answers at this address, or a TLS-terminating proxy fronts the node: connect to the node directly)", ErrTLSPinMismatch, host, apiPort, served, want))
 	}
 	return want, nil
 }
@@ -173,7 +174,7 @@ func checkPinTLSMode(opts PinTLSOptions, tg *roster.Target) error {
 func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api APIValidator) (*PinTLSResult, error) {
 	if opts.Expect != "" {
 		if _, err := tlspin.Parse(string(opts.Expect)); err != nil {
-			return nil, fmt.Errorf("pin-tls %s: --expect: %w", opts.TargetID, err)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("pin-tls %s: --expect: %w", opts.TargetID, err))
 		}
 	}
 	if opts.SSHPort == 0 {
@@ -184,17 +185,17 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 	if !opts.Print {
 		unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
 		if err != nil {
-			return nil, fmt.Errorf("pin-tls %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("pin-tls %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err))
 		}
 		defer func() { _ = unlock() }()
 	}
 	r, err := roster.Load(opts.RosterPath)
 	if err != nil {
-		return nil, fmt.Errorf("pin-tls %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("pin-tls %s: %w", opts.TargetID, err))
 	}
 	tg := r.Find(opts.TargetID)
 	if tg == nil {
-		return nil, fmt.Errorf("pin-tls %s: no such target in roster %s", opts.TargetID, opts.RosterPath)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("pin-tls %s: no such target in roster %s", opts.TargetID, opts.RosterPath))
 	}
 	apiPort := pve.EffectiveAPIPort(tg.APIPort)
 	res := &PinTLSResult{TargetID: opts.TargetID}
@@ -206,7 +207,7 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 	keyful := tg.SSH != nil && tg.SSH.HostKeyFingerprint != ""
 
 	if err := checkPinTLSMode(opts, tg); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	switch {
 	case !tg.InsecureTLS:
@@ -218,12 +219,12 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 	case keyful:
 		keyPEM, err := opts.Passphrase.Decrypt(tg.SSH.PrivateKeyEnc)
 		if err != nil {
-			return nil, fmt.Errorf("pin-tls %s: decrypt the ssh key: %w", opts.TargetID, err)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("pin-tls %s: decrypt the ssh key: %w", opts.TargetID, err))
 		}
 		addr := fmt.Sprintf("%s:%d", tg.Host, opts.SSHPort)
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, tg.SSH.User, keyPEM, tg.SSH.HostKeyFingerprint)
 		if err != nil {
-			return nil, fmt.Errorf("pin-tls %s: connect with the pinned ssh key: %w", opts.TargetID, err)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("pin-tls %s: connect with the pinned ssh key: %w", opts.TargetID, err))
 		}
 		defer func() { _ = session.Close() }()
 		pin, err := capturePin(ctx, session, api, tg.Host, apiPort, opts.CapturePort, false)
@@ -246,11 +247,12 @@ func PinTLS(ctx context.Context, opts PinTLSOptions, transport SSHTransport, api
 		return res, nil
 	}
 	if res.Previous != "" && !opts.Repin {
-		return res, differsError(opts.TargetID, res.Previous, res.Pin, keyful)
+		return res, dispatch.Refuse(ctx, differsError(opts.TargetID, res.Previous, res.Pin, keyful))
 	}
 	if opts.Print {
 		return res, nil
 	}
+	dispatch.Open(ctx) // a roster write
 	if err := roster.WriteTLSPin(opts.RosterPath, opts.TargetID, res.Previous, res.Pin, res.Source, opts.Passphrase); err != nil {
 		return res, fmt.Errorf("pin-tls %s: %w", opts.TargetID, err)
 	}

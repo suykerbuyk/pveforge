@@ -271,8 +271,8 @@ func TestVMSet_SetAndDeleteSameFieldRefusedBeforeAnyRequest(t *testing.T) {
 		{"--delete", "cores", "--delete", "cores"},
 	} {
 		code, stdout, stderr := runRootArgs(append([]string{"vm", "set", "--roster", rp, "qa-pve-01", "100"}, args...)...)
-		if code != 1 || stdout != "" || strings.Count(stderr, "\n") != 1 {
-			t.Errorf("%v: exit %d, stdout %q, stderr %q; want exit 1 and one error line", args, code, stdout, stderr)
+		if code != 4 || stdout != "" || strings.Count(stderr, "\n") != 1 {
+			t.Errorf("%v: exit %d, stdout %q, stderr %q; want exit 4 (refused before any request) and one error line", args, code, stdout, stderr)
 		}
 	}
 	if _, _, n := f.state(); n != 0 {

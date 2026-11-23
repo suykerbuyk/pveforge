@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"regexp"
 	"sort"
 	"strings"
@@ -359,14 +360,14 @@ func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, ow
 		}
 		i := indexFunc(len(roles), func(i int) bool { return roles[i].RoleID == g.Role })
 		if i < 0 {
-			return false, fmt.Errorf("preflight: %w: %q", ErrUnknownRole, g.Role)
+			return false, dispatch.Refuse(ctx, fmt.Errorf("preflight: %w: %q", ErrUnknownRole, g.Role))
 		}
 		privs, err := parseRolePrivs(roles[i].Privs)
 		if err != nil {
 			return false, fmt.Errorf("preflight: role %s: %w", g.Role, err)
 		}
 		if len(privs) == 0 {
-			return false, fmt.Errorf("preflight: %w: %s", ErrRoleHasNoPrivileges, g.Role)
+			return false, dispatch.Refuse(ctx, fmt.Errorf("preflight: %w: %s", ErrRoleHasNoPrivileges, g.Role))
 		}
 		rolePrivs[g.Role] = privs
 	}
@@ -375,8 +376,8 @@ func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, ow
 			continue
 		}
 		if missing, extra := setDiff(g.Privs, rolePrivs[g.Role]); len(missing) > 0 || len(extra) > 0 {
-			return false, fmt.Errorf("preflight: %w: %s at %s: pinned but not in the role [%s], in the role but not pinned [%s]; no token was touched",
-				ErrPinnedPrivsMismatch, g.Role, g.Path, strings.Join(missing, ","), strings.Join(extra, ","))
+			return false, dispatch.Refuse(ctx, fmt.Errorf("preflight: %w: %s at %s: pinned but not in the role [%s], in the role but not pinned [%s]; no token was touched",
+				ErrPinnedPrivsMismatch, g.Role, g.Path, strings.Join(missing, ","), strings.Join(extra, ",")))
 		}
 	}
 	var nodes []struct {
@@ -386,7 +387,7 @@ func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, ow
 		return false, fmt.Errorf("preflight: %w", err)
 	}
 	if indexFunc(len(nodes), func(i int) bool { return nodes[i].Node == opts.Node }) < 0 {
-		return false, fmt.Errorf("preflight: %w: %q", ErrUnknownNode, opts.Node)
+		return false, dispatch.Refuse(ctx, fmt.Errorf("preflight: %w: %q", ErrUnknownNode, opts.Node))
 	}
 	if err := checkOwner(ctx, owner, opts.TokenOwner, want, rolePrivs); err != nil {
 		return false, fmt.Errorf("preflight: %w", err)
@@ -396,7 +397,7 @@ func preflight(ctx context.Context, s SSHSession, opts Options, want []Grant, ow
 		return false, fmt.Errorf("preflight: %w", err)
 	}
 	if err := dryRunTokenWrite(opts.RosterPath, opts.TargetID); err != nil {
-		return false, fmt.Errorf("preflight: %w", err)
+		return false, dispatch.Refuse(ctx, fmt.Errorf("preflight: %w", err))
 	}
 	return present, nil
 }
@@ -483,7 +484,7 @@ func checkOwner(ctx context.Context, rd ownerReader, owner string, want []Grant,
 		return fmt.Errorf("check token owner %s: %w", owner, err)
 	}
 	if !active {
-		return fmt.Errorf("%w: %s; no token was touched", ErrOwnerDisabled, owner)
+		return dispatch.Refuse(ctx, fmt.Errorf("%w: %s; no token was touched", ErrOwnerDisabled, owner))
 	}
 	read := map[string]map[string]bool{}
 	for _, g := range want {
@@ -500,8 +501,8 @@ func checkOwner(ctx context.Context, rd ownerReader, owner string, want []Grant,
 		}
 		missing, flagOnly := ownerCovers(perms, g, privs)
 		if len(missing) > 0 || len(flagOnly) > 0 {
-			return fmt.Errorf("%w: %s at %s lacks [%s] and holds without propagate [%s]; no token was touched",
-				ErrOwnerLacksPrivileges, owner, g.Path, strings.Join(missing, ","), strings.Join(flagOnly, ","))
+			return dispatch.Refuse(ctx, fmt.Errorf("%w: %s at %s lacks [%s] and holds without propagate [%s]; no token was touched",
+				ErrOwnerLacksPrivileges, owner, g.Path, strings.Join(missing, ","), strings.Join(flagOnly, ",")))
 		}
 	}
 	return nil
@@ -884,6 +885,7 @@ func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) 
 		r.res.Validation = ValidationVerified
 	}
 
+	dispatch.Open(r.ctx) // a roster write
 	if err := roster.WriteTokenAuth(r.opts.RosterPath, r.opts.TargetID, roster.TokenWrite{
 		TokenID:         r.fullID,
 		SecretPlaintext: []byte(secret),
@@ -894,7 +896,7 @@ func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) 
 	r.res.TokenOutcome = successOutcome
 	r.res.Grants = copyGrants(r.want)
 	r.res.OrphanedToken = orphan
-	if err := persistTargetMetaFn(r.opts); err != nil {
+	if err := persistTargetMetaFn(r.ctx, r.opts); err != nil {
 		return r.res, fmt.Errorf("bootstrap %s: %w", r.opts.TargetID, err)
 	}
 	if nonVerdict != nil {
@@ -908,11 +910,15 @@ func (r *runner) mintAndPersist(successOutcome, orphan string) (*Result, error) 
 func (r *runner) tokenPhase(present bool) (*Result, error) {
 	held, err := loadHeldToken(r.opts)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", r.opts.TargetID, err)
+		return nil, dispatch.Refuse(r.ctx, fmt.Errorf("bootstrap %s: %w", r.opts.TargetID, err))
 	}
+	// Each refusal below is raised through dispatch.Refuse at the point it is
+	// found: the SAME sentinel is exit 4 in a run whose gate is still closed
+	// (a stored key and an equal stored pin: nothing was written yet) and
+	// exit 1 once a key install, a pin write or a token command came first.
 	notHeld := func() error {
-		return fmt.Errorf("bootstrap %s: %w: %s; to replace it deliberately, remove it first: pveum user token remove %s %s (this revokes it for every holder)",
-			r.opts.TargetID, ErrTokenNotHeld, r.fullID, sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
+		return dispatch.Refuse(r.ctx, fmt.Errorf("bootstrap %s: %w: %s; to replace it deliberately, remove it first: pveum user token remove %s %s (this revokes it for every holder)",
+			r.opts.TargetID, ErrTokenNotHeld, r.fullID, sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID)))
 	}
 
 	switch {
@@ -940,8 +946,8 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 		// never removed on it. One already gone from PVE is known dead, and
 		// is replaced below with nothing revoked.
 		if present {
-			return nil, fmt.Errorf("bootstrap %s: %w: %s; the token was left untouched on PVE and in the roster. If it really is lost, remove it deliberately: pveum user token remove %s %s (this revokes it for every holder)",
-				r.opts.TargetID, ErrTokenUndecryptable, r.fullID, sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
+			return nil, dispatch.Refuse(r.ctx, fmt.Errorf("bootstrap %s: %w: %s; the token was left untouched on PVE and in the roster. If it really is lost, remove it deliberately: pveum user token remove %s %s (this revokes it for every holder)",
+				r.opts.TargetID, ErrTokenUndecryptable, r.fullID, sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID)))
 		}
 		reason = "persisted token undecryptable"
 		reasonErr = held.DecryptErr
@@ -954,7 +960,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 			r.res.TokenOutcome = OutcomeReused
 			r.res.Grants = copyGrants(r.want)
 			r.res.Validation = ValidationVerified
-			if err := persistTargetMetaFn(r.opts); err != nil {
+			if err := persistTargetMetaFn(r.ctx, r.opts); err != nil {
 				return r.res, fmt.Errorf("bootstrap %s: %w", r.opts.TargetID, err)
 			}
 			return r.res, nil
@@ -978,6 +984,7 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 	// Known dead now: removed by this run, or absent on PVE. Clear the
 	// roster's copy BEFORE the add, so any later failure or crash leaves
 	// "no token", never a pointer to a dead one.
+	dispatch.Open(r.ctx) // a roster write
 	if err := roster.ClearTokenAuth(r.opts.RosterPath, r.opts.TargetID); err != nil {
 		if r.removed {
 			r.res.RosterToken = RosterTokenStaleRevoked
@@ -994,14 +1001,14 @@ func (r *runner) tokenPhase(present bool) (*Result, error) {
 // before any mint (ErrTokenSecretRejected): it names the causes to check,
 // the import that repairs a stale copy, and the remove as the last resort.
 func (r *runner) secretRejected(cause error) error {
-	return fmt.Errorf("bootstrap %s: %w: %s (%w); the token was left untouched on PVE and in the roster. "+
+	return dispatch.Refuse(r.ctx, fmt.Errorf("bootstrap %s: %w: %s (%w); the token was left untouched on PVE and in the roster. "+
 		"Check which cause applies: this roster is an older copy than the one in use, or another holder rotated the token; "+
 		"the owner is disabled or expired, or the token itself expired; a 403 refused a role read; a proxy answered 403. "+
 		"For a stale copy, put the current secret in this roster: pipe it into pveforge roster import-token %s --token-id %s --replace, with this run's --grant flags. "+
 		"Only as a last resort, once the cause is known: pveum user token remove %s %s (this revokes it for every holder), then run bootstrap again",
 		r.opts.TargetID, ErrTokenSecretRejected, r.fullID, cause,
 		sshexec.ShellQuote(r.opts.TargetID), sshexec.ShellQuote(r.fullID),
-		sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID))
+		sshexec.ShellQuote(r.opts.TokenOwner), sshexec.ShellQuote(r.opts.TokenID)))
 }
 
 // priorUnknown ends the run when whether the roster-held token was revoked
@@ -1010,6 +1017,7 @@ func (r *runner) priorUnknown(cause error) (*Result, error) {
 	r.removed = true
 	r.res.PriorRevoked = true
 	r.res.PriorToken = PriorTokenUnknown
+	dispatch.Open(r.ctx) // a roster write
 	if cerr := roster.ClearTokenAuth(r.opts.RosterPath, r.opts.TargetID); cerr != nil {
 		r.res.RosterToken = RosterTokenStaleRevoked
 	} else {
@@ -1038,14 +1046,16 @@ func (r *runner) removeHeld() (res *Result, err error, stop bool) {
 		return nil, nil, false
 	case tokenPresentState:
 		if !writeOutcomeUnknown(runErr) {
-			return nil, fmt.Errorf("bootstrap %s: pveum user token remove failed (%v) and the token still exists; pveforge did not revoke it", r.opts.TargetID, runErr), true
+			return nil, fmt.Errorf("bootstrap %s: pveum user token remove failed (%w) and the token still exists; pveforge did not revoke it", r.opts.TargetID, runErr), true
 		}
 		// After a TIMED-OUT remove, present is not the last word: the
 		// killed pveum may still land the remove after the re-read.
-		res, err := r.priorUnknown(fmt.Errorf("pveum user token remove timed out (%v); the token was still listed after it, but the remove may yet take effect, so whether it was revoked is unknown", runErr))
+		// %w, not %v: runErr carries the SSH funnel's dispatch.Unobserved, and
+		// this error IS an unobserved revoke (exit 3).
+		res, err := r.priorUnknown(fmt.Errorf("pveum user token remove timed out (%w); the token was still listed after it, but the remove may yet take effect, so whether it was revoked is unknown", runErr))
 		return res, err, true
 	default:
-		res, err := r.priorUnknown(fmt.Errorf("pveum user token remove failed (%v) and the follow-up read could not establish whether the token still exists", runErr))
+		res, err := r.priorUnknown(fmt.Errorf("pveum user token remove failed (%w) and the follow-up read could not establish whether the token still exists", runErr))
 		return res, err, true
 	}
 }

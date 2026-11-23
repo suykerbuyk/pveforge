@@ -72,6 +72,7 @@ type VMCreate struct {
 var (
 	_ ReReader    = (*VMCreate)(nil)
 	_ PostApplier = (*VMCreate)(nil)
+	_ Preflighter = (*VMCreate)(nil)
 )
 
 // CreatedNotFoundError is VMCreate.PostApply's error: the create task
@@ -182,6 +183,11 @@ func (op *VMCreate) Read(ctx context.Context) (string, error) {
 func (op *VMCreate) Satisfied(current string) bool {
 	return current != ""
 }
+
+// Preflight is Validate, run by Run after Read and before the write gate
+// opens, so a malformed Params is a refusal that changed nothing (exit 4)
+// and not an error out of Apply, where the gate is already open.
+func (op *VMCreate) Preflight(context.Context) error { return op.Validate() }
 
 // Apply validates op (see Validate) before touching anything else, then
 // creates the VM and waits for PVE's create task to finish.

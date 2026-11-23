@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"net/http"
 	"net/url"
 	"sort"
@@ -67,6 +68,9 @@ type NetworkFieldsEnsure struct {
 	// RunE can report exactly what this Op wrote, same reasoning as
 	// VMFieldsEnsure.Applied's own doc comment.
 	Applied []string
+
+	// pf is what Preflight's run of prestage left for Apply (nil: none).
+	pf *fieldsPrestage
 }
 
 // networkFieldsState is Read's comparable-state JSON shape: Current holds
@@ -123,7 +127,9 @@ func (op *NetworkFieldsEnsure) Read(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("network fields ensure: %s: read: %w", op.Iface, err)
 	}
 	if !exists {
-		return "", fmt.Errorf("network fields ensure: %s: interface does not exist", op.Iface)
+		// An authoritative "not in the interface list" before any stage: a
+		// refusal while the gate is closed (exit 4); plain after a write.
+		return "", dispatch.Refuse(ctx, fmt.Errorf("network fields ensure: %s: interface does not exist", op.Iface))
 	}
 
 	current := make(map[string]string, len(op.Pairs))
@@ -192,22 +198,12 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 	}
 	op.Applied = nil
 
-	// --- Step 1: pre-stage snapshot of every OTHER interface ------------
-	before, err := fetchAllInterfaces(ctx, op.Client, op.Node)
+	// --- Step 1: pre-stage snapshot of every OTHER interface, and the
+	// interface's current type. Run's Preflight normally ran it already
+	// (same requests, same order, once); a direct caller runs it here.
+	before, beforeHashes, ifaceType, err := op.takePrestage(ctx)
 	if err != nil {
-		return fmt.Errorf("network fields ensure: %s: pre-stage snapshot of other interfaces: %w", op.Iface, err)
-	}
-	beforeHashes, err := otherInterfaceHashes(before, op.Iface)
-	if err != nil {
-		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
-	}
-	// The stage must carry the interface's current type (see stage), read
-	// here from this same pre-stage snapshot rather than from Read, so it is
-	// the freshest value under the lock and Apply never depends on a Read it
-	// did not do. Nothing is staged yet, so a failure needs no revert.
-	ifaceType, err := currentInterfaceType(before, op.Iface)
-	if err != nil {
-		return fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
+		return err
 	}
 
 	// --- Step 2: stage ---------------------------------------------------
@@ -271,6 +267,69 @@ func (op *NetworkFieldsEnsure) Apply(ctx context.Context) error {
 		op.Applied[i] = p.Field
 	}
 	return nil
+}
+
+// fieldsPrestage is Apply's step 1 and what Preflight leaves for it.
+type fieldsPrestage struct {
+	before       map[string]map[string]json.RawMessage
+	beforeHashes map[string]string
+	ifaceType    string
+	err          error // a failed READ, reported by Apply (exit 1)
+}
+
+// prestage is Apply's step 1: the pre-stage snapshot of every OTHER
+// interface and the interface's current type, read from that same snapshot
+// (the freshest value under the lock). The stage must carry that type (see
+// stage). Nothing is staged yet, so a failure needs no revert. refusal is
+// the one REFUSAL (the interface's type is unknown: "refusing to stage"); err
+// is a failed read.
+func (op *NetworkFieldsEnsure) prestage(ctx context.Context) (p *fieldsPrestage, refusal error) {
+	before, err := fetchAllInterfaces(ctx, op.Client, op.Node)
+	if err != nil {
+		return &fieldsPrestage{err: fmt.Errorf("network fields ensure: %s: pre-stage snapshot of other interfaces: %w", op.Iface, err)}, nil
+	}
+	beforeHashes, err := otherInterfaceHashes(before, op.Iface)
+	if err != nil {
+		return &fieldsPrestage{err: fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)}, nil
+	}
+	ifaceType, err := currentInterfaceType(before, op.Iface)
+	if err != nil {
+		return nil, fmt.Errorf("network fields ensure: %s: %w", op.Iface, err)
+	}
+	return &fieldsPrestage{before: before, beforeHashes: beforeHashes, ifaceType: ifaceType}, nil
+}
+
+// Preflight is idempotent.Preflighter: it runs prestage between Read and
+// Apply so the refusals that precede the stage are stated as "refused before
+// any write" (exit 4): an invalid op, and an interface whose current type
+// cannot be read from the node's interface list. A failed READ is kept for
+// Apply (exit 1). The guard after the stage (changedOtherInterfaces) and
+// everything later stay in Apply, exit 1.
+func (op *NetworkFieldsEnsure) Preflight(ctx context.Context) error {
+	op.pf = nil
+	if err := op.Validate(); err != nil {
+		return err
+	}
+	p, refusal := op.prestage(ctx)
+	if refusal != nil {
+		return refusal
+	}
+	op.pf = p
+	return nil
+}
+
+// takePrestage returns Preflight's result (consuming it) or, for a direct
+// caller of Apply, runs prestage itself with its refusal as a plain error.
+func (op *NetworkFieldsEnsure) takePrestage(ctx context.Context) (map[string]map[string]json.RawMessage, map[string]string, string, error) {
+	p := op.pf
+	op.pf = nil
+	if p == nil {
+		var refusal error
+		if p, refusal = op.prestage(ctx); refusal != nil {
+			return nil, nil, "", refusal
+		}
+	}
+	return p.before, p.beforeHashes, p.ifaceType, p.err
 }
 
 // stage is Apply's step 2: PUT /nodes/{node}/network/{iface} with Pairs'

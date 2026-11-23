@@ -36,6 +36,7 @@ func runProbeCtx(ctx context.Context, args ...string) (code int, stdout, stderr 
 // `pveforge harness probe` and its outcome asserted on STDOUT and the rule
 // file (never an exit integer).
 type pfake struct {
+	reqLog
 	mu sync.Mutex
 
 	storage string
@@ -50,6 +51,7 @@ type pfake struct {
 	nextid        string
 	contentPre    string // content before create (non-empty → leftover refusal)
 	poolMemberRaw string // a raw pre-create pool member object (e.g. a string vmid) — CR3
+	memberNode    string // if set, the pool lists the created 690 on THIS node (the guard after create then refuses)
 
 	// behaviour knobs.
 	rollbackAny           bool   // the STORAGE allows a non-latest rollback (rollback task OK)
@@ -91,6 +93,9 @@ func pUPID(typ string, id int) string {
 func (f *pfake) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.see(w, r) {
+		return
+	}
 	if f.snaps == nil {
 		f.snaps = map[string]int64{}
 	}
@@ -244,7 +249,11 @@ func (f *pfake) poolJSON() string {
 		present = true
 	}
 	if present {
-		ms = append(ms, `{"type":"qemu","vmid":690,"node":"`+pnode+`"}`)
+		node := pnode
+		if f.memberNode != "" {
+			node = f.memberNode
+		}
+		ms = append(ms, `{"type":"qemu","vmid":690,"node":"`+node+`"}`)
 	}
 	return `[{"poolid":"pveforge-harness","members":[` + strings.Join(ms, ",") + `]}]`
 }

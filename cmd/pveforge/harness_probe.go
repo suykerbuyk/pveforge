@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness/probe"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 )
@@ -27,8 +28,9 @@ var (
 // hack/harness/probe.sh. It consumes U-CORE's guard / gone-proof / snapshot
 // ops and the exported not-latest classifier; the destructive tier is
 // confined to this verb (it creates and destroys VM 690). The outcome is on
-// STDOUT (`rollback-rule=<rule> storage=<id>`, or a refusal/failure line);
-// every error exits 1.
+// STDOUT (`rollback-rule=<rule> storage=<id>`, or a refusal/failure line). A
+// refusal before the create exits 4; a failure after it exits 1; a wait that
+// started and did not observe exits 3.
 func newHarnessProbeCmd() *cobra.Command {
 	var (
 		storage    string
@@ -79,7 +81,7 @@ does not read it).`,
 		// per the lock-wait guard, and the driver takes no lock of its own.
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], probe.VMID))
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err)) // lock files are bookkeeping: exit 4 while the gate is closed
 		}
 		defer func() { _ = unlock() }()
 

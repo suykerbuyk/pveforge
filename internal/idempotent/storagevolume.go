@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -261,7 +262,7 @@ func (op *VolumeFreeOrphans) Read(ctx context.Context) (string, error) {
 	clusterSel := op.ClusterPairs != nil
 	nodeSel := op.CompleteVMIDs != nil
 	if clusterSel == nodeSel {
-		return "", fmt.Errorf("storage free-orphans: vmid %d on %q/%q: %w: exactly one of ClusterPairs (shared, cluster-wide) or CompleteVMIDs (node-scoped) must be set, not both and not neither", op.VMID, node, op.Storage, pve.ErrUnverifiableRead)
+		return "", dispatch.Refuse(ctx, fmt.Errorf("storage free-orphans: vmid %d on %q/%q: %w: exactly one of ClusterPairs (shared, cluster-wide) or CompleteVMIDs (node-scoped) must be set, not both and not neither", op.VMID, node, op.Storage, pve.ErrUnverifiableRead))
 	}
 	// (b) A node-scoped CompleteVMIDs free must refuse a SHARED storage in the
 	// Op itself: a node-scoped claimed set cannot see a disk a VM on another
@@ -273,7 +274,7 @@ func (op *VolumeFreeOrphans) Read(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("storage free-orphans: vmid %d on %q/%q: read storage for the shared-selector guard: %w", op.VMID, node, op.Storage, gerr)
 		}
 		if stg.Shared != 0 {
-			return "", fmt.Errorf("storage free-orphans: vmid %d on %q/%q: %w: storage is shared but the free was built with a node-scoped CompleteVMIDs; a cluster-wide ClusterPairs is required to free shared storage safely", op.VMID, node, op.Storage, pve.ErrUnverifiableRead)
+			return "", dispatch.Refuse(ctx, fmt.Errorf("storage free-orphans: vmid %d on %q/%q: %w: storage is shared but the free was built with a node-scoped CompleteVMIDs; a cluster-wide ClusterPairs is required to free shared storage safely", op.VMID, node, op.Storage, pve.ErrUnverifiableRead))
 		}
 	}
 

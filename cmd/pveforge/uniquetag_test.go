@@ -241,7 +241,7 @@ func TestUniqueTag_T1_AlreadyCarried(t *testing.T) {
 	f := newTagCluster(map[int]string{150: "web;x"})
 	rp := f.start(t)
 	code, stdout, stderr := createTagged(rp, 101, "x;web", "--unique-tag", "x")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
+	if code != 4 || stdout != "" || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
 		t.Fatalf("exit %d, stdout %q, stderr %q, POSTs %d", code, stdout, stderr, f.posts)
 	}
 }
@@ -251,7 +251,7 @@ func TestUniqueTag_T2_Ambiguous(t *testing.T) {
 	f := newTagCluster(map[int]string{150: "x", 151: "x"})
 	rp := f.start(t)
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-	if code != 1 || !strings.Contains(stderr, "more than one guest") || f.posts != 0 {
+	if code != 4 || !strings.Contains(stderr, "more than one guest") || f.posts != 0 {
 		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
 	}
 }
@@ -269,13 +269,13 @@ func TestUniqueTag_T3_T4_T5_AFailedListingRefuses(t *testing.T) {
 				f.resources = mode
 			}
 			rp := f.start(t)
-			want := "cannot verify tag uniqueness"
+			want, wantCode := "cannot verify tag uniqueness", 4 // a fail-closed refusal, before the create POST
 			if mode == "ssh-down" {
-				want = "connect as root" // refused before the tag lock is even taken (S1)
+				want, wantCode = "connect as root", 1 // refused before the tag lock is even taken (S1); an environment failure, not a documented refusal
 			}
 			code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-			if code != 1 || !strings.Contains(stderr, want) || f.posts != 0 {
-				t.Fatalf("exit %d, stderr %q, POSTs %d; want %q", code, stderr, f.posts, want)
+			if code != wantCode || !strings.Contains(stderr, want) || f.posts != 0 {
+				t.Fatalf("exit %d, stderr %q, POSTs %d; want exit %d and %q", code, stderr, f.posts, wantCode, want)
 			}
 		})
 	}
@@ -337,7 +337,7 @@ func TestUniqueTag_T8_ConcurrentCreatesMakeOne(t *testing.T) {
 		}(id)
 	}
 	a, b := <-res, <-res
-	if f.posts != 1 || a.code+b.code != 1 {
+	if f.posts != 1 || a.code+b.code != 4 {
 		t.Fatalf("POSTs %d, exits %d and %d (%q, %q); want exactly one create", f.posts, a.code, b.code, a.stderr, b.stderr)
 	}
 }
@@ -352,7 +352,7 @@ func TestUniqueTag_T9_VisibilityLag(t *testing.T) {
 	if code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x"); code != 0 || stderr != "" {
 		t.Fatalf("first create: exit %d, stderr %q", code, stderr)
 	}
-	if code, _, stderr := createTagged(rp, 102, "x", "--unique-tag", "x"); code != 1 || !strings.Contains(stderr, "already carried by vm 101") || f.posts != 1 {
+	if code, _, stderr := createTagged(rp, 102, "x", "--unique-tag", "x"); code != 4 || !strings.Contains(stderr, "already carried by vm 101") || f.posts != 1 {
 		t.Fatalf("second create: exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
 	}
 
@@ -415,7 +415,7 @@ func TestUniqueTag_T9_ConcurrentCreateDuringTheLagWaits(t *testing.T) {
 	f.mu.Lock()
 	posts := f.posts
 	f.mu.Unlock()
-	if posts != 1 || o.code != 1 || !strings.Contains(o.stderr, "already carried by vm 101") {
+	if posts != 1 || o.code != 4 || !strings.Contains(o.stderr, "already carried by vm 101") {
 		t.Fatalf("POSTs %d, second create exit %d, stderr %q; want one create and the second refused", posts, o.code, o.stderr)
 	}
 }
@@ -487,7 +487,7 @@ func TestUniqueTag_T14_CaseInsensitive(t *testing.T) {
 		f := newTagCluster(map[int]string{150: "web;Foo"})
 		rp := f.start(t)
 		code, _, stderr := createTagged(rp, 101, unique, "--unique-tag", unique)
-		if code != 1 || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
+		if code != 4 || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
 			t.Errorf("--unique-tag %s beside a VM tagged Foo: exit %d, stderr %q, POSTs %d", unique, code, stderr, f.posts)
 		}
 	}
@@ -530,7 +530,7 @@ func TestUniqueTag_T14_CaseVariantsShareTheLock(t *testing.T) {
 	f.mu.Lock()
 	posts := f.posts
 	f.mu.Unlock()
-	if posts != 1 || a+b != 1 {
+	if posts != 1 || a+b != 4 {
 		t.Fatalf("POSTs %d, exits %d and %d; want exactly one create", posts, a, b)
 	}
 }
@@ -692,7 +692,7 @@ func TestUniqueTag_D1_AHungRootReadIsBounded(t *testing.T) {
 	tagReadTimeout = 200 * time.Millisecond
 	within(t, 5*time.Second, func() {
 		code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-		if code != 1 || !strings.Contains(stderr, "cannot verify tag uniqueness") || f.posts != 0 {
+		if code != 4 || !strings.Contains(stderr, "cannot verify tag uniqueness") || f.posts != 0 {
 			t.Errorf("hung check: exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
 		}
 	})
@@ -767,7 +767,7 @@ func TestUniqueTag_T12_LockWaitBoundsTheTagLock(t *testing.T) {
 	}
 	defer func() { _ = unlock() }()
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x", "--lock-wait", "20ms")
-	if code != 1 || !strings.Contains(stderr, "acquire the lock for tag x") || f.sent() != 0 {
+	if code != 4 || !strings.Contains(stderr, "acquire the lock for tag x") || f.sent() != 0 {
 		t.Fatalf("exit %d, %d request(s), stderr %q", code, f.sent(), stderr)
 	}
 }
@@ -779,7 +779,7 @@ func TestUniqueTag_C1_AContainerCarriesTheTag(t *testing.T) {
 		f := newTagCluster(nil).addCT(200, tags)
 		rp := f.start(t)
 		code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-		if code != 1 || !strings.Contains(stderr, "already carried by ct 200") || f.posts != 0 {
+		if code != 4 || !strings.Contains(stderr, "already carried by ct 200") || f.posts != 0 {
 			t.Errorf("a container tagged %q: exit %d, stderr %q, POSTs %d", tags, code, stderr, f.posts)
 		}
 	}
@@ -790,7 +790,7 @@ func TestUniqueTag_C2_AContainerAndAVM(t *testing.T) {
 	f := newTagCluster(map[int]string{150: "x"}).addCT(200, "x")
 	rp := f.start(t)
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-	if code != 1 || !strings.Contains(stderr, "more than one guest") || f.posts != 0 {
+	if code != 4 || !strings.Contains(stderr, "more than one guest") || f.posts != 0 {
 		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
 	}
 }
@@ -803,7 +803,7 @@ func TestUniqueTag_H1_AGuestHiddenFromTheTokenIsSeen(t *testing.T) {
 	f := newTagCluster(map[int]string{150: "x"})
 	rp := f.start(t)
 	code, _, stderr := createTagged(rp, 101, "x", "--unique-tag", "x")
-	if code != 1 || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
+	if code != 4 || !strings.Contains(stderr, "already carried by vm 150") || f.posts != 0 {
 		t.Fatalf("exit %d, stderr %q, POSTs %d", code, stderr, f.posts)
 	}
 	if n := f.count("GET /api2/json/cluster/resources") + f.count("GET /api2/json/access/"); n != 0 {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness/build"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
@@ -134,7 +135,7 @@ with --keep-on-failure). Site values come from ~/.config/pveforge/harness-build.
 			unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], vmid))
 			if err != nil {
 				release()
-				return fmt.Errorf("acquire lock: %w", err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err)) // lock files are bookkeeping: exit 4 while the gate is closed
 			}
 			unlocks = append(unlocks, unlock)
 		}

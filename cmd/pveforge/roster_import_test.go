@@ -155,7 +155,7 @@ func TestRosterImportToken_I2_RefusesATerminalAndBadSecrets(t *testing.T) {
 		importStdinIsTerminal = func() bool { return true }
 		before := c.rosterBytes(t)
 		code, _, stderr := c.run(importSecret, importArgs...)
-		if code != 1 || !strings.Contains(stderr, "is a terminal") {
+		if code != 4 || !strings.Contains(stderr, "is a terminal") {
 			t.Fatalf("exit %d, stderr %q", code, stderr)
 		}
 		if c.stdinReads != 0 || len(c.v.cfgs) != 0 || !bytes.Equal(before, c.rosterBytes(t)) {
@@ -174,7 +174,7 @@ func TestRosterImportToken_I2_RefusesATerminalAndBadSecrets(t *testing.T) {
 			c := newImportCase(t)
 			before := c.rosterBytes(t)
 			code, _, stderr := c.run(input, importArgs...)
-			if code != 1 || !strings.Contains(stderr, "invalid token secret") {
+			if code != 4 || !strings.Contains(stderr, "invalid token secret") {
 				t.Fatalf("exit %d, stderr %q", code, stderr)
 			}
 			if len(c.v.cfgs) != 0 || !bytes.Equal(before, c.rosterBytes(t)) {
@@ -191,7 +191,7 @@ func TestRosterImportToken_I2_RefusesATerminalAndBadSecrets(t *testing.T) {
 func TestRosterImportToken_I3_RequiresAGrantBeforeReadingTheSecret(t *testing.T) {
 	c := newImportCase(t)
 	code, _, stderr := c.run(importSecret, "--token-id", "ops@pve!ci", "--host", "h.example", "--node", "n1")
-	if code != 1 || !strings.Contains(stderr, "--grant") {
+	if code != 4 || !strings.Contains(stderr, "--grant") {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	if c.stdinReads != 0 || len(c.v.cfgs) != 0 {
@@ -211,8 +211,15 @@ func TestRosterImportToken_I4_FailureWritesNothingAndRemovesNothing(t *testing.T
 			c := newImportCase(t, errs...)
 			before := c.rosterBytes(t)
 			code, stdout, stderr := c.run(importSecret+"\n", importArgs...)
-			if code != 1 {
-				t.Fatalf("exit %d, stderr %q", code, stderr)
+			// A verdict (the token does not hold exactly the grants) is raised
+			// before the first roster write: exit 4. A non-verdict (the
+			// validation read itself failed) is not a refusal: exit 1.
+			wantCode := 4
+			if strings.HasPrefix(name, "non-verdict") {
+				wantCode = 1
+			}
+			if code != wantCode {
+				t.Fatalf("exit %d, want %d, stderr %q", code, wantCode, stderr)
 			}
 			if !strings.Contains(stdout, "token_outcome=not_imported\n") {
 				t.Errorf("stdout %q, want token_outcome=not_imported", stdout)
@@ -252,8 +259,12 @@ func TestRosterImportToken_I5_TheSecretNeverLeaks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := newImportCase(t, echo)
 			code, stdout, stderr := c.run(importSecret+"\n", importArgs...)
-			if code != 1 {
-				t.Fatalf("exit %d", code)
+			wantCode := 4 // a verdict, raised before the first roster write
+			if name == "echoing non-verdict" {
+				wantCode = 1
+			}
+			if code != wantCode {
+				t.Fatalf("exit %d, want %d", code, wantCode)
 			}
 			if strings.Contains(stdout, importSecret) || strings.Contains(stderr, importSecret) {
 				t.Errorf("the secret reached the output: stdout %q stderr %q", stdout, stderr)
@@ -276,7 +287,7 @@ func TestRosterImportToken_I5_TheSecretNeverLeaks(t *testing.T) {
 		t.Setenv("PVEFORGE_TOKEN_SECRET", importSecret)
 		t.Setenv("PVEFORGE_IMPORT_SECRET", importSecret)
 		code, _, stderr := c.run("", importArgs...)
-		if code != 1 || !strings.Contains(stderr, "invalid token secret") || len(c.v.cfgs) != 0 {
+		if code != 4 || !strings.Contains(stderr, "invalid token secret") || len(c.v.cfgs) != 0 {
 			t.Fatalf("empty stdin with a secret in the environment: exit %d, stderr %q, validations %d; want the empty stdin refused", code, stderr, len(c.v.cfgs))
 		}
 	})
@@ -293,7 +304,7 @@ func TestRosterImportToken_I6_ReplaceOrphansNeverRevokes(t *testing.T) {
 	other := []string{"--token-id", "ops@pve!ci2", "--grant", "/vms/100:PVEVMUser"}
 
 	code, _, stderr := c.run("s3cr3t-other-0002\n", other...)
-	if code != 1 || !strings.Contains(stderr, "already holds a different token") || !bytes.Equal(before, c.rosterBytes(t)) {
+	if code != 4 || !strings.Contains(stderr, "already holds a different token") || !bytes.Equal(before, c.rosterBytes(t)) {
 		t.Fatalf("without --replace: exit %d, stderr %q, roster changed %v", code, stderr, !bytes.Equal(before, c.rosterBytes(t)))
 	}
 
@@ -335,7 +346,7 @@ func TestRosterImportToken_I8_HonoursTheBootstrapLock(t *testing.T) {
 	before := c.rosterBytes(t)
 	start := time.Now()
 	code, _, stderr := c.run(importSecret+"\n", append(importArgs, "--lock-wait", "150ms")...)
-	if code != 1 || !strings.Contains(stderr, "timed out waiting for the lock") || !strings.Contains(stderr, "qa-imp/bootstrap/token") {
+	if code != 4 || !strings.Contains(stderr, "timed out waiting for the lock") || !strings.Contains(stderr, "qa-imp/bootstrap/token") {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	if time.Since(start) > 2*time.Second || len(c.v.cfgs) != 0 || !bytes.Equal(before, c.rosterBytes(t)) {
@@ -348,7 +359,7 @@ func TestRosterImportToken_I9_LineUnsafeTargetRefusedFirst(t *testing.T) {
 	c := newImportCase(t)
 	importStdin = func() io.Reader { return countingReader{strings.NewReader(importSecret), &c.stdinReads} }
 	code, _, stderr := runRootArgs(append([]string{"roster", "import-token", "qa\nimp"}, importArgs...)...)
-	if code != 1 || !strings.Contains(stderr, `target id "qa\nimp"`) || c.stdinReads != 0 {
+	if code != 4 || !strings.Contains(stderr, `target id "qa\nimp"`) || c.stdinReads != 0 {
 		t.Fatalf("exit %d, stderr %q, stdin reads %d", code, stderr, c.stdinReads)
 	}
 }
@@ -366,7 +377,7 @@ func TestRosterImportToken_I10_PlainBootstrapOfAnImportedTargetIsRefused(t *test
 	// The imported token's own owner and name, so bootstrap's identity check
 	// (which runs first) passes and the keyless one is what answers.
 	code, _, stderr := runRootArgs("bootstrap", "qa-imp", "--token-owner", "ops@pve", "--token-id", "ci", "--grant", "/vms/100:PVEVMUser")
-	if code != 1 || !strings.Contains(stderr, "its token was imported") || !strings.Contains(stderr, "--no-ssh-key") {
+	if code != 4 || !strings.Contains(stderr, "its token was imported") || !strings.Contains(stderr, "--no-ssh-key") {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	if tr.calls != 0 {

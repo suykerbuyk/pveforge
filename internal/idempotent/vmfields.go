@@ -254,6 +254,12 @@ func (op *VMFieldsEnsure) Satisfied(current string) bool {
 	return true
 }
 
+// Preflight is Validate, run by Run after Read and before the write gate
+// opens: a malformed batch is a refusal that changed nothing (exit 4).
+func (op *VMFieldsEnsure) Preflight(context.Context) error { return op.Validate() }
+
+var _ Preflighter = (*VMFieldsEnsure)(nil)
+
 // Apply validates op (see Validate), then iterates Pairs in order (adding
 // each write to Applied, which accumulates across the Run's attempts: see
 // that field's own doc comment), skipping any field Read's

@@ -90,8 +90,15 @@ func TestLockWait_FlagBoundsTheWait(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), lockWaitBackstop)
 		code, stderr, elapsed := runRootWithin(ctx, args...)
 		cancel()
-		if code != 1 {
-			t.Errorf("%s: exit = %d, want 1; stderr %q", name, code, stderr)
+		// A lock-wait timeout is exit 4 on a mutating verb (the lock files are
+		// bookkeeping and the gate is closed: refused before any write); the
+		// safe read verb (vm get) stays 1.
+		wantCode := 4
+		if name == "vm get" {
+			wantCode = 1
+		}
+		if code != wantCode {
+			t.Errorf("%s: exit = %d, want %d; stderr %q", name, code, wantCode, stderr)
 		}
 		if strings.Count(stderr, "\n") != 1 {
 			t.Errorf("%s: stderr must be one line, got %q", name, stderr)
@@ -194,8 +201,8 @@ func TestBootstrap_LockWaitBoundsTargetLock(t *testing.T) {
 		<-done
 		t.Fatalf("bootstrap was still waiting on %s after %s: it honoured neither --lock-wait nor the command's context", key, 2*lockWaitBackstop)
 	}
-	if r.code != 1 || !strings.Contains(r.stderr, key.String()) || !strings.Contains(r.stderr, "timed out waiting for the lock after 150ms") {
-		t.Errorf("exit %d, stderr %q; want exit 1 and a lock-wait timeout naming %s", r.code, r.stderr, key)
+	if r.code != 4 || !strings.Contains(r.stderr, key.String()) || !strings.Contains(r.stderr, "timed out waiting for the lock after 150ms") {
+		t.Errorf("exit %d, stderr %q; want exit 4 (refused before any write) and a lock-wait timeout naming %s", r.code, r.stderr, key)
 	}
 	if tr.calls != 0 {
 		t.Errorf("transport calls = %d, want 0: the lock is taken before any SSH", tr.calls)

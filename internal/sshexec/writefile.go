@@ -85,7 +85,7 @@ func (c *Client) WriteFile(ctx context.Context, remotePath string, content []byt
 		ShellQuote(tmpPath), ShellQuote(remotePath),
 	)
 
-	res, err := c.Run(WithCommandTimeout(ctx, writeFileTimeout(len(cmd))), cmd)
+	res, err := c.Run(WithWrite(WithCommandTimeout(ctx, writeFileTimeout(len(cmd)))), cmd)
 	if err != nil {
 		return fmt.Errorf("write file %s: %w", remotePath, err)
 	}

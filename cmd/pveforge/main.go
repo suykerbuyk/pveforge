@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"io"
 	"os"
 	"strings"
@@ -84,6 +85,12 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// The run's write gate (internal/dispatch): closed until a write funnel
+	// opens it; exit 4 is only ever produced while it is closed.
+	// (A test may hand in a context that already carries a gate, to read it.)
+	if !dispatch.Has(ctx) {
+		ctx, _ = dispatch.With(ctx)
+	}
 	root.SetContext(pve.WithTaskWarnings(ctx, taskWarningsNotice(stderr)))
 	err := root.Execute()
 	if err == nil {
@@ -99,12 +106,12 @@ func runRoot(root *cobra.Command, stderr io.Writer) int {
 	// chain, so a refusal never claims "dispatched nothing" beside an
 	// unobserved dispatch.
 	var ou outcomeUnknownError
-	unknown := errors.As(err, &ou)
+	unknown := errors.As(err, &ou) || dispatch.IsUnobserved(err)
 	if unknown {
 		code = exitOutcomeUnknown
 	}
 	var rf refusedError
-	refused := !unknown && errors.As(err, &rf)
+	refused := !unknown && (errors.As(err, &rf) || dispatch.IsRefused(err))
 	if refused {
 		code = exitRefused
 	}

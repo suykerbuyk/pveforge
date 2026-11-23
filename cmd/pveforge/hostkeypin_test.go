@@ -46,7 +46,7 @@ func TestBootstrap_HostKeyFingerprintReachesThePasswordDials(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{"bootstrap", "qa-test", "--host", "h", "--node", "n", "--grant", "/:PVEVMAdmin::1", "--host-key-fingerprint", "SHA256:abc"})
 	var stderr bytes.Buffer
-	if code := runRoot(root, &stderr); code != 1 || tr.calls != 0 || !strings.Contains(stderr.String(), "as ssh-keygen -l -E sha256 prints it") {
+	if code := runRoot(root, &stderr); code != 4 || tr.calls != 0 || !strings.Contains(stderr.String(), "as ssh-keygen -l -E sha256 prints it") {
 		t.Errorf("malformed: exit %d, calls %d, stderr %q", code, tr.calls, stderr.String())
 	}
 }
@@ -115,10 +115,10 @@ func TestAccess_HostKeyFingerprint(t *testing.T) {
 	keyPath, kfs, _ := accessSetup(t, map[string]string{"GET /api2/json/access/groups": `{"data":[]}`}, nil)
 	before := kfs.Connections() // the roster's own pin was captured by a dial
 	code, _, stderr = runRootArgs("group", "ensure", "--roster", keyPath, "qa-pve-01", "ops", "--host-key-fingerprint", wrongFP)
-	if code != 1 || !strings.Contains(stderr, "--host-key-fingerprint "+wrongFP+" is not the host key target \"qa-pve-01\" is pinned to") || kfs.Connections() != before {
+	if code != 4 || !strings.Contains(stderr, "--host-key-fingerprint "+wrongFP+" is not the host key target \"qa-pve-01\" is pinned to") || kfs.Connections() != before {
 		t.Errorf("a key target, another pin: exit %d, connections %d, stderr %q", code, kfs.Connections(), stderr)
 	}
-	if code, _, stderr := runRootArgs("group", "ensure", "--roster", keyPath, "qa-pve-01", "ops", "--host-key-fingerprint", "SHA256:short"); code != 1 || !strings.Contains(stderr, "as ssh-keygen -l -E sha256 prints it") || kfs.Connections() != before {
+	if code, _, stderr := runRootArgs("group", "ensure", "--roster", keyPath, "qa-pve-01", "ops", "--host-key-fingerprint", "SHA256:short"); code != 4 || !strings.Contains(stderr, "as ssh-keygen -l -E sha256 prints it") || kfs.Connections() != before {
 		t.Errorf("malformed: exit %d, stderr %q", code, stderr)
 	}
 }
@@ -128,6 +128,18 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// refusalExit is the status of a refusal made before anything is dialed, by
+// verb: 4 for the access verbs that write (user ensure, group ensure, acl
+// grant), which refuse while the write gate is closed; 1 for the read-only
+// access verbs, which can never exit 4.
+func refusalExit(verb string) int {
+	switch verb {
+	case "user ensure", "group ensure", "acl grant":
+		return 4
+	}
+	return 1
 }
 
 // HK4 (the review's two-server shape): the roster pins fake A's host key,
@@ -178,7 +190,10 @@ func TestRootAccess_StoredPinBindsEveryDial(t *testing.T) {
 			}
 			// A flag naming B: refused before any connection.
 			code, _, stderr = runRootArgs(append(tc.args(path), "--no-ssh-key", "--host-key-fingerprint", b.HostKeyFingerprint())...)
-			if code != 1 || !strings.Contains(stderr, "is not the host key target \"qa-pve-01\" is pinned to") {
+			// A verb that writes refuses this before anything is sent: exit 4. A
+			// read-only verb (access inventory) never exits 4, and the other
+			// families' verbs keep their own status here.
+			if code != refusalExit(tc.name) || !strings.Contains(stderr, "is not the host key target \"qa-pve-01\" is pinned to") {
 				t.Fatalf("--no-ssh-key, a flag naming B: exit %d, stderr %q", code, stderr)
 			}
 			if b.PasswordAttempts() != 0 || len(b.Commands()) != 0 {
@@ -187,7 +202,7 @@ func TestRootAccess_StoredPinBindsEveryDial(t *testing.T) {
 			// The same flag without --no-ssh-key: refused before any connection.
 			before := b.Connections()
 			code, _, stderr = runRootArgs(append(tc.args(path), "--host-key-fingerprint", b.HostKeyFingerprint())...)
-			if code != 1 || !strings.Contains(stderr, "is not the host key target \"qa-pve-01\" is pinned to") || b.Connections() != before {
+			if code != refusalExit(tc.name) || !strings.Contains(stderr, "is not the host key target \"qa-pve-01\" is pinned to") || b.Connections() != before {
 				t.Errorf("a key target, a flag naming B: exit %d, stderr %q", code, stderr)
 			}
 		})

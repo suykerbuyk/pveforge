@@ -40,8 +40,12 @@ shapes, with no confirmed-plan comparison (nothing was confirmed). With no termi
 4) with nothing written; a run that would write nothing never asks. --dry-run
 prints the plan and stops: it never asks and runs no check. The check is
 node-level unless --vmid N names a VM. Exit status: 0 when written (or already
-enabled) and ready; 4 when not confirmed; 1 when the grant is in place but the
-check is not ready (the report's wrote and ready fields say which).
+enabled) and ready; 4 when refused before anything was written (not confirmed, no
+terminal, or any refusal listed below, a lock-wait timeout included); 3 when a
+pveum write was sent and ran out of time (its outcome is unknown); 1 when the
+grant is in place but the check is not ready, for a failed read (a role list
+that times out is exit 1), and for every error after the first write was sent
+(the report's wrote and ready fields say which).
 
 Make the target's roster token able to run "pveforge vm destroy": add Sys.Audit,
 which PVEVMAdmin lacks, as root over SSH with pveum. The token is NOT revoked or
@@ -98,14 +102,14 @@ write. --dry-run reads, judges and prints what it would send.`,
 			vmid := 0
 			if cmd.Flags().Changed("vmid") {
 				if vmid, err = parseDestroyVMID(vmidArg); err != nil {
-					return err
+					return refuseBeforeWrite(cmd, err)
 				}
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
 				return err
 			}
-			access, _, rest, closeAll, err := openRootAccessAndREST(cmd, args[0], noSSHKey, true)
+			access, _, rest, closeAll, err := openRootAccessAndRESTRefusing(cmd, args[0], noSSHKey, true, func(err error) error { return refuseBeforeWrite(cmd, err) })
 			if err != nil {
 				return err
 			}

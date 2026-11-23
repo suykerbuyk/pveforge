@@ -56,6 +56,14 @@ type UserEnsure struct {
 	// BeforeJoin, when set, is asked before any write that adds the user
 	// to groups, with exactly the groups that write adds. Joining a group
 	// grants its ACLs, so an error here refuses the write: nothing is sent.
+	//
+	// It is asked from Read, not from Apply: idempotent.Run opens the run's
+	// write gate immediately before Apply, so a refusal raised in Apply could
+	// never be exit 4, and a Preflight would mark every error it returns (a
+	// failed read included) as a refusal. In Read the gate is still closed, so
+	// the hook itself says which of its errors are refusals (dispatch.Refuse)
+	// and which are failed reads (plain, exit 1). Run's post-write re-read is
+	// ReRead, which does not ask.
 	BeforeJoin func(ctx context.Context, groups []string) error
 
 	found *pve.AccessUser // set by Read
@@ -68,6 +76,24 @@ type UserEnsure struct {
 // found and read are reset before the list is read, so a failed read never
 // leaves an earlier read's user behind for PostApply to judge.
 func (op *UserEnsure) Read(ctx context.Context) (string, error) {
+	cur, err := op.ReRead(ctx)
+	if err != nil {
+		return "", err
+	}
+	// A run that will write asks BeforeJoin now, before Run opens the write
+	// gate (see BeforeJoin).
+	if !op.Satisfied("") {
+		if err := op.beforeJoin(ctx, op.joinGroups()); err != nil {
+			return "", err
+		}
+	}
+	return cur, nil
+}
+
+// ReRead is the list read alone, with no BeforeJoin: Run's re-read after a
+// successful Apply (idempotent.ReReader) must not ask a question about a join
+// that already happened.
+func (op *UserEnsure) ReRead(ctx context.Context) (string, error) {
 	op.found, op.read = nil, false
 	users, err := op.Client.ListUsers(ctx)
 	if err != nil {
@@ -82,6 +108,17 @@ func (op *UserEnsure) Read(ctx context.Context) (string, error) {
 		}
 	}
 	return renderUser(op.found), nil
+}
+
+// joinGroups is the groups the write would add: every requested group for a
+// new user (sorted, deduplicated), the missing ones for an existing user.
+func (op *UserEnsure) joinGroups() []string {
+	if op.found == nil {
+		groups := slices.Clone(op.Groups)
+		slices.Sort(groups)
+		return slices.Compact(groups)
+	}
+	return op.missingGroups()
 }
 
 // renderUser is Read's comparable rendering: "absent", or every field
@@ -101,6 +138,7 @@ func renderUser(u *pve.AccessUser) string {
 // would show.
 var (
 	_ PostApplier = (*UserEnsure)(nil)
+	_ ReReader    = (*UserEnsure)(nil)
 	_ PostApplier = (*GroupEnsure)(nil)
 )
 
@@ -171,23 +209,13 @@ func (op *UserEnsure) Apply(ctx context.Context) error {
 		if op.Enable != nil {
 			enable = *op.Enable
 		}
-		groups := slices.Clone(op.Groups)
-		slices.Sort(groups)
-		groups = slices.Compact(groups)
-		if err := op.beforeJoin(ctx, groups); err != nil {
-			return err
-		}
-		return op.Client.AddUser(ctx, UserSpec{UserID: op.UserID, Enable: enable, Comment: op.Comment, Email: op.Email, Groups: groups})
+		return op.Client.AddUser(ctx, UserSpec{UserID: op.UserID, Enable: enable, Comment: op.Comment, Email: op.Email, Groups: op.joinGroups()})
 	}
 	enable := op.found.Enabled
 	if op.Enable != nil {
 		enable = *op.Enable
 	}
-	missing := op.missingGroups()
-	if err := op.beforeJoin(ctx, missing); err != nil {
-		return err
-	}
-	return op.Client.ModifyUser(ctx, UserSpec{UserID: op.UserID, Enable: enable, Comment: op.Comment, Email: op.Email, Groups: missing})
+	return op.Client.ModifyUser(ctx, UserSpec{UserID: op.UserID, Enable: enable, Comment: op.Comment, Email: op.Email, Groups: op.joinGroups()})
 }
 
 // beforeJoin asks BeforeJoin about groups, when there are any to join.

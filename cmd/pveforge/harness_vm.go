@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	proxmox "github.com/suykerbuyk/go-proxmox"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness/outer"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
@@ -35,13 +36,28 @@ func newHarnessVMCmd() *cobra.Command {
 
 // harnessVMID parses and bounds-checks a harness VMID argument (690–699,
 // lib.sh:133/:237) before any call is made.
+//
+// harnessVMID is for the read-only verbs (list, gone): a bad VMID is a plain
+// error. A mutating verb calls harnessMutatingVMID, whose BAND refusal (a VMID
+// outside 690-699) is a refusal before anything is sent (exit 4); an argument
+// that is not a number is a usage error (exit 1) for both.
 func harnessVMID(arg string) (int, error) {
+	return harnessVMIDIn(context.Background(), arg)
+}
+
+// harnessMutatingVMID is harnessVMID for a verb that can change state: the
+// band refusal is dispatch.Refuse'd under the command's own context.
+func harnessMutatingVMID(ctx context.Context, arg string) (int, error) {
+	return harnessVMIDIn(ctx, arg)
+}
+
+func harnessVMIDIn(ctx context.Context, arg string) (int, error) {
 	vmid, err := strconv.Atoi(arg)
 	if err != nil {
 		return 0, fmt.Errorf("invalid vmid %q: %w", arg, err)
 	}
 	if !outer.ValidVMID(vmid) {
-		return 0, fmt.Errorf("VMID %d is not one of 690-699", vmid)
+		return 0, dispatch.Refuse(ctx, fmt.Errorf("VMID %d is not one of 690-699", vmid))
 	}
 	return vmid, nil
 }
@@ -86,7 +102,7 @@ must be a tagged qemu member of the harness pool on the harness node.` + "",
 		if err != nil {
 			return err
 		}
-		vmid, err := harnessVMID(args[1])
+		vmid, err := harnessMutatingVMID(cmd.Context(), args[1])
 		if err != nil {
 			return err
 		}
@@ -99,7 +115,8 @@ must be a tagged qemu member of the harness pool on the harness node.` + "",
 
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], vmid))
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			// lock files are bookkeeping: a lock-wait refusal is exit 4 (gate closed)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err))
 		}
 		defer func() { _ = unlock() }()
 
@@ -153,7 +170,7 @@ directly, since the idempotent op cannot express them.`,
 		if err != nil {
 			return err
 		}
-		vmid, err := harnessVMID(args[1])
+		vmid, err := harnessMutatingVMID(cmd.Context(), args[1])
 		if err != nil {
 			return err
 		}
@@ -181,7 +198,7 @@ directly, since the idempotent op cannot express them.`,
 		// held across the guard and the status/shutdown POST (C2/C9).
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, key)
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err))
 		}
 		defer func() { _ = unlock() }()
 		if err := outer.Guard(cmd.Context(), client, cfg, nil, vmid, outer.ModeChange); err != nil {
@@ -243,7 +260,7 @@ confirmed with --yes. Exits non-zero if the gone-proof fails.`,
 		if err != nil {
 			return err
 		}
-		vmid, err := harnessVMID(args[1])
+		vmid, err := harnessMutatingVMID(cmd.Context(), args[1])
 		if err != nil {
 			return err
 		}
@@ -256,7 +273,8 @@ confirmed with --yes. Exits non-zero if the gone-proof fails.`,
 
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], vmid))
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			// lock files are bookkeeping: a lock-wait refusal is exit 4 (gate closed)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err))
 		}
 		defer func() { _ = unlock() }()
 
@@ -268,7 +286,8 @@ confirmed with --yes. Exits non-zero if the gone-proof fails.`,
 			return err
 		}
 		if !yes {
-			return fmt.Errorf("vm %d: this irreversible destroy must be confirmed with --yes", vmid)
+			// a refusal before the status-gated stop and the DELETE: exit 4
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("vm %d: this irreversible destroy must be confirmed with --yes", vmid))
 		}
 
 		// N1: reuse VMDestroy's fail-closed status-gated stop, single-sourced.
@@ -452,7 +471,7 @@ verified present afterward; the names current and pending are refused.`,
 		if err != nil {
 			return err
 		}
-		vmid, err := harnessVMID(args[1])
+		vmid, err := harnessMutatingVMID(cmd.Context(), args[1])
 		if err != nil {
 			return err
 		}
@@ -475,7 +494,8 @@ verified present afterward; the names current and pending are refused.`,
 
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], vmid))
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			// lock files are bookkeeping: a lock-wait refusal is exit 4 (gate closed)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err))
 		}
 		defer func() { _ = unlock() }()
 
@@ -541,7 +561,7 @@ from its leaf back. A name that is not a snapshot is reported absent.`,
 		if err != nil {
 			return err
 		}
-		vmid, err := harnessVMID(args[1])
+		vmid, err := harnessMutatingVMID(cmd.Context(), args[1])
 		if err != nil {
 			return err
 		}
@@ -555,7 +575,8 @@ from its leaf back. A name that is not a snapshot is reported absent.`,
 
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], vmid))
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			// lock files are bookkeeping: a lock-wait refusal is exit 4 (gate closed)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err))
 		}
 		defer func() { _ = unlock() }()
 
@@ -641,7 +662,7 @@ exit code (which stays 1 for any refusal).`,
 		if err != nil {
 			return err
 		}
-		vmid, err := harnessVMID(args[1])
+		vmid, err := harnessMutatingVMID(cmd.Context(), args[1])
 		if err != nil {
 			return err
 		}
@@ -655,7 +676,8 @@ exit code (which stays 1 for any refusal).`,
 
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, harnessVMKey(args[0], vmid))
 		if err != nil {
-			return fmt.Errorf("acquire lock: %w", err)
+			// lock files are bookkeeping: a lock-wait refusal is exit 4 (gate closed)
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err))
 		}
 		defer func() { _ = unlock() }()
 

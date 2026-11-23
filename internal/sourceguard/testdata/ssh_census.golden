@@ -1,0 +1,43 @@
+# Every call of an SSH dispatch entry point (Run, rootRun, pveum, pveumWrite) in non-test code, classified.
+# READ: never carries the write mark. WRITE: carries it (WithWrite/configWrite) or is pveumWrite (marks its callee).
+# PASS: forwards the caller's ctx unchanged. FUNNEL: the one real send (sshexec.Client.Run). OTHER: not SSH.
+# file | func | callee | class
+internal/bootstrap/access.go | RootAccess.AddGroup | a.pveumWrite | WRITE
+internal/bootstrap/access.go | RootAccess.AddUser | a.pveumWrite | WRITE
+internal/bootstrap/access.go | RootAccess.ClusterGuests | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.ClusterStatusOnlineNodes | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.ClusterStatusQuorate | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.ModifyGroup | a.pveumWrite | WRITE
+internal/bootstrap/access.go | RootAccess.ModifyUser | a.pveumWrite | WRITE
+internal/bootstrap/access.go | RootAccess.NodeVMIDs | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.aclModify | a.pveumWrite | WRITE
+internal/bootstrap/access.go | RootAccess.allRolePrivs | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.pveum | a.rootRun | PASS
+internal/bootstrap/access.go | RootAccess.pveumWrite | a.pveum | WRITE
+internal/bootstrap/access.go | RootAccess.rootACLs | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.rootGroups | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.rootRun | s.Run | PASS
+internal/bootstrap/access.go | RootAccess.rootUsers | a.pveum | READ
+internal/bootstrap/access.go | RootAccess.verifyPeerNode | a.pveum | READ
+internal/bootstrap/bootstrap.go | grantACL | session.Run | WRITE
+internal/bootstrap/bootstrap.go | runner.dropKeyOver | s.Run | WRITE
+internal/bootstrap/deps.go | realSSHSession.Run | s.c.Run | PASS
+internal/bootstrap/inventory.go | RootAccess.rootOSAccounts | a.rootRun | READ
+internal/bootstrap/keys.go | RootAccess.AuthorizedKeys | a.rootRun | READ
+internal/bootstrap/pintls.go | capturePin | session.Run | READ
+internal/bootstrap/rotation.go | runJSONArray | s.Run | READ
+internal/bootstrap/rotation.go | runner.mintAndPersist | r.session.Run | WRITE
+internal/bootstrap/rotation.go | runner.removeFresh | r.session.Run | WRITE
+internal/bootstrap/rotation.go | runner.removeHeld | r.session.Run | WRITE
+internal/bootstrap/rotation.go | sshOwnerReader.ownerPerms | r.s.Run | READ
+internal/bootstrap/vmdestroygrant.go | RootAccess.enableWrite | a.pveumWrite | WRITE
+internal/bootstrap/vmdestroygrant.go | RootAccess.roleSets | a.pveum | READ
+internal/bootstrap/vmdestroygrant.go | RootAccess.userTree | a.pveum | READ
+internal/pve/routed.go | RoutedClient.sshConnectionHealthy | c.ssh.Run | READ
+internal/sshexec/bridgelink.go | Client.SetBridgePortIsolated | c.Run | WRITE
+internal/sshexec/bridgelink.go | Client.TapLinkState | c.Run | READ
+internal/sshexec/install.go | InstallPubkeyViaPassword | client.Run | WRITE
+internal/sshexec/linkstate.go | Client.LinkState | c.Run | READ
+internal/sshexec/rootfields.go | Client.DeleteVMConfigField | c.Run | WRITE
+internal/sshexec/rootfields.go | Client.SetVMConfigField | c.Run | WRITE
+internal/sshexec/writefile.go | Client.WriteFile | c.Run | WRITE

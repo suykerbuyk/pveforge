@@ -202,7 +202,7 @@ func TestUserEnsure_TokenRefusedReadsAsRoot(t *testing.T) {
 func TestUserEnsure_RefusesToDisablePveforgesOwnUser(t *testing.T) {
 	path, fs, rf := accessSetup(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, nil)
 	code, _, stderr := runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", "root@pam", "--disable")
-	if code != 1 || !strings.Contains(stderr, "owns the roster's own token root@pam!pveforge") {
+	if code != 4 || !strings.Contains(stderr, "owns the roster's own token root@pam!pveforge") {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	if len(fs.Commands()) != 0 || len(rf.got()) != 0 {
@@ -219,7 +219,7 @@ func TestUserEnsure_BadInputRefusedBeforeAnything(t *testing.T) {
 		{"alice@pve", "--group", "bad group"},
 	} {
 		code, _, stderr := runRootArgs(append([]string{"user", "ensure", "--roster", path, "qa-pve-01"}, args...)...)
-		if code != 1 {
+		if code != 4 { // refused before anything was sent (the write gate is closed)
 			t.Errorf("%q: exit %d, stderr %q", args, code, stderr)
 		}
 	}
@@ -266,7 +266,8 @@ func TestACLGrant_GrantsAsRootAndReadsBack(t *testing.T) {
 	}
 }
 
-// Every refusal: exit 1, and no ACL changed. The self refusals, and bad
+// Every refusal made before the grant: exit 4 (nothing was sent), and no ACL
+// changed; the read-back mismatch is AFTER the write and stays exit 1. The self refusals, and bad
 // input, never open root at all.
 func TestACLGrant_Refusals(t *testing.T) {
 	answers := map[string]string{"pveum role list": cliRoleList, "pveum group list": cliGroupList, "pveum user list": cliUserList, "pveum acl list": `[]`}
@@ -290,8 +291,12 @@ func TestACLGrant_Refusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			path, fs, _ := accessSetup(t, nil, answers)
 			code, stdout, stderr := runRootArgs(append([]string{"acl", "grant", "--roster", path, "qa-pve-01"}, c.args...)...)
-			if code != 1 || stdout != "" || !strings.Contains(stderr, c.has) {
-				t.Errorf("exit %d, stdout %q, stderr %q; want exit 1 naming %q", code, stdout, stderr, c.has)
+			wantCode := 4
+			if c.name == "read-back missing" {
+				wantCode = 1 // after the acl modify was sent: never 4
+			}
+			if code != wantCode || stdout != "" || !strings.Contains(stderr, c.has) {
+				t.Errorf("exit %d, stdout %q, stderr %q; want exit %d naming %q", code, stdout, stderr, wantCode, c.has)
 			}
 			for _, cmd := range fs.Commands() {
 				if strings.HasPrefix(cmd, "pveum acl modify") && c.name != "read-back missing" {
@@ -331,7 +336,7 @@ func TestAccess_KeylessTarget(t *testing.T) {
 	rootAt(t, fs)
 
 	code, _, stderr := runRootArgs("group", "ensure", "--roster", path, "qa-pve-01", "ops")
-	if code != 1 || !strings.Contains(stderr, "holds no SSH key: pass --no-ssh-key") {
+	if code != 4 || !strings.Contains(stderr, "holds no SSH key: pass --no-ssh-key") {
 		t.Fatalf("without the flag: exit %d, stderr %q", code, stderr)
 	}
 	t.Setenv(pvePasswordEnvVar, "root-pw")
@@ -350,7 +355,7 @@ func TestUserEnsure_OwnerMayJoinNoGroup(t *testing.T) {
 	for _, id := range []string{"root@pam", "ROOT@pam"} {
 		path, fs, rf := accessSetup(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, nil)
 		code, _, stderr := runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", id, "--group", "admins", "--allow-escalating-role")
-		if code != 1 || !strings.Contains(stderr, "refusing --group for "+id) {
+		if code != 4 || !strings.Contains(stderr, "refusing --group for "+id) {
 			t.Errorf("%s: exit %d, stderr %q", id, code, stderr)
 		}
 		if len(fs.Commands()) != 0 || len(rf.got()) != 0 {
@@ -369,7 +374,7 @@ func TestUserEnsure_JoiningAnEscalatingGroup(t *testing.T) {
 	}
 	path, fs, _ := accessSetup(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, answers)
 	code, stdout, stderr := runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", "alice@pve", "--group", "admins")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "group admins holds Administrator on /") || !strings.Contains(stderr, "--allow-escalating-role") {
+	if code != 4 || stdout != "" || !strings.Contains(stderr, "group admins holds Administrator on /") || !strings.Contains(stderr, "--allow-escalating-role") {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 	if want := []string{"pveum role list --output-format json", "pveum acl list --output-format json"}; !slices.Equal(fs.Commands(), want) {
@@ -401,7 +406,7 @@ func TestUserEnsure_EveryEscalatingJoinIsWarned(t *testing.T) {
 	}
 	path, fs, _ := accessSetup(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, answers)
 	code, _, stderr := runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", "alice@pve", "--group", "admins", "--group", "ops")
-	if code != 1 || !strings.Contains(stderr, "group admins holds Administrator on /pool/x") || !strings.Contains(stderr, "group ops holds Administrator on /vms/100") {
+	if code != 4 || !strings.Contains(stderr, "group admins holds Administrator on /pool/x") || !strings.Contains(stderr, "group ops holds Administrator on /vms/100") {
 		t.Fatalf("refused: exit %d, stderr %q", code, stderr)
 	}
 	for _, cmd := range fs.Commands() {

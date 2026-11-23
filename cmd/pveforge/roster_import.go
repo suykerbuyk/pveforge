@@ -9,6 +9,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/tlspin"
@@ -67,20 +68,20 @@ An imported target holds a token but no SSH key, so a later plain
 			}
 			grants, err := bootstrap.ParseGrants(grantSpecs)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			if err := roster.ValidateTargetID(args[0]); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			if err := bootstrap.CheckImportTokenID(tokenID); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			if importStdinIsTerminal() {
-				return fmt.Errorf("import-token reads the token secret from stdin, which is a terminal: pipe the secret in instead")
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("import-token reads the token secret from stdin, which is a terminal: pipe the secret in instead"))
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			iopts := bootstrap.ImportOptions{
 				TargetID: args[0], Host: host, Node: node, APIPort: apiPort, InsecureTLS: insecureTLS,
@@ -92,7 +93,7 @@ An imported target holds a token but no SSH key, so a later plain
 				// refused, never read as "no --expect".
 				p, err := tlspin.Parse(expect)
 				if err != nil {
-					return fmt.Errorf("--expect: %w", err)
+					return dispatch.Refuse(cmd.Context(), fmt.Errorf("--expect: %w", err))
 				}
 				iopts.Expect = p
 			}
@@ -101,25 +102,25 @@ An imported target holds a token but no SSH key, so a later plain
 			// a new target with no host, an unpinned insecure target or a
 			// roster that cannot take the write must cost neither.
 			if err := bootstrap.CheckImportBeforePrompt(iopts); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// The passphrase before the secret: with stdin piped it can
 			// only come from the environment, and a missing one must not
 			// cost the piped secret.
 			rawPassphrase, err := promptRosterPassphrase(cmd.Context())
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			// And proven before the secret is read, for the same reason: a
 			// mistyped passphrase must not cost the piped secret either.
 			passphrase, err := proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			iopts.Passphrase = passphrase
 			secret, err := readImportedSecret(importStdin())
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			iopts.Secret = secret
 			res, err := bootstrap.Import(cmd.Context(), iopts, newBootstrapValidator())

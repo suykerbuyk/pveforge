@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 )
 
 // Mode is the guard's mode, mirroring _harness_guard_existing's second
@@ -101,9 +103,16 @@ func readPool(ctx context.Context, r Reader, pool string) (*poolObj, error) {
 //
 // led may be nil for ModeChange (no ledger is read); ModeDestroy requires a
 // non-nil ledger.
+//
+// Exit status (contract plan §3.5): each REFUSAL (the bound, membership, node,
+// ledger and tag legs) is stated with dispatch.Refuse(ctx, …): exit 4 while the
+// run's write gate is closed, the plain error (exit 1) once a write has been
+// sent, so the same refusal after a create is 1, never 4. A failed READ (the pool
+// or config read, an unexpected shape, a ledger read error) is not a refusal and
+// stays a plain error.
 func Guard(ctx context.Context, r Reader, cfg Config, led *Ledger, vmid int, mode Mode) error {
 	if !ValidVMID(vmid) {
-		return fmt.Errorf("VMID %d is not one of 690-699", vmid)
+		return dispatch.Refuse(ctx, fmt.Errorf("VMID %d is not one of 690-699", vmid))
 	}
 	pool, err := readPool(ctx, r, cfg.Pool)
 	if err != nil {
@@ -122,24 +131,24 @@ func Guard(ctx context.Context, r Reader, cfg Config, led *Ledger, vmid int, mod
 		}
 	}
 	if matches != 1 || node == "" {
-		return fmt.Errorf("VM %d is not a qemu member of pool %s", vmid, cfg.Pool)
+		return dispatch.Refuse(ctx, fmt.Errorf("VM %d is not a qemu member of pool %s", vmid, cfg.Pool))
 	}
 	if node != cfg.Node {
-		return fmt.Errorf("VM %d is on node %s, not %s", vmid, node, cfg.Node)
+		return dispatch.Refuse(ctx, fmt.Errorf("VM %d is on node %s, not %s", vmid, node, cfg.Node))
 	}
 	if mode == ModeTag {
 		return nil // lib.sh:487-490: the tag mode returns before the tag check
 	}
 	if mode == ModeDestroy {
 		if led == nil {
-			return fmt.Errorf("VM %d: destroying needs a created-VM ledger (--created-file) listing the VM", vmid)
+			return dispatch.Refuse(ctx, fmt.Errorf("VM %d: destroying needs a created-VM ledger (--created-file) listing the VM", vmid))
 		}
 		created, err := led.Has(vmid)
 		if err != nil {
 			return err
 		}
 		if !created {
-			return fmt.Errorf("VM %d was not created by this run; destroying it needs a fresh operator ask", vmid)
+			return dispatch.Refuse(ctx, fmt.Errorf("VM %d was not created by this run; destroying it needs a fresh operator ask", vmid))
 		}
 	}
 	// Tag check (both modes): read the VM's config and prove it carries the
@@ -155,7 +164,7 @@ func Guard(ctx context.Context, r Reader, cfg Config, led *Ledger, vmid int, mod
 		return fmt.Errorf("VM %d: config has an unexpected shape: %w", vmid, err)
 	}
 	if !tagsHave(conf.Tags, cfg.Tag) {
-		return fmt.Errorf("VM %d does not carry tag %s", vmid, cfg.Tag)
+		return dispatch.Refuse(ctx, fmt.Errorf("VM %d does not carry tag %s", vmid, cfg.Tag))
 	}
 	return nil
 }

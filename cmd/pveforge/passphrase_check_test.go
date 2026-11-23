@@ -54,8 +54,8 @@ func TestBootstrap_WrongRosterPassphraseRefusedFirst(t *testing.T) {
 	t.Setenv(pvePasswordEnvVar, "")
 
 	code, stdout, stderr := runRootArgs("bootstrap", "qa-new", "--host", "h", "--node", "n", "--no-ssh-key", "--grant", "/:PVEAuditor")
-	if code != 1 {
-		t.Fatalf("exit %d, want 1; stderr %q", code, stderr)
+	if code != 4 {
+		t.Fatalf("exit %d, want 4 (refused before any write); stderr %q", code, stderr)
 	}
 	if stdout != "" || strings.Count(stderr, "\n") != 1 ||
 		!strings.Contains(stderr, "wrong roster passphrase") ||
@@ -148,8 +148,8 @@ func TestImportToken_WrongRosterPassphraseRefusedFirst(t *testing.T) {
 	t.Setenv(roster.PassphraseEnvVar, "mistyped-pass")
 
 	code, stdout, stderr := c.run(importSecret+"\n", importArgs...)
-	if code != 1 {
-		t.Fatalf("exit %d, want 1; stderr %q", code, stderr)
+	if code != 4 {
+		t.Fatalf("exit %d, want 4 (refused before any write); stderr %q", code, stderr)
 	}
 	if stdout != "" || strings.Count(stderr, "\n") != 1 ||
 		!strings.Contains(stderr, "wrong roster passphrase") || !strings.Contains(stderr, roster.PassphraseEnvVar) {
@@ -182,8 +182,8 @@ func TestBootstrap_UnreadableRosterRefusedFirst(t *testing.T) {
 	t.Setenv(pvePasswordEnvVar, "")
 
 	code, stdout, stderr := runRootArgs("bootstrap", "qa-new", "--host", "h", "--node", "n", "--no-ssh-key", "--grant", "/:PVEAuditor")
-	if code != 1 {
-		t.Fatalf("exit %d, want 1; stderr %q", code, stderr)
+	if code != 4 {
+		t.Fatalf("exit %d, want 4 (refused before any write); stderr %q", code, stderr)
 	}
 	if stdout != "" || strings.Count(stderr, "\n") != 1 ||
 		!strings.Contains(stderr, "no secret in the roster can be read") ||

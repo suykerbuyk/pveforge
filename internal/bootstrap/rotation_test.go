@@ -341,7 +341,7 @@ func countMetaWrites(t *testing.T) *int {
 	t.Helper()
 	n := 0
 	orig := persistTargetMetaFn
-	persistTargetMetaFn = func(o Options) error { n++; return orig(o) }
+	persistTargetMetaFn = func(ctx context.Context, o Options) error { n++; return orig(ctx, o) }
 	t.Cleanup(func() { persistTargetMetaFn = orig })
 	return &n
 }
@@ -1267,7 +1267,7 @@ func TestRun_R15_PersistFails(t *testing.T) {
 // an error.
 func TestRun_R16_MetaPersistFails(t *testing.T) {
 	orig := persistTargetMetaFn
-	persistTargetMetaFn = func(Options) error { return errors.New("meta write failed") }
+	persistTargetMetaFn = func(context.Context, Options) error { return errors.New("meta write failed") }
 	t.Cleanup(func() { persistTargetMetaFn = orig })
 	s, _, tr, v := prior(t, nil, nil)
 	res, err := Run(context.Background(), s.opts, tr, v)

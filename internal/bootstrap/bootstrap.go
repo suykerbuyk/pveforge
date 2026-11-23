@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"regexp"
 	"sort"
 	"strings"
@@ -356,7 +357,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	ownerGiven := opts.TokenOwner != ""
 	applyDefaults(&opts)
 	if err := CheckTokenOwner(opts.TokenOwner); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 	// The one requested grant list: issued, owner-checked, skip-checked and
 	// validated post-mint as this same value. Checked first, before the
@@ -364,36 +365,39 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	// without an explicit grant.
 	want, err := requestedGrants(opts)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 	defaultHostNodeFromRoster(&opts)
 	if err := validateOptions(&opts); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	sshUser, err := pamLocalUser(opts.PVEUsername)
 	if err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	// Before the lock, the roster write that creates a new target, or any
 	// connection (operator ruling RQ3, B′).
 	if err := checkCaptureTrust(opts); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 
 	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err)
+		// The lock files are bookkeeping, not a mutation: the gate is closed.
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err))
 	}
 	defer func() { _ = unlock() }()
 
-	if err := ensureTargetExists(opts); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+	if err := ensureTargetExists(ctx, opts); err != nil {
+		// A roster that does not load refuses before any write; a failed
+		// AppendTarget opened the gate first, so the same line is then exit 1.
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 
 	// The roster's token must belong to the principal this run addresses,
 	// unless the caller deliberately said otherwise. Before any SSH.
 	if err := checkHeldTokenOwner(opts, ownerGiven); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 
 	// Then the transport question, on the same terms: the roster's SSH
@@ -401,7 +405,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	// (above), so a run tripping both reports the owner. Also before any
 	// SSH, and decrypting nothing.
 	if err := checkKeylessState(opts); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 
 	addr := fmt.Sprintf("%s:%d", opts.Host, opts.SSHPort)
@@ -414,16 +418,16 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	// passphrase, and before the first decrypt or dial — is free when that
 	// proof stands, and it is the decrypt loadExistingSSHAuth then reuses.
 	if err := opts.Passphrase.Prove(opts.RosterPath, opts.TargetID); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 	existing, err := loadExistingSSHAuth(opts)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 	// The stored TLS pin, read again under the lock: the previous pins this
 	// run reports are what the roster held before its first write.
 	if err := storedTLSUnderLock(&opts); err != nil {
-		return nil, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: %w", opts.TargetID, err))
 	}
 	// A keyful reprovision: a stored SSH pin that is not the key the
 	// operator read on the rebuilt node's console. Equal is a plain rerun.
@@ -449,7 +453,8 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		// and pinned for any redial this run makes (freshSession).
 		session, fp, err := transport.DialWithPassword(ctx, addr, sshUser, opts.PVEPassword, opts.HostKeyFingerprint)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap %s: connect with password (no ssh key): %w", opts.TargetID, err)
+			// No command was sent (the dial itself failed): state decides.
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: connect with password (no ssh key): %w", opts.TargetID, err))
 		}
 		if fp == "" {
 			// A capture that yields nothing would silently degrade this
@@ -458,7 +463,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 			// could not be audited afterwards. Refuse instead, as
 			// PinnedHostKeyCallback refuses its own empty input.
 			_ = session.Close()
-			return nil, fmt.Errorf("bootstrap %s: connect with password (no ssh key): the transport captured no host key fingerprint", opts.TargetID)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: connect with password (no ssh key): the transport captured no host key fingerprint", opts.TargetID))
 		}
 		r.session = session
 		defer func() { _ = r.session.Close() }()
@@ -466,11 +471,11 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 	case existing != nil && !reprovisionSSH:
 		if err := checkGivenFingerprint(opts, existing.HostKeyFingerprint); err != nil {
-			return nil, err
+			return nil, dispatch.Refuse(ctx, err)
 		}
 		session, err := transport.ReconnectWithPinnedKey(ctx, addr, sshUser, existing.PrivateKeyPEM, existing.HostKeyFingerprint)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — pveforge will not silently re-trust and re-pin a different host key; if the node was rebuilt, read its new key on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub) and run pveforge bootstrap %s --reprovisioned --host-key-fingerprint <the console value>", opts.TargetID, err, opts.TargetID)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("bootstrap %s: reconnect with previously-pinned ssh key: %w — pveforge will not silently re-trust and re-pin a different host key; if the node was rebuilt, read its new key on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub) and run pveforge bootstrap %s --reprovisioned --host-key-fingerprint <the console value>", opts.TargetID, err, opts.TargetID))
 		}
 		r.session = session
 		defer func() { _ = r.session.Close() }()
@@ -486,7 +491,9 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 		if err != nil {
 			cause := fmt.Errorf("bootstrap %s: install pubkey: %w", opts.TargetID, err)
 			if errors.Is(err, sshexec.ErrNoCommandSent) {
-				return nil, cause // nothing ran on the node: no key was installed
+				// Nothing ran on the node: no key was installed. The install
+				// funnel never opened the gate for it, so the gate decides.
+				return nil, dispatch.Refuse(ctx, cause)
 			}
 			// The install script was sent: whether it appended the key
 			// before it failed (or timed out) is unknown.
@@ -526,6 +533,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 			HostKeySource:       string(sshSource(opts)),
 		}
 		if reprovisionSSH {
+			dispatch.Open(ctx) // a roster write
 			if err := roster.ReplaceSSHAuth(opts.RosterPath, opts.TargetID, existing.HostKeyFingerprint, w, opts.Passphrase); err != nil {
 				done := ""
 				if tls.replaced {
@@ -533,8 +541,11 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 				}
 				return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: replace ssh auth: %w%s", opts.TargetID, err, done), keypair.AuthorizedKeyLine)
 			}
-		} else if err := writeSSHAuthFn(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
-			return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err), keypair.AuthorizedKeyLine)
+		} else {
+			dispatch.Open(ctx) // a roster write, through the function-value seam
+			if err := writeSSHAuthFn(opts.RosterPath, opts.TargetID, w, opts.Passphrase); err != nil {
+				return nil, r.dropInstalledKey(fmt.Errorf("bootstrap %s: persist ssh auth: %w", opts.TargetID, err), keypair.AuthorizedKeyLine)
+			}
 		}
 		// From here the roster holds the key: it is the target's live key,
 		// and nothing in this run may remove it.
@@ -545,7 +556,7 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 	// branch already did, before it persisted SSH auth.
 	if captureTLS && !tls.done {
 		if err := tls.capture(r.session); err != nil {
-			return nil, err
+			return nil, err // its refusals are raised inside capture, by gate state
 		}
 	}
 	r.res.TLSPin, r.res.TLSPinSource = tls.pin, tls.source
@@ -560,6 +571,9 @@ func Run(ctx context.Context, opts Options, transport SSHTransport, api APIValid
 
 	present, err := preflight(ctx, r.session, opts, want, sshOwnerReader{r.session})
 	if err != nil {
+		// preflight raises its refusals itself, through dispatch.Refuse, at
+		// the point each is found: whether one is exit 4 depends on whether
+		// a key install or a pin write came first in this run (the gate).
 		if r.res.Reprovisioned {
 			return nil, fmt.Errorf("bootstrap %s: %w; %s the rebuilt node: recreate the token owner and its ACLs on it (for the nested harness's outer target: D5 G1-G3), then run the same command again", opts.TargetID, err, replacedPins(r.res))
 		}
@@ -597,6 +611,8 @@ func (c *tlsCapture) capture(session SSHSession) error {
 	// pin is written.
 	pin, err := capturePin(c.ctx, session, c.api, o.Host, o.APIPort, o.CapturePort, !o.InsecureTLS)
 	if err != nil {
+		// capturePin raises its own refusals (through dispatch.Refuse, by
+		// gate state); a read failure inside it stays a plain error.
 		return fmt.Errorf("bootstrap %s: %w", o.TargetID, err)
 	}
 	source := captureSource(o, c.dialsStoredPin)
@@ -609,13 +625,15 @@ func (c *tlsCapture) capture(session SSHSession) error {
 	case stored != "" && o.Reprovisioned:
 		// A rebuilt node's new key, captured over the operator-verified
 		// session: replace the stored pin, compare-and-set against it.
+		dispatch.Open(c.ctx) // a roster write
 		if err := roster.WriteTLSPin(o.RosterPath, o.TargetID, stored, pin, source, o.Passphrase); err != nil {
 			return fmt.Errorf("bootstrap %s: replace the tls pin: %w", o.TargetID, err)
 		}
 		c.replaced, c.previous = true, stored
 	case stored != "":
-		return fmt.Errorf("bootstrap %s: %w", o.TargetID, differsError(o.TargetID, stored, pin, c.dialsStoredPin))
+		return dispatch.Refuse(c.ctx, fmt.Errorf("bootstrap %s: %w", o.TargetID, differsError(o.TargetID, stored, pin, c.dialsStoredPin)))
 	default:
+		dispatch.Open(c.ctx) // a roster write
 		if err := roster.WriteTLSPin(o.RosterPath, o.TargetID, "", pin, source, o.Passphrase); err != nil {
 			return fmt.Errorf("bootstrap %s: persist the tls pin: %w", o.TargetID, err)
 		}
@@ -890,7 +908,8 @@ func captureSource(opts Options, dialsStoredPin bool) tlspin.Source {
 // re-introduce the exact drift defaultHostNodeFromRoster exists to
 // prevent, it only closes the gap of nothing ever having persisted the
 // value in the first place.
-func persistTargetMeta(opts Options) error {
+func persistTargetMeta(ctx context.Context, opts Options) error {
+	dispatch.Open(ctx) // a roster write: opens the run's write gate
 	return roster.UpdateTargetFields(opts.RosterPath, opts.TargetID, roster.TargetMeta{
 		Host:        opts.Host,
 		Node:        opts.Node,
@@ -1064,7 +1083,7 @@ func pamLocalUser(pveUsername string) (string, error) {
 // bootstrap` is a one-command entry point starting from a roster that
 // merely exists (created via `pveforge roster init`) but has no entry for
 // this target yet.
-func ensureTargetExists(opts Options) error {
+func ensureTargetExists(ctx context.Context, opts Options) error {
 	r, err := roster.Load(opts.RosterPath)
 	if err != nil {
 		return rosterLoadError(opts.RosterPath, err)
@@ -1072,6 +1091,7 @@ func ensureTargetExists(opts Options) error {
 	if r.Find(opts.TargetID) != nil {
 		return nil
 	}
+	dispatch.Open(ctx) // a roster write: opens the run's write gate
 	return roster.AppendTarget(opts.RosterPath, roster.Target{
 		ID:          opts.TargetID,
 		Host:        opts.Host,
@@ -1447,8 +1467,11 @@ func parseGrant(spec string) (Grant, error) {
 var PVEConfigWriteTimeout = 90 * time.Second
 
 // configWrite is ctx for one cluster-config write: PVEConfigWriteTimeout.
+// It also MARKS the command as a root-SSH write (sshexec.WithWrite), which is
+// what opens the run's write gate at the funnel (sshexec.Client.Run): every
+// token add/remove, grant and pveum write goes through here.
 func configWrite(ctx context.Context) context.Context {
-	return sshexec.WithCommandTimeout(ctx, PVEConfigWriteTimeout)
+	return sshexec.WithWrite(sshexec.WithCommandTimeout(ctx, PVEConfigWriteTimeout))
 }
 
 // grantACL grants g to the token identified by fullTokenID
@@ -1687,17 +1710,17 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 		}
 	}()
 	if err := roster.ValidateTargetID(opts.TargetID); err != nil {
-		return nil, fmt.Errorf("import token: %w", err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token: %w", err))
 	}
 	if err := CheckImportTokenID(opts.TokenID); err != nil {
-		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w", opts.TargetID, err))
 	}
 	if err := CheckTokenSecret(opts.Secret); err != nil {
-		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w", opts.TargetID, err))
 	}
 	want, err := normalizeGrants(opts.Grants)
 	if err != nil {
-		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w", opts.TargetID, err))
 	}
 	bopts := Options{
 		TargetID: opts.TargetID, Host: opts.Host, Node: opts.Node, APIPort: opts.APIPort,
@@ -1705,10 +1728,10 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	}
 	defaultHostNodeFromRoster(&bopts)
 	if err := checkImportAddress(opts.TargetID, bopts); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	if err := CheckImportTLS(opts); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	if bopts.APIPort == 0 {
 		bopts.APIPort = 8006
@@ -1716,19 +1739,19 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 
 	unlock, err := lock.Mutation(ctx, opts.RosterPath, lock.ObjectKey{TargetID: opts.TargetID, Kind: "bootstrap", ID: "token"})
 	if err != nil {
-		return nil, fmt.Errorf("import token %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: acquire the per-target bootstrap lock: %w", opts.TargetID, err))
 	}
 	defer func() { _ = unlock() }()
 
 	r, err := roster.Load(opts.RosterPath)
 	if err != nil {
-		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, rosterLoadError(opts.RosterPath, err))
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w", opts.TargetID, rosterLoadError(opts.RosterPath, err)))
 	}
 	exists := r.Find(opts.TargetID) != nil
 	// The TLS rule again, under the lock, against the roster as read now;
 	// the pin the validation goes through, and whether this import writes it.
 	if err := CheckImportTLS(opts); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	var storedPin tlspin.Pin
 	var storedSource tlspin.Source
@@ -1743,17 +1766,17 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	var held heldToken
 	if exists {
 		if held, err = loadHeldToken(bopts); err != nil {
-			return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w", opts.TargetID, err))
 		}
 		// A held token that will not decrypt is refused outright, --replace
 		// included and before anything is validated: with a mistyped
 		// passphrase, "replace" would overwrite the only roster copy of a
 		// live token's secret. Bootstrap refuses the same state the same way.
 		if held.DecryptErr != nil {
-			return nil, fmt.Errorf("import token %s: %w: the roster holds %s; check the roster passphrase (%s) — nothing was validated or written, and --replace cannot override this", opts.TargetID, ErrTokenUndecryptable, kvjson.QuoteValue(held.ID), roster.PassphraseEnvVar)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w: the roster holds %s; check the roster passphrase (%s) — nothing was validated or written, and --replace cannot override this", opts.TargetID, ErrTokenUndecryptable, kvjson.QuoteValue(held.ID), roster.PassphraseEnvVar))
 		}
 		if err := dryRunTokenWrite(opts.RosterPath, opts.TargetID); err != nil {
-			return nil, fmt.Errorf("import token %s: the roster would refuse the write, so nothing was validated or written: %w", opts.TargetID, err)
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: the roster would refuse the write, so nothing was validated or written: %w", opts.TargetID, err))
 		}
 	}
 	// The passphrase must open what the roster already holds, or the token
@@ -1761,11 +1784,11 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	// Before the validator's network call; free when the command proved it
 	// already, or when the held token above just decrypted under it.
 	if err := opts.Passphrase.Prove(opts.RosterPath, opts.TargetID); err != nil {
-		return nil, fmt.Errorf("import token %s: %w", opts.TargetID, err)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w", opts.TargetID, err))
 	}
 	sameToken := held.ID == opts.TokenID && held.DecryptErr == nil && held.Secret == opts.Secret
 	if held.ID != "" && !sameToken && !opts.Replace {
-		return nil, fmt.Errorf("import token %s: %w: %s; pass --replace to replace the roster's copy (the held token is not revoked, and stays live on PVE)", opts.TargetID, ErrTokenAlreadyHeld, kvjson.QuoteValue(held.ID))
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("import token %s: %w: %s; pass --replace to replace the roster's copy (the held token is not revoked, and stays live on PVE)", opts.TargetID, ErrTokenAlreadyHeld, kvjson.QuoteValue(held.ID)))
 	}
 
 	res := &Result{TokenID: opts.TokenID, TokenOutcome: OutcomeNotImported}
@@ -1774,7 +1797,8 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	switch {
 	case verdict != nil:
 		res.Validation = ValidationFailed
-		return res, fmt.Errorf("import token %s: the token does not hold exactly the requested grants, so it was not imported (nothing on PVE was touched; if the owner is not root, its own privileges bound the token's): %w", opts.TargetID, verdict)
+		// A verdict, raised before the first roster write: the gate decides.
+		return res, dispatch.Refuse(ctx, fmt.Errorf("import token %s: the token does not hold exactly the requested grants, so it was not imported (nothing on PVE was touched; if the owner is not root, its own privileges bound the token's): %w", opts.TargetID, verdict))
 	case nonVerdict != nil:
 		res.Validation = ValidationUnverified
 		return res, fmt.Errorf("import token %s: the token's grants could not be verified, so it was not imported (nothing on PVE was touched): %w", opts.TargetID, nonVerdict)
@@ -1787,11 +1811,12 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 	// now, after the validation proved the token through it: after the
 	// target exists, and before the token.
 	if !exists {
-		if err := ensureTargetExists(bopts); err != nil {
+		if err := ensureTargetExists(ctx, bopts); err != nil {
 			return res, fmt.Errorf("import token %s: add the target to the roster: %w", opts.TargetID, err)
 		}
 	}
 	if writePin {
+		dispatch.Open(ctx) // a roster write
 		if err := roster.WriteTLSPin(opts.RosterPath, opts.TargetID, "", opts.Expect, tlspin.SourceExpect, opts.Passphrase); err != nil {
 			return res, fmt.Errorf("import token %s: write the tls pin: %w", opts.TargetID, err)
 		}
@@ -1801,6 +1826,7 @@ func Import(ctx context.Context, opts ImportOptions, api APIValidator) (_ *Resul
 		res.TokenOutcome = OutcomeAlreadyHeld
 		return res, nil
 	}
+	dispatch.Open(ctx) // a roster write, through the function-value seam (F-A)
 	if err := writeTokenAuthFn(opts.RosterPath, opts.TargetID, roster.TokenWrite{TokenID: opts.TokenID, SecretPlaintext: []byte(opts.Secret)}, opts.Passphrase); err != nil {
 		return res, fmt.Errorf("import token %s: write the token to the roster: %w", opts.TargetID, err)
 	}
@@ -1860,15 +1886,33 @@ func (r *runner) dropKeyOver(s SSHSession, cause error, user, line string) error
 	}
 	ctx, cancel := r.cleanupCtx()
 	defer cancel()
+	// The key removal is a write. cleanupCtx is context.WithoutCancel(r.ctx):
+	// it KEEPS the run's values (the write gate included) but cleanupCtx never
+	// sets the write mark, because readToken uses the same context for a READ.
+	// The mark is therefore set HERE, at the one call site that is a write, on
+	// the ctx Run receives, after cleanupCtx.
+	ctx = sshexec.WithWrite(ctx)
 	res, err := s.Run(ctx, script)
 	switch {
 	case err != nil:
-		return keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("removing it failed: %v", err))
+		// The text keeps err as a %v (it is already in the message); the CHAIN
+		// keeps it too, so a removal that was sent and timed out (the SSH
+		// funnel's dispatch.Unobserved) is exit 3, never flattened to 1.
+		return withCause(keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("removing it failed: %v", err)), err)
 	case res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "removed":
 		return keyLeftBehind(cause, r.opts.Host, user, line, fmt.Sprintf("removing it was refused (exit %d, %s)", res.ExitCode, strings.TrimSpace(res.Stdout)))
 	}
 	return fmt.Errorf("%w; the SSH key this run had installed on the node (%s) was removed from %s's authorized_keys again", cause, keyComment(line), user)
 }
+
+// withCause is out with cause added to its chain (errors.Is/As see both),
+// leaving out's text exactly as it is.
+func withCause(out, cause error) error { return &causedError{out: out, cause: cause} }
+
+type causedError struct{ out, cause error }
+
+func (e *causedError) Error() string   { return e.out.Error() }
+func (e *causedError) Unwrap() []error { return []error{e.out, e.cause} }
 
 // keyLeftBehind is cause, saying that this run's key may still be in
 // user's authorized_keys on host (user is the SSH login the key was

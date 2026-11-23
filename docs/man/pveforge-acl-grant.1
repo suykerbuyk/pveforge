@@ -40,6 +40,20 @@ later; a role widened (pveum role modify) after the grant widens it. Nothing
 serialises acl grant against user ensure, or either against changes made
 outside pveforge.
 
+.PP
+Exit status: 0 when done; 4 when the run is refused before anything was sent to
+the target (an invalid value, a refusal above, every role, group and principal refusal above, a lock-wait timeout, a
+--host-key-fingerprint that is malformed or is not the target's pin, a target
+holding no SSH key without --no-ssh-key): nothing on the PVE host and nothing
+in the roster file was changed; 3 when the pveum write was sent and ran out of
+time, so its outcome is unknown (re-running is safe); 1 for every other
+failure, a failed read included, and for anything that goes wrong after the
+write was sent.
+
+.PP
+A grant whose read-back does not hold its entry, or that fails after the first
+pveum acl modify was sent, is exit 1, never 4: something may already be granted.
+
 
 .SH OPTIONS
 \fB--allow-escalating-role\fP[=false]

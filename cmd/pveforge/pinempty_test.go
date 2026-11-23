@@ -33,7 +33,7 @@ func TestBootstrap_AGivenPinMustBeOne(t *testing.T) {
 				args = append(args, "--no-ssh-key")
 			}
 			code, _, stderr := runRootArgs(args...)
-			if code != 1 || !strings.Contains(stderr, pinRefusal) {
+			if code != 4 || !strings.Contains(stderr, pinRefusal) {
 				t.Errorf("keyless %t, %s: exit %d, stderr %q", keyless, name, code, stderr)
 			}
 			if fs.Connections() != 0 || fs.PasswordAttempts() != 0 {
@@ -66,7 +66,7 @@ func TestRootAccess_AGivenPinMustBeOne(t *testing.T) {
 			t.Setenv(pvePasswordEnvVar, "root-pw")
 			rootAt(t, fs)
 			code, _, stderr := runRootArgs(append(args(path), "--no-ssh-key", "--host-key-fingerprint", pin)...)
-			if code != 1 || !strings.Contains(stderr, pinRefusal) || fs.Connections() != 0 || fs.PasswordAttempts() != 0 {
+			if code != refusalExit(verb) || !strings.Contains(stderr, pinRefusal) || fs.Connections() != 0 || fs.PasswordAttempts() != 0 {
 				t.Errorf("%s, keyless, %s: exit %d, %d connections, %d password attempts, stderr %q", verb, name, code, fs.Connections(), fs.PasswordAttempts(), stderr)
 			}
 			// A key target: "" would silently fall back to the stored pin; a
@@ -74,7 +74,7 @@ func TestRootAccess_AGivenPinMustBeOne(t *testing.T) {
 			keyPath, kfs, _ := accessSetup(t, routes, nil)
 			before := kfs.Connections() // the roster's own pin was captured by a dial
 			code, _, stderr = runRootArgs(append(args(keyPath), "--host-key-fingerprint", pin)...)
-			if code != 1 || !strings.Contains(stderr, pinRefusal) || kfs.Connections() != before {
+			if code != refusalExit(verb) || !strings.Contains(stderr, pinRefusal) || kfs.Connections() != before {
 				t.Errorf("%s, key target, %s: exit %d, connections %d (was %d), stderr %q", verb, name, code, kfs.Connections(), before, stderr)
 			}
 		}

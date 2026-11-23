@@ -73,8 +73,21 @@ func lockIsFree(t *testing.T, rosterPath string, key lock.ObjectKey) {
 // after a timeout, and not an interruption.
 func timedOutText(t *testing.T, code int, stderr string, want ...string) {
 	t.Helper()
-	if code != 1 || strings.Count(stderr, "\n") != 1 || strings.Contains(stderr, "interrupted") {
-		t.Fatalf("exit %d, stderr %q; want exit 1 and one line, not an interruption", code, stderr)
+	timedOutTextExit(t, 1, code, stderr, want...)
+}
+
+// timedOutWriteText is timedOutText for a root WRITE that was sent and ran out
+// of time: its outcome is unknown, exit 3 (the write funnel builds
+// dispatch.Unobserved). A READ timeout stays exit 1 (timedOutText).
+func timedOutWriteText(t *testing.T, code int, stderr string, want ...string) {
+	t.Helper()
+	timedOutTextExit(t, 3, code, stderr, want...)
+}
+
+func timedOutTextExit(t *testing.T, wantCode, code int, stderr string, want ...string) {
+	t.Helper()
+	if code != wantCode || strings.Count(stderr, "\n") != 1 || strings.Contains(stderr, "interrupted") {
+		t.Fatalf("exit %d, stderr %q; want exit %d and one line, not an interruption", code, stderr, wantCode)
 	}
 	for _, w := range append([]string{"timed out"}, want...) {
 		if !strings.Contains(stderr, w) {
@@ -89,7 +102,7 @@ func TestUserEnsure_C1_AHungWriteIsOutcomeUnknown(t *testing.T) {
 	path, _, _ := hangingRoot(t, map[string]string{"GET /api2/json/access/users": usersWithoutAlice}, nil, "pveum user add")
 	within(t, 5*time.Second, func() {
 		code, _, stderr := runRootArgs("user", "ensure", "--roster", path, "qa-pve-01", "alice@pve")
-		timedOutText(t, code, stderr, "may or may not have been applied", "re-running is safe")
+		timedOutWriteText(t, code, stderr, "may or may not have been applied", "re-running is safe")
 	})
 	lockIsFree(t, path, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "user", ID: "alice@pve"})
 }
@@ -100,7 +113,7 @@ func TestGroupEnsure_C2_AHungWriteIsOutcomeUnknown(t *testing.T) {
 	path, _, _ := hangingRoot(t, map[string]string{"GET /api2/json/access/groups": `{"data":[]}`}, nil, "pveum group add")
 	within(t, 5*time.Second, func() {
 		code, _, stderr := runRootArgs("group", "ensure", "--roster", path, "qa-pve-01", "ops")
-		timedOutText(t, code, stderr, "may or may not have been applied")
+		timedOutWriteText(t, code, stderr, "may or may not have been applied")
 	})
 	lockIsFree(t, path, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "group", ID: "ops"})
 }
@@ -113,7 +126,7 @@ func TestACLGrant_C3_AHungGrantIsOutcomeUnknown(t *testing.T) {
 	}, "pveum acl modify")
 	within(t, 5*time.Second, func() {
 		code, _, stderr := runRootArgs("acl", "grant", "--roster", path, "qa-pve-01", "--user", "bob@pve", "--grant", "/vms/100:PVEVMUser")
-		timedOutText(t, code, stderr, "grant 1 of 1 (PVEVMUser on /vms/100) timed out and may or may not have been applied")
+		timedOutWriteText(t, code, stderr, "grant 1 of 1 (PVEVMUser on /vms/100) timed out and may or may not have been applied")
 	})
 }
 
@@ -217,7 +230,7 @@ func TestVMSet_C6_AHungQMSetIsOutcomeUnknown(t *testing.T) {
 	t.Setenv(roster.PassphraseEnvVar, rosterPassphrase)
 	within(t, 5*time.Second, func() {
 		code, _, stderr := runRootArgs("vm", "set", "--roster", rosterPath, "qa-pve-01", "100", "args=-cpu host")
-		timedOutText(t, code, stderr, "whether it took effect is unknown")
+		timedOutWriteText(t, code, stderr, "whether it took effect is unknown")
 	})
 	lockIsFree(t, rosterPath, lock.ObjectKey{TargetID: "qa-pve-01", Kind: "vm", ID: "100"})
 }

@@ -317,7 +317,7 @@ func TestRun_AT8_GrantsOnlyWhenATokenSurvives(t *testing.T) {
 	want := []Grant{{Path: "/", Role: "PVEVMAdmin", Propagate: true}}
 	failMeta := func(t *testing.T) {
 		orig := persistTargetMetaFn
-		persistTargetMetaFn = func(Options) error { return errors.New("meta write failed") }
+		persistTargetMetaFn = func(context.Context, Options) error { return errors.New("meta write failed") }
 		t.Cleanup(func() { persistTargetMetaFn = orig })
 	}
 	minted := func(t *testing.T) (*Result, error) {

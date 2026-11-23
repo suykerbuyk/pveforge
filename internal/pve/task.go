@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"net/url"
 	"regexp"
 	"strings"
@@ -161,6 +162,7 @@ type taskOutcomeUnknownError struct {
 }
 
 func (e *taskOutcomeUnknownError) Error() string { return e.cause.Error() }
+
 func (e *taskOutcomeUnknownError) Unwrap() error { return e.cause }
 
 // maxConsecutiveTransientPolls is how many task-status polls in a row may
@@ -242,7 +244,7 @@ func (c *Client) WaitForTask(ctx context.Context, node, upid string) error {
 		prefix += " " + upid
 	}
 	outcomeUnknown := func(cause error) error {
-		return fmt.Errorf("%s: %w", prefix, &taskOutcomeUnknownError{cause: cause})
+		return fmt.Errorf("%s: %w", prefix, &taskOutcomeUnknownError{cause: dispatch.Unobserve(cause)})
 	}
 	// The UPID's own shape is checked before the node, so a caller with no
 	// independent node (cmd/pveforge's `api` verbs on a node-less path pass

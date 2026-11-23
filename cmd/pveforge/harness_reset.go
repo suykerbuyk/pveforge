@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness"
 	"github.com/suykerbuyk/pveforge/internal/harness/outer"
 	"github.com/suykerbuyk/pveforge/internal/harness/reset"
@@ -144,7 +145,7 @@ static layer; the three VMs are locked for the whole run.`,
 			unlock, err := lock.Mutation(cmd.Context(), setup.rosterPath, harnessVMKey(args[0], vmid))
 			if err != nil {
 				release()
-				return fmt.Errorf("acquire lock: %w", err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err)) // lock files are bookkeeping: exit 4 while the gate is closed
 			}
 			unlocks = append(unlocks, unlock)
 		}
@@ -200,7 +201,7 @@ three VMs are locked for the whole run.`,
 			unlock, err := lock.Mutation(cmd.Context(), setup.rosterPath, harnessVMKey(args[0], vmid))
 			if err != nil {
 				release()
-				return fmt.Errorf("acquire lock: %w", err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock: %w", err)) // lock files are bookkeeping: exit 4 while the gate is closed
 			}
 			unlocks = append(unlocks, unlock)
 		}

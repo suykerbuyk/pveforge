@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suykerbuyk/pveforge/internal/bootstrap"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/tlspin"
@@ -42,7 +43,7 @@ the target's bootstrap lock.`,
 				return err
 			}
 			if err := roster.ValidateTargetID(args[0]); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			var want tlspin.Pin
 			if cmd.Flags().Changed("expect") {
@@ -50,13 +51,13 @@ the target's bootstrap lock.`,
 				// unset variable) is refused, never read as "no --expect".
 				p, err := tlspin.Parse(expect)
 				if err != nil {
-					return err
+					return dispatch.Refuse(cmd.Context(), err)
 				}
 				want = p
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			popts := bootstrap.PinTLSOptions{
 				TargetID: args[0], RosterPath: rosterPath,
@@ -65,15 +66,15 @@ the target's bootstrap lock.`,
 			// The mode refusals before the passphrase: they read only the
 			// roster's unencrypted fields.
 			if err := bootstrap.CheckPinTLS(popts); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			rawPassphrase, err := promptRosterPassphrase(cmd.Context())
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			popts.Passphrase, err = proveRosterPassphrase(rosterPath, args[0], rawPassphrase)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			res, err := bootstrap.PinTLS(cmd.Context(), popts, newBootstrapTransport(), newBootstrapValidator())
 			if res != nil && res.Pin != "" {

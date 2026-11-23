@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness/outer"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 )
@@ -107,7 +108,7 @@ func (d *Driver) run(ctx context.Context, what string, flow func(context.Context
 	if err := d.staticLayer(ctx); err != nil {
 		return err // the first PVE call; before evidence (gr_probe, golden-reset.sh:126)
 	}
-	if err := d.rosterGate(); err != nil {
+	if err := d.rosterGate(ctx); err != nil {
 		return err // pre-change, no PVE call (gr_accept_bin, golden-reset.sh:95-98)
 	}
 	if err := d.openEvidence(); err != nil {
@@ -126,7 +127,8 @@ func (d *Driver) staticLayer(ctx context.Context) error {
 		return fmt.Errorf("the capability probe's static layer refused storage %s: %v", d.p.Storage, err)
 	}
 	if reason := st.Unsuitable(d.p.MinFreeGiB); reason != "" {
-		return fmt.Errorf("the capability probe's static layer refused storage %s: %s", d.p.Storage, reason)
+		// A precondition refusal, raised before any request that changes state.
+		return d.refuse(ctx, fmt.Sprintf("the capability probe's static layer refused storage %s: %s", d.p.Storage, reason))
 	}
 	return nil
 }
@@ -135,12 +137,12 @@ func (d *Driver) staticLayer(ctx context.Context) error {
 // acceptance needs the nested roster and the outer-roster list named, and
 // refuses before any change if either is missing (spec "no nested roster"
 // leg, :434). Only presence is checked here; the nested dial is Accept's.
-func (d *Driver) rosterGate() error {
+func (d *Driver) rosterGate(ctx context.Context) error {
 	if os.Getenv("PVEFORGE_HARNESS_ROSTER") == "" {
-		return errors.New("PVEFORGE_HARNESS_ROSTER must name the nested harness roster: acceptance reads the nested cluster through it")
+		return d.refuse(ctx, "PVEFORGE_HARNESS_ROSTER must name the nested harness roster: acceptance reads the nested cluster through it")
 	}
 	if os.Getenv("PVEFORGE_HARNESS_OUTER_ROSTERS") == "" {
-		return errors.New("PVEFORGE_HARNESS_OUTER_ROSTERS must list the outer rosters: acceptance refuses any overlap with them")
+		return d.refuse(ctx, "PVEFORGE_HARNESS_OUTER_ROSTERS must list the outer rosters: acceptance refuses any overlap with them")
 	}
 	return nil
 }
@@ -158,7 +160,7 @@ func (d *Driver) golden(ctx context.Context) error {
 		}
 		has := hasGolden(snaps)
 		if has && !d.p.Replace {
-			return d.die(fmt.Sprintf("VM %d already has %s; replacing the golden point needs --replace-golden", vmid, goldenName))
+			return d.refuse(ctx, fmt.Sprintf("VM %d already has %s; replacing the golden point needs --replace-golden", vmid, goldenName))
 		}
 		if has {
 			d.goldenState[vmid] = "old"
@@ -172,7 +174,7 @@ func (d *Driver) golden(ctx context.Context) error {
 	// Graceful shutdown, nodes before storage, each then read stopped.
 	for _, vmid := range stopOrder {
 		if err := d.postLeaf(ctx, vmid, "status/shutdown", "shutdown", url.Values{"timeout": {"300"}}); err != nil {
-			return d.die(fmt.Sprintf("VM %d: the shutdown failed: %v", vmid, err))
+			return d.dief("VM %d: the shutdown failed: %w", vmid, err)
 		}
 		if err := d.confirmStopped(ctx, vmid); err != nil {
 			return err
@@ -188,11 +190,11 @@ func (d *Driver) golden(ctx context.Context) error {
 			}
 			if hasGolden(snaps) {
 				if err := d.guardChange(ctx, vmid); err != nil {
-					return d.die(err.Error())
+					return d.dief("%w", err)
 				}
 				// Delete that ONE name (never an empty slice, snapshot.go:683-688).
 				if _, err := d.client.CascadeDeleteSnapshots(ctx, vmid, []string{goldenName}); err != nil {
-					return d.die(fmt.Sprintf("VM %d: deleting the old %s failed: %v", vmid, goldenName, err))
+					return d.dief("VM %d: deleting the old %s failed: %w", vmid, goldenName, err)
 				}
 				d.goldenState[vmid] = "none"
 				d.step(fmt.Sprintf("VM %d: the old %s deleted (--replace-golden)", vmid, goldenName))
@@ -204,7 +206,7 @@ func (d *Driver) golden(ctx context.Context) error {
 	for _, vmid := range VMIDs {
 		params := url.Values{"snapname": {goldenName}, "vmstate": {"0"}, "description": {descPrefix + d.stamp}}
 		if err := d.postLeaf(ctx, vmid, "snapshot", "snapshot", params); err != nil {
-			return d.die(fmt.Sprintf("VM %d: taking %s failed: %v", vmid, goldenName, err))
+			return d.dief("VM %d: taking %s failed: %w", vmid, goldenName, err)
 		}
 		d.goldenState[vmid] = "new"
 		snaps, err := d.readSnapshots(ctx, vmid, "snapshots-after")
@@ -245,18 +247,18 @@ func (d *Driver) reset(ctx context.Context) error {
 		}
 		newer, err := d.newerThanGolden(vmid, snaps)
 		if err != nil {
-			return err
+			return dispatch.Refuse(ctx, err) // a refusal of the snapshot state, before the first request that changes anything
 		}
 		stamp, err := d.goldenStamp(vmid, snaps)
 		if err != nil {
-			return err
+			return dispatch.Refuse(ctx, err)
 		}
 		state[vmid] = &vmReset{newer: newer, stamp: stamp}
 	}
 	// The three goldens must be ONE point (reset.sh:82-86).
 	for _, vmid := range VMIDs {
 		if state[vmid].stamp != state[VMIDs[0]].stamp {
-			return d.die("the goldens are not one point: " + stampList(state))
+			return d.refuse(ctx, "the goldens are not one point: "+stampList(state))
 		}
 	}
 	d.step("the goldens are one point: stamp " + state[VMIDs[0]].stamp)
@@ -276,7 +278,7 @@ func (d *Driver) reset(ctx context.Context) error {
 		}
 		if st != "stopped" {
 			if err := d.postLeaf(ctx, vmid, "status/stop", "stop", nil); err != nil {
-				return d.die(fmt.Sprintf("VM %d: the stop failed: %v", vmid, err))
+				return d.dief("VM %d: the stop failed: %w", vmid, err)
 			}
 		}
 		if err := d.confirmStopped(ctx, vmid); err != nil {
@@ -290,17 +292,17 @@ func (d *Driver) reset(ctx context.Context) error {
 		names := state[vmid].newer
 		if len(names) > 0 {
 			if err := d.guardChange(ctx, vmid); err != nil {
-				return d.die(err.Error())
+				return d.dief("%w", err)
 			}
 			if _, err := d.client.CascadeDeleteSnapshots(ctx, vmid, names); err != nil {
-				return d.die(fmt.Sprintf("VM %d: deleting its newer snapshots failed: %v", vmid, err))
+				return d.dief("VM %d: deleting its newer snapshots failed: %w", vmid, err)
 			}
 			for _, n := range names {
 				d.step(fmt.Sprintf("VM %d: snapshot %s deleted", vmid, n))
 			}
 		}
 		if err := d.postLeaf(ctx, vmid, "snapshot/"+goldenName+"/rollback", "rollback", nil); err != nil {
-			return d.die(fmt.Sprintf("VM %d: the rollback to %s failed: %v", vmid, goldenName, err))
+			return d.dief("VM %d: the rollback to %s failed: %w", vmid, goldenName, err)
 		}
 		d.step(fmt.Sprintf("VM %d: rolled back to %s", vmid, goldenName))
 	}
@@ -335,10 +337,10 @@ func (d *Driver) checkVM(ctx context.Context, vmid int) error {
 		store = store[:i]
 	}
 	if store != d.p.Storage {
-		return d.die(fmt.Sprintf("VM %d: its system disk is on '%s', not the required storage %s", vmid, store, d.p.Storage))
+		return d.refuse(ctx, fmt.Sprintf("VM %d: its system disk is on '%s', not the required storage %s", vmid, store, d.p.Storage))
 	}
 	if conf.Lock != "" {
-		return d.die(fmt.Sprintf("VM %d holds lock '%s'; lib cannot clear it. Operator ask: qm unlock %d on %s, as root", vmid, conf.Lock, vmid, d.cfg.Node))
+		return d.refuse(ctx, fmt.Sprintf("VM %d holds lock '%s'; lib cannot clear it. Operator ask: qm unlock %d on %s, as root", vmid, conf.Lock, vmid, d.cfg.Node))
 	}
 	return nil
 }
@@ -402,7 +404,7 @@ func (d *Driver) postLeaf(ctx context.Context, vmid int, sub, set string, params
 func (d *Driver) start(ctx context.Context) error {
 	for _, vmid := range startOrder {
 		if err := d.postLeaf(ctx, vmid, "status/start", "start", nil); err != nil {
-			return d.die(fmt.Sprintf("VM %d: the start failed: %v", vmid, err))
+			return d.dief("VM %d: the start failed: %w", vmid, err)
 		}
 		d.step(fmt.Sprintf("VM %d: started", vmid))
 	}
@@ -417,7 +419,10 @@ func (d *Driver) guardChange(ctx context.Context, vmid int) error {
 // golden-reset.sh:113-119).
 func (d *Driver) accept(ctx context.Context, deadline time.Duration, why string) error {
 	if err := d.p.Accept(ctx, deadline, why); err != nil {
-		return d.fail(fmt.Sprintf("accept (%s): the nested cluster was not accepted: %v", why, err))
+		// golden's FIRST acceptance runs before any request that changes state: a
+		// refusal then (exit 4). Every later acceptance runs after a write, where
+		// dispatch.Refuse returns the plain error (exit 1).
+		return dispatch.Refuse(ctx, d.fail(fmt.Sprintf("accept (%s): the nested cluster was not accepted: %v", why, err)))
 	}
 	d.step(fmt.Sprintf("accepted (%s)", why))
 	return nil
@@ -639,6 +644,19 @@ func (d *Driver) appendSteps(line string) {
 // die records nothing itself: the gr_on_exit line (FAILED exit) is written by
 // onExit when the flow returns this error (the _harness_die path).
 func (d *Driver) die(reason string) error { return errors.New(reason) }
+
+// dief is die with a format that may carry %w, so the cause's chain survives:
+// a task wait that started and did not observe is exit 3 at runRoot, which
+// reads the chain. The text is exactly what the flattened %v form printed.
+func (d *Driver) dief(format string, args ...any) error { return fmt.Errorf(format, args...) }
+
+// refuse states a precondition refusal. It is dispatch.Refuse'd, so it is exit 4
+// while the run's write gate is closed and a plain error after any request that
+// changes state. The evidence directory and the steps file written before it
+// are local bookkeeping, not a mutation.
+func (d *Driver) refuse(ctx context.Context, reason string) error {
+	return dispatch.Refuse(ctx, d.die(reason))
+}
 
 // fail is gr_fail (golden-reset.sh:85-90): it records "FAILED <reason>" and
 // sets the flag so onExit does not add a second "FAILED exit" line.

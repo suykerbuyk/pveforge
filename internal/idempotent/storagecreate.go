@@ -252,12 +252,8 @@ func jsonScalar(raw json.RawMessage) string {
 // with a bare UPID scalar instead, the task is waited on (NOT live-verified;
 // correct either way).
 func (op *StorageCreate) Apply(ctx context.Context) error {
-	if err := op.Validate(); err != nil {
+	if err := op.refuse(); err != nil {
 		return err
-	}
-
-	if op.current != "" && !op.matches(op.current) {
-		return &StorageDiffersError{Name: op.Name, Desired: op.Params, Actual: op.current}
 	}
 
 	raw, err := op.Client.CreateStorage(ctx, op.Name, op.Params)
@@ -272,6 +268,24 @@ func (op *StorageCreate) Apply(ctx context.Context) error {
 	}
 	return nil
 }
+
+// refuse is the pre-POST refusal: an invalid op, or a present storage whose
+// definition differs from the request.
+func (op *StorageCreate) refuse() error {
+	if err := op.Validate(); err != nil {
+		return err
+	}
+	if op.current != "" && !op.matches(op.current) {
+		return &StorageDiffersError{Name: op.Name, Desired: op.Params, Actual: op.current}
+	}
+	return nil
+}
+
+// Preflight is idempotent.Preflighter: Apply's refusals before its POST (an
+// invalid op, a differing definition: "NO POST"), run before Apply so Run can
+// state them as "refused before any write" (exit 4). Apply repeats the same
+// check for a direct caller.
+func (op *StorageCreate) Preflight(_ context.Context) error { return op.refuse() }
 
 // upidIfScalar reports whether raw — CreateStorage's already-unwrapped
 // response — is a bare PVE task-id scalar ("UPID:..."). POST /storage is

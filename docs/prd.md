@@ -576,20 +576,30 @@ command tree (`make man`) and held to it byte for byte
   that ended `WARNINGS: <n>`, which counts as success), warnings (a result
   that could not be re-read) and errors go to stderr. An error prints as one
   line, elided past 4 KiB.
-- **Exit status.** 0 success, including a printed warning; 1 failure,
-  including a usage error (an unknown subcommand, or a bare command group);
-  3 the outcome is unknown (a change was dispatched and how it ended was not
-  observed; `api post`/`put`/`delete`, for a task wait that ran out or could
-  not be completed, and `vm destroy`); 4 refused before anything was
-  dispatched (`vm destroy`; `doctor` when a privilege is missing, unknown or not
-  checked: pass `--vmid`, or grant what is missing; and `acl enable-vm-destroy`
-  when its plan was declined, or no terminal could be asked and `--yes` was not
-  given); `acl enable-vm-destroy` exits 1, not 4, when the grant was written (or
-  already in place) and the vm-destroy verdict is not ready; 130 interrupted by SIGINT, 143 by SIGTERM, which win over 3
-  and 4. Asking for help exits 0. `exec` exits with its command's own status
-  once it hands over. A second signal
-  kills the process at once; the kernel releases any lock it held. The README
-  holds the table, and `cmd/pveforge/readme_test.go` holds it to the code.
+- **Exit status.** (A summary: the README's "Exit status" table and its two
+  per-command lists are authoritative, and the code's exit registry is held to
+  them.) 0 success, including a printed warning; 1 failure, including a usage
+  error and a task seen to fail; 3 the outcome is unknown: a change was
+  dispatched and how it ended was not observed (a PVE task wait that started
+  and did not observe, or a root-SSH write that was sent and timed out; every
+  command that dispatches a change, `api post`/`put`/`delete` and `vm destroy`
+  among them); 4 refused before anything was changed (every command that can
+  refuse before it dispatches, `vm destroy`, `doctor` (when a privilege is missing,
+  unknown or not checked: pass `--vmid`, or grant what is missing) and
+  `acl enable-vm-destroy` among them; `acl enable-vm-destroy` exits 1, not 4, when the grant was written
+  or already in place and the vm-destroy verdict is not ready); 130 interrupted
+  by SIGINT, 143 by SIGTERM, which win over 3 and 4. Asking for help exits 0.
+  **The invariant: exit 4 never follows a mutation.** A mutation is state on a
+  PVE host (a REST request other than GET or HEAD that leaves the process, a
+  root-SSH write, an SSH key install or removal) or a write to the roster file.
+  Local bookkeeping is not a mutation and may precede a 4: `<roster>.lock` and
+  `<roster>.locks/`, harness evidence, the harness ledger, the probe's
+  `harness-state/`, the harness's `harness-nested.known_hosts`. It is enforced by a run-scoped write gate
+  (`internal/dispatch`) that the write funnels open and that decides 4 by
+  state, never by an error's name. `exec` exits with its command's own status
+  once it hands over (the named state `child_status`); `api … --no-wait` with a
+  UPID exits 0 (the named state `unobserved_dispatch`). A second signal kills
+  the process at once; the kernel releases any lock it held.
 - **`vm destroy`.** The destroy-retry-safety contract: before it dispatches,
   the verb asks PVE (never a local file) whether a destroy, migrate, clone,
   restore, stop or shutdown of the vmid is unfinished, and refuses while one
@@ -1155,6 +1165,7 @@ both ways, plane included.
 | `internal/sshexec` | production | The SSH transport: pinned host keys, deadlines, a per-call output limit, `qm set`, file writes, bridge and link state, key install |
 | `internal/tlspin` | production | The SPKI pin form, the per-handshake check, the capture command and its output cap |
 | `internal/kvjson` | production | §3.6's kv and JSON contract |
+| `internal/dispatch` | production | §3.6's exit 3 and 4: the run-scoped write gate (`Gate`, `Open`, `Refuse`, `Unobserved`) that the REST, root-SSH, idempotent and roster-writer funnels open, so exit 4 is decided by state and never follows a write |
 | `internal/nodump` | production | Makes the process non-dumpable before it holds a decrypted secret (`exec`) |
 | `internal/harnesssecrets` | harness library | The age-sealed harness environment (§4.1) |
 | `internal/harness` | production | The nested-harness guard (`harness.Open`) and acceptance checks (§7.7); the `harness golden`/`harness reset` verbs reuse its in-process acceptance (`harness.Await`/`AcceptOnce`) |

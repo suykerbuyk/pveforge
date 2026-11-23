@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 )
 
@@ -99,6 +100,16 @@ type ReReader interface {
 // no-op, and without this check would tell the operator nothing.
 type NoopChecker interface {
 	PostNoop(ctx context.Context) error
+}
+
+// Preflighter is implemented by an Op whose first checks must run, and may
+// REFUSE, before anything is written. Run calls Preflight after Read and
+// before Apply, only on a run that is about to Apply; its error is wrapped
+// with dispatch.Refuse (exit 4 while the run's write gate is still closed).
+// What an Op's Apply says "nothing was staged" about belongs here: after
+// Apply's first write the same sentence would be false.
+type Preflighter interface {
+	Preflight(ctx context.Context) error
 }
 
 // ErrConflict, when an Op's Apply returns an error wrapping this (via
@@ -175,7 +186,11 @@ type Result struct {
 func Run(ctx context.Context, rosterPath string, key lock.ObjectKey, op Op, force bool) (Result, error) {
 	unlock, err := lock.Mutation(ctx, rosterPath, key)
 	if err != nil {
-		return Result{}, fmt.Errorf("idempotent: %s: %w", key, err)
+		// A lock-wait timeout here is before this verb's first write. The
+		// lock files are bookkeeping, not a mutation, so the refusal is 4
+		// while the gate is closed; it is the gate's state, never the
+		// sentinel, that decides (a verb that wrote earlier gets exit 1).
+		return Result{}, dispatch.Refuse(ctx, fmt.Errorf("idempotent: %s: %w", key, err))
 	}
 	defer func() { _ = unlock() }()
 
@@ -199,6 +214,15 @@ func Run(ctx context.Context, rosterPath string, key lock.ObjectKey, op Op, forc
 			return result, nil
 		}
 
+		if pf, ok := op.(Preflighter); ok {
+			if err := pf.Preflight(ctx); err != nil {
+				return Result{}, dispatch.Refuse(ctx, fmt.Errorf("idempotent: %s: preflight: %w", key, err))
+			}
+		}
+		// Apply is where Op writes. Opened immediately before it, so any
+		// refusal Apply makes (or any failure after its first request) is
+		// exit 1, never 4: a check that must stay 4 is a Preflight.
+		dispatch.Open(ctx)
 		if err := op.Apply(ctx); err != nil {
 			if errors.Is(err, ErrConflict) && attempt < maxConflictRetries {
 				continue

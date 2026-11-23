@@ -56,6 +56,7 @@ type grvm struct {
 }
 
 type grfake struct {
+	reqLog
 	mu sync.Mutex
 
 	storage    string
@@ -117,6 +118,9 @@ func (v *grvm) snapshotJSON() string {
 func (f *grfake) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.see(w, r) {
+		return
+	}
 	data := func(raw string) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"data":%s}`, raw)

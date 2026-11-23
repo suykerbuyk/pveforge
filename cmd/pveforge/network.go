@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
@@ -163,7 +164,8 @@ status is still 0.`,
 			// already-satisfied-but-malformed op. Same reasoning as
 			// newVMSetCmd's own explicit Validate() call.
 			if err := op.Validate(); err != nil {
-				return err
+				// nothing has been sent: a refusal before any write (exit 4)
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 
 			// Report what actually happened, not what was asked for.
@@ -241,7 +243,8 @@ status is still 0.`,
 			op := idempotent.NewNetworkBridgeDestroy(client, client.Node(), args[1], managementBridge)
 
 			if err := op.Validate(); err != nil {
-				return err
+				// nothing has been sent: a refusal before any write (exit 4)
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 
 			// Report what actually happened, not what was asked for.
@@ -342,7 +345,8 @@ status is still 0.`,
 			// never runs at all. Same reasoning as newNetworkBridgeCreateCmd's
 			// and newVMSetCmd's own explicit-Validate comment.
 			if err := op.Validate(); err != nil {
-				return err
+				// nothing has been sent: a refusal before any write (exit 4)
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 
 			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)

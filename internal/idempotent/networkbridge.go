@@ -233,6 +233,9 @@ type NetworkBridgeEnsure struct {
 	currentFields  map[string]json.RawMessage
 	preStanzaHash  string
 	preKernelState sshexec.LinkState
+
+	// pf is what Preflight's run of prestage left for Apply (nil: none).
+	pf *bridgePrestage
 }
 
 // Validate reports whether op is well-formed. Node, Iface, and
@@ -527,63 +530,13 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 		return err
 	}
 
-	// --- Step 1: pre-stage snapshot of ManagementBridge -----------------
-	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.ManagementBridge)
+	// --- Step 1: pre-stage snapshot of ManagementBridge, and the create's
+	// existence/type read. Run's Preflight (below) normally ran it already,
+	// between Read and here, so the requests are issued exactly once and
+	// in the same order; a direct caller of Apply runs it here.
+	converge, err := op.takePrestage(ctx)
 	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: pre-stage snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
-	}
-	if !exists {
-		return fmt.Errorf("network bridge ensure: %s: management bridge %s does not exist", op.Iface, op.ManagementBridge)
-	}
-	op.currentFields = fields
-	op.preStanzaHash, err = canonicalHash(fields)
-	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: %w", op.Iface, err)
-	}
-	op.preKernelState, err = op.Client.LinkState(ctx, op.ManagementBridge)
-	if err != nil {
-		return fmt.Errorf("network bridge ensure: %s: pre-stage kernel snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
-	}
-
-	// A create of an interface that already exists as another type cannot
-	// be what was asked: refuse it here, before anything is staged, rather
-	// than stage a create PVE (or the step-4 guard) would then reject. An
-	// existing interface of the SAME type is NOT refused: it is CONVERGED (a
-	// PUT in stage, below) instead of POSTed, so a dormant stanza is brought up
-	// rather than drawing PVE's "interface already exists".
-	//
-	// converge is declared at Apply scope and assigned ONLY from THIS create
-	// block's own existence read (never step 1's management-bridge `exists`,
-	// which is always true here — wiring converge off that would make every
-	// create a PUT). stage branches on it; there is exactly ONE existence read
-	// (this one), and stage must never issue a second GET of its own (a second
-	// read is no more atomic and narrows the gate so a test can pass while
-	// converge is ignored).
-	converge := false
-	if op.mode == modeCreate {
-		want := op.effectiveWanted()
-		existing, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
-		if err != nil {
-			return fmt.Errorf("network bridge ensure: %s: pre-stage read: %w", op.Iface, err)
-		}
-		if exists {
-			// got is the existing interface's type. The refusal is driven by
-			// the two conditions below — got == "" OR got != the wanted type:
-			// an absent key leaves got == "", and kvjson.Scalar yields "" (not
-			// an error) for an empty or non-scalar value, so got == "" already
-			// covers every "no usable type" case. There is NO "successful
-			// decode" guard to preserve here; converging requires a NON-EMPTY
-			// type equal to the wanted one, so we never PUT type="" at an iface
-			// PVE's update_network would then 400.
-			got := ""
-			if raw, ok := existing["type"]; ok {
-				got, _ = kvjson.Scalar(raw)
-			}
-			if got == "" || got != want["type"] {
-				return fmt.Errorf("network bridge ensure: %s: already exists as type %s, not %s; refusing to create it (nothing staged)", op.Iface, kvjson.QuoteValue(got), kvjson.QuoteValue(want["type"]))
-			}
-			converge = true
-		}
+		return err
 	}
 
 	// --- Step 2: stage -----------------------------------------------
@@ -700,6 +653,116 @@ func (op *NetworkBridgeEnsure) Apply(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// prestage is Apply's step 1, everything BEFORE the stage: the pre-stage
+// snapshot of ManagementBridge (fields, hash, kernel link state) and, for a
+// create, the one existence/type read of Iface. It returns refusal for what
+// is a REFUSAL (a missing management bridge; an existing interface of another
+// type: "nothing staged" is true there because nothing has been written) and
+// err for what is only a failed read. Both are nil on success.
+func (op *NetworkBridgeEnsure) prestage(ctx context.Context) (converge bool, refusal, err error) {
+	fields, exists, err := fetchInterface(ctx, op.Client, op.Node, op.ManagementBridge)
+	if err != nil {
+		return false, nil, fmt.Errorf("network bridge ensure: %s: pre-stage snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
+	}
+	if !exists {
+		return false, fmt.Errorf("network bridge ensure: %s: management bridge %s does not exist", op.Iface, op.ManagementBridge), nil
+	}
+	op.currentFields = fields
+	op.preStanzaHash, err = canonicalHash(fields)
+	if err != nil {
+		return false, nil, fmt.Errorf("network bridge ensure: %s: %w", op.Iface, err)
+	}
+	op.preKernelState, err = op.Client.LinkState(ctx, op.ManagementBridge)
+	if err != nil {
+		return false, nil, fmt.Errorf("network bridge ensure: %s: pre-stage kernel snapshot of management bridge %s: %w", op.Iface, op.ManagementBridge, err)
+	}
+
+	// A create of an interface that already exists as another type cannot
+	// be what was asked: refuse it before anything is staged, rather
+	// than stage a create PVE (or the step-4 guard) would then reject. An
+	// existing interface of the SAME type is NOT refused: it is CONVERGED (a
+	// PUT in stage) instead of POSTed, so a dormant stanza is brought up
+	// rather than drawing PVE's "interface already exists".
+	//
+	// converge is assigned ONLY from THIS create block's own existence read
+	// (never the management bridge's `exists`, which is always true here —
+	// wiring converge off that would make every create a PUT). stage branches
+	// on it; there is exactly ONE existence read (this one), and stage must
+	// never issue a second GET of its own.
+	if op.mode == modeCreate {
+		want := op.effectiveWanted()
+		existing, exists, err := fetchInterface(ctx, op.Client, op.Node, op.Iface)
+		if err != nil {
+			return false, nil, fmt.Errorf("network bridge ensure: %s: pre-stage read: %w", op.Iface, err)
+		}
+		if exists {
+			if err := op.createTypeMismatch(existing, want); err != nil {
+				return false, err, nil
+			}
+			converge = true
+		}
+	}
+	return converge, nil, nil
+}
+
+// createTypeMismatch is the "already exists as another type" refusal of a
+// create: nil when existing is an interface of the wanted type (converge it).
+// got == "" OR got != the wanted type refuses: an absent key leaves got == "",
+// and kvjson.Scalar yields "" (not an error) for an empty or non-scalar value,
+// so got == "" already covers every "no usable type" case; converging requires
+// a NON-EMPTY type equal to the wanted one, so we never PUT type="" at an
+// iface PVE's update_network would then 400.
+func (op *NetworkBridgeEnsure) createTypeMismatch(existing map[string]json.RawMessage, want map[string]string) error {
+	got := ""
+	if raw, ok := existing["type"]; ok {
+		got, _ = kvjson.Scalar(raw)
+	}
+	if got == "" || got != want["type"] {
+		return fmt.Errorf("network bridge ensure: %s: already exists as type %s, not %s; refusing to create it (nothing staged)", op.Iface, kvjson.QuoteValue(got), kvjson.QuoteValue(want["type"]))
+	}
+	return nil
+}
+
+// bridgePrestage is what Preflight's run of prestage left for Apply.
+type bridgePrestage struct {
+	converge bool
+	err      error // a failed READ: not a refusal, so Apply reports it (exit 1)
+}
+
+// Preflight is idempotent.Preflighter: it runs prestage between Read and
+// Apply, so the refusals that precede the stage are stated as "refused before
+// any write" (exit 4) -- an invalid op, a missing management bridge, a create
+// over an interface of another type. A failed READ is not a refusal: it is
+// kept for Apply, which returns it (exit 1). Everything after the stage
+// (guard, canary compare, revert, kernel checks) stays in Apply, exit 1.
+func (op *NetworkBridgeEnsure) Preflight(ctx context.Context) error {
+	op.pf = nil
+	if err := op.Validate(); err != nil {
+		return err
+	}
+	converge, refusal, err := op.prestage(ctx)
+	if refusal != nil {
+		return refusal
+	}
+	op.pf = &bridgePrestage{converge: converge, err: err}
+	return nil
+}
+
+// takePrestage returns Preflight's result when there is one (consuming it),
+// else runs prestage itself (a direct caller of Apply). In that case the
+// refusal is returned as a plain error, as it always was.
+func (op *NetworkBridgeEnsure) takePrestage(ctx context.Context) (bool, error) {
+	if pf := op.pf; pf != nil {
+		op.pf = nil
+		return pf.converge, pf.err
+	}
+	converge, refusal, err := op.prestage(ctx)
+	if refusal != nil {
+		return false, refusal
+	}
+	return converge, err
 }
 
 // guardSelfCheck is Apply's step 4: re-reads Iface itself (never

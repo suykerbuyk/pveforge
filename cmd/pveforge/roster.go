@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"os"
 	"strconv"
 	"strings"
@@ -52,15 +53,16 @@ func newRosterInitCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := resolveRosterPath(cmd, args)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			if !force {
 				if _, err := os.Stat(path); err == nil {
-					return fmt.Errorf("%s already exists (use --force to overwrite)", path)
+					return dispatch.Refuse(cmd.Context(), fmt.Errorf("%s already exists (use --force to overwrite)", path))
 				} else if !os.IsNotExist(err) {
-					return err
+					return dispatch.Refuse(cmd.Context(), err)
 				}
 			}
+			dispatch.Open(cmd.Context()) // a roster write (the file is written next)
 			if err := os.WriteFile(path, []byte(rosterTemplate), 0o600); err != nil {
 				return fmt.Errorf("write %s: %w", path, err)
 			}

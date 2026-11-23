@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -134,19 +135,34 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 				unlock, err = lock.Mutation(cmd.Context(), rosterPath, key)
 			}
 			if err != nil {
-				return fmt.Errorf("acquire lock for %s: %w", key, err)
+				lockErr := fmt.Errorf("acquire lock for %s: %w", key, err)
+				if method == http.MethodGet {
+					return lockErr // a safe verb never refuses with 4
+				}
+				// The lock files are bookkeeping, not a mutation, and no request
+				// has been sent: the gate is closed, so this is a refusal (4).
+				return dispatch.Refuse(cmd.Context(), lockErr)
 			}
 			defer func() { _ = unlock() }()
 		} else if method != http.MethodGet {
 			if !unsafeNoLock {
-				return fmt.Errorf("path %q does not match a known pveforge-managed object type (vm/node/storage/network); pass --unsafe-no-lock to proceed without internal/lock protection", rawPath)
+				// Raised before any request: refused (exit 4) by gate state.
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("path %q does not match a known pveforge-managed object type (vm/node/storage/network); pass --unsafe-no-lock to proceed without internal/lock protection", rawPath))
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: path %q does not match a known pveforge-managed object type — proceeding WITHOUT internal/lock protection (--unsafe-no-lock); concurrent pveforge mutations against this target/path are not serialized\n", rawPath)
 		}
 
 		result, err := client.RawRequest(cmd.Context(), method, rawPath, params)
 		if err != nil {
-			return err
+			if method == http.MethodGet {
+				return err // a safe verb never refuses with 4
+			}
+			// The request's own error. While the gate is still closed no
+			// request left the process (the /access refusal is raised by the
+			// round tripper before it opens the gate): a refusal, exit 4. Once
+			// the round tripper opened it (a dial, a TLS, a lost response) the
+			// same error is plain, exit 1: not proof that nothing changed (A6).
+			return dispatch.Refuse(cmd.Context(), err)
 		}
 		if upid, ok := responseUPID(method, result); ok {
 			// stderr, at dispatch: the caller has the task id even while the
@@ -160,12 +176,11 @@ func newAPIVerbCmd(method, use string) *cobra.Command {
 				}
 			} else if err := waitForAPITask(cmd.Context(), client, rawPath, upid, waitTimeout); err != nil {
 				// The task was dispatched. A wait that ended without
-				// observing how it ended exits 3, not 1; a task seen to
-				// fail stays a plain error (1). Only here: the request's own
-				// error above returns before any task exists.
-				if pve.IsTaskOutcomeUnknown(err) {
-					return newOutcomeUnknownError(err)
-				}
+				// observing how it ended is exit 3 at WaitForTask itself
+				// (its error carries dispatch.Unobserve; this returns it with the
+				// chain intact, never flattened); a task seen to fail stays a
+				// plain error (1). Only here: the request's own error above
+				// returns before any task exists.
 				return err
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/roster"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
 )
@@ -88,6 +89,30 @@ type fakeSession struct {
 	closed    bool
 	commands  []string
 	attempted []string
+	// writeLog is the session's OWN, independent record of host-state-changing
+	// commands it was sent (judged by the command text, never by the ctx mark):
+	// the observer the write-gate fixtures compare the gate against.
+	// unmarkedWrites are those of them that arrived on a ctx WITHOUT
+	// sshexec.WithWrite: a write site that lost its mark.
+	writeLog       []string
+	unmarkedWrites []string
+	// quietWrites: the session does not report a write to the gate (no
+	// NoteWrite). Isolation fixtures only (writegate_s5_test.go): they must
+	// see ONE roster writer's own dispatch.Open, which a token command's
+	// funnel would otherwise mask.
+	quietWrites bool
+}
+
+// isHostWrite classifies a command as a host-state write by its text: a pveum
+// token add/remove, an ACL change, a user/group write, or the authorized_keys
+// removal script. It never looks at the ctx.
+func isHostWrite(cmd string) bool {
+	for _, p := range []string{"pveum user token add", "pveum user token remove", "pveum acl modify", "pveum user add", "pveum user modify", "pveum group add", "pveum group modify", "pveum role add", "pveum role modify"} {
+		if strings.HasPrefix(cmd, p) {
+			return true
+		}
+	}
+	return strings.Contains(cmd, "authorized_keys")
 }
 
 type fakeRunResult struct {
@@ -135,6 +160,32 @@ func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
 	if err := ctx.Err(); err != nil {
 		return RunResult{}, err
 	}
+	// The command is sent from here, exactly where sshexec.Client.Run opens the
+	// run's write gate (a marked ctx) and, if the send then times out, builds
+	// dispatch.Unobserved. This fake never reaches Run, so it reports the write
+	// the same way.
+	if !s.quietWrites {
+		sshexec.NoteWrite(ctx)
+	}
+	markedWrite := sshexec.IsWrite(ctx)
+	if isHostWrite(cmd) {
+		s.writeLog = append(s.writeLog, cmd)
+		if !markedWrite {
+			s.unmarkedWrites = append(s.unmarkedWrites, cmd)
+			// G6: a fake that opened the gate for a write whatever its ctx
+			// carried would HIDE a lost sshexec.WithWrite. Every bootstrap
+			// fixture therefore fails, here, the moment a host write arrives
+			// without the mark: production's NoteWrite (which opens only a
+			// marked ctx) is the only opener this fake has.
+			panic("bootstrap fake: a host write arrived WITHOUT the sshexec.WithWrite mark (a lost mark): " + cmd)
+		}
+	}
+	unobserved := func(err error) error {
+		if markedWrite && writeOutcomeUnknown(err) {
+			return dispatch.Unobserve(err)
+		}
+		return err
+	}
 	var match *fakeRunResult
 	best := -1
 	seqKey := ""
@@ -161,6 +212,11 @@ func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
 		match.onRun(ctx, cmd)
 	}
 	if err := ctx.Err(); err != nil {
+		// Done after the send (a hook ran): like Run's ctx.Done branch, any
+		// ended marked write is an unobserved dispatch.
+		if markedWrite {
+			return RunResult{}, dispatch.Unobserve(err)
+		}
 		return RunResult{}, err
 	}
 	s.commands = append(s.commands, cmd)
@@ -178,7 +234,7 @@ func (s *fakeSession) Run(ctx context.Context, cmd string) (RunResult, error) {
 		if (match.err == nil && match.res.ExitCode == 0) || match.applies {
 			apply()
 		}
-		return match.res, match.err
+		return match.res, unobserved(match.err)
 	}
 	switch {
 	case strings.HasPrefix(cmd, "pveum role list"):
@@ -267,7 +323,12 @@ type fakeTransport struct {
 	// (the fresh session after a transport error); otherwise session.
 	reconnectSession *fakeSession
 
-	installCalls            int
+	installCalls int
+	installSent  int // installs whose script was sent (a write on the node)
+	// quietInstall: the install does NOT open the write gate. Used only by the
+	// isolation fixtures (writegate_s5_test.go) that must see ONE roster
+	// writer's own dispatch.Open, which an earlier install would otherwise mask.
+	quietInstall            bool
 	dialCalls               int
 	reconnectCalls          int
 	installedKeyLines       []string // every authorizedKeyLine InstallPubkeyViaPassword was called with, in order
@@ -277,11 +338,25 @@ type fakeTransport struct {
 	reconnectedKeys         [][]byte
 }
 
-func (t *fakeTransport) InstallPubkeyViaPassword(_ context.Context, addr, user, password, authorizedKeyLine, pin string) (string, error) {
+func (t *fakeTransport) InstallPubkeyViaPassword(ctx context.Context, addr, user, password, authorizedKeyLine, pin string) (string, error) {
 	t.installCalls++
 	t.installedKeyLines = append(t.installedKeyLines, authorizedKeyLine)
 	t.installPins = append(t.installPins, pin)
+	if t.installErr != nil && errors.Is(t.installErr, sshexec.ErrNoCommandSent) {
+		return "", t.installErr // the dial failed: nothing was sent, the gate stays closed
+	}
+	// Past the dial the install script IS sent (sshexec.InstallPubkeyViaPassword
+	// runs it under WithWrite): the run's write gate opens here, and a
+	// send that timed out is an unobserved dispatch, as the funnel builds it.
+	wctx := sshexec.WithWrite(ctx)
+	if !t.quietInstall {
+		sshexec.NoteWrite(wctx)
+	}
+	t.installSent++
 	if t.installErr != nil {
+		if writeOutcomeUnknown(t.installErr) {
+			return "", dispatch.Unobserve(t.installErr)
+		}
 		return "", t.installErr
 	}
 	if pin != "" {

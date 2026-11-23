@@ -543,14 +543,97 @@ Residuals the command states rather than hides:
 |---|---|
 | `0` | Success, including a command that completed with a printed warning, or completed although it was interrupted after its outcome was observed |
 | `1` | The command failed, including a usage error: an unknown subcommand, or a command group such as `vm` run with no subcommand (its help goes to stderr). Asking for help (`--help`, `-h`, `pveforge help vm`) exits 0. `acl enable-vm-destroy` also exits 1 when it wrote the grant, or found it already in place, and `vm destroy`'s reads still do not all succeed (the report's `wrote` and `ready` say which) |
-| `3` | The outcome is unknown: the command dispatched a change to PVE and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Exit 3 is what `api post`, `api put`, `api delete` and `vm destroy` report (a signal during the wait is 130 or 143 instead). Look the task up by the UPID printed at dispatch, or re-run `vm destroy`. The other commands that wait on a task (`vm create`, the snapshot and network commands) report the same condition in their error text and still exit `1` |
-| `4` | The command was refused before it dispatched anything: nothing was changed, so wait and re-run. `vm destroy`, `doctor` and `acl enable-vm-destroy` are the commands that exit 4; `doctor` exits 4 when any privilege is missing, unknown or not checked, so pass `--vmid` to check the VM privileges, or grant what is missing; `acl enable-vm-destroy` exits 4 when its plan was declined at the prompt, or there was no terminal to ask on and no `--yes` |
+| `3` | The outcome is unknown: the command dispatched a change and did not observe how it ended, so it may have been applied, may still be running, or may have failed. Every command that dispatches a change can exit 3 (the list is below): a PVE task wait that started and did not observe its task (`vm destroy`, `vm create`, `vm snapshot …`, `network …`, `storage …`, `api post|put|delete`, the `harness` verbs), and a root-SSH write that was sent and then ran out of time (`acl grant`, `user ensure`, `group ensure`, `acl enable-vm-destroy`, `bootstrap`). A signal during the wait is 130 or 143 instead. Look the task up by the UPID printed at dispatch, or re-run the command where re-running resolves it. A task seen to FAIL is exit 1, as is a root-SSH read that timed out, a response that cannot be decoded as the UPID a verb requires (`api post|put|delete` is the exception: a response that carries no UPID, such as a `null` answer to a PUT or DELETE, is an ordinary success, exit 0), and a lost response on a synchronous write (`vm set`, `storage alloc`, the network stage): exit 1 there is NOT proof that nothing changed. `api post|put|delete --no-wait` with a UPID exits 0: the named state `unobserved_dispatch` (dispatched, outcome not observed, the UPID is on stderr) |
+| `4` | The command was refused before it changed anything: nothing was changed on a PVE host or in the roster file, so fix the cause and re-run. Every command that can refuse before it dispatches can exit 4 (the list is below), `vm destroy`, `doctor` and `acl enable-vm-destroy` among them; `doctor` exits 4 when any privilege is missing, unknown or not checked, so pass `--vmid` to check the VM privileges, or grant what is missing; `acl enable-vm-destroy` exits 4 when its plan was declined at the prompt, or there was no terminal to ask on and no `--yes`. A refusal that comes AFTER a write is exit 1, whatever it says: exit 4 is decided by whether the run had already sent a change, never by the name of the error. What counts as a change is state on a PVE host (any REST request other than GET and HEAD that leaves the process, a root-SSH write, an SSH key install or removal) or the roster file (any write to it, including `roster init`). Local bookkeeping is explicitly NOT a change and may have been written before a 4: the lock files `<roster>.lock` and `<roster>.locks/`, the harness evidence directories and files, the harness ledger, the probe's `harness-state/` file, and the harness's own known-hosts file (`harness-nested.known_hosts`, written after the PVE writes) |
 | `130` | Interrupted by SIGINT before completing |
 | `143` | Interrupted by SIGTERM before completing |
 
+### Which commands exit 3 and 4
+
+The two lists are held to the code (`TestExitRegistry_*`): every command that
+changes state has a row in the code's exit registry, and these lists are that
+registry. A command in neither list can only exit 0, 1, 130 or 143.
+
+Commands that can exit 3:
+
+- `api post`
+- `api put`
+- `api delete`
+- `vm destroy`
+- `vm create`
+- `vm snapshot create`
+- `vm snapshot delete`
+- `vm snapshot rollback`
+- `network bridge create`
+- `network bridge destroy`
+- `network set`
+- `storage create`
+- `storage set-content`
+- `storage free-orphans`
+- `acl enable-vm-destroy`
+- `acl grant`
+- `user ensure`
+- `group ensure`
+- `bootstrap`
+- `harness build`
+- `harness probe`
+- `harness golden`
+- `harness reset`
+- `harness vm destroy`
+- `harness vm shutdown`
+- `harness vm stop`
+- `harness vm snapshot create`
+- `harness vm snapshot delete`
+- `harness vm snapshot rollback`
+
+`vm set` is exit 4 only for its Validate refusals (a field both set and
+deleted, a duplicate delete) and a lock-wait timeout, which are raised before
+anything is sent; an allow-list or digest refusal raised inside the write is
+exit 1, because by then the run has already opened its write.
+
+Commands that can exit 4:
+
+- `doctor`
+- `api post`
+- `api put`
+- `api delete`
+- `vm destroy`
+- `vm create`
+- `vm set`
+- `vm snapshot create`
+- `vm snapshot delete`
+- `vm snapshot rollback`
+- `network bridge create`
+- `network bridge destroy`
+- `network set`
+- `storage create`
+- `storage set-content`
+- `storage alloc`
+- `storage free-orphans`
+- `acl enable-vm-destroy`
+- `acl grant`
+- `user ensure`
+- `group ensure`
+- `bootstrap`
+- `roster init`
+- `roster rekey`
+- `roster import-token`
+- `roster pin-tls`
+- `exec`
+- `harness build`
+- `harness probe`
+- `harness golden`
+- `harness reset`
+- `harness vm destroy`
+- `harness vm shutdown`
+- `harness vm stop`
+- `harness vm snapshot create`
+- `harness vm snapshot delete`
+- `harness vm snapshot rollback`
+
 `exec` exits with these statuses only when it fails before handing over. Once
 it runs the command, the exit status is the command's own, so a `3` or a `4`
-from `exec` is its command's, not pveforge's.
+from `exec` is its command's, not pveforge's (the named state `child_status`).
 
 On the first SIGINT or SIGTERM, pveforge stops and finishes any cleanup it had
 started. Unless it was only waiting for a lock or at a prompt, it says on

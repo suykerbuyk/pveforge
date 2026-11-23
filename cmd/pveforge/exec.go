@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/nodump"
 	"github.com/suykerbuyk/pveforge/internal/roster"
@@ -83,43 +84,47 @@ environment (env, printenv, set, a debug log): it prints the secret.`,
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Nothing is written before the handover (the run's write gate stays
+			// closed), so each refusal below is exit 4. The execve failure after it
+			// is NOT a refusal: it stays a plain error (exit 1), and after a
+			// successful execve the exit status is the child's own.
 			targetID, argv := args[0], args[1:]
 			path, err := exec.LookPath(argv[0])
 			if err != nil {
-				return fmt.Errorf("exec: %w", err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("exec: %w", err))
 			}
 			if err := execHarden(); err != nil {
-				return fmt.Errorf("exec: %w", err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("exec: %w", err))
 			}
 			rosterPath, err := resolveRosterPathFromFlagOrEnv(cmd)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			r, err := roster.Load(rosterPath)
 			if err != nil {
-				return fmt.Errorf("load roster %s: %w", rosterPath, err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("load roster %s: %w", rosterPath, err))
 			}
 			t := r.Find(targetID)
 			if t == nil {
-				return fmt.Errorf("target %q not found in roster %s", targetID, rosterPath)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("target %q not found in roster %s", targetID, rosterPath))
 			}
 			if t.Export != roster.ExportToken {
-				return fmt.Errorf("target %q is not marked export = %q in roster %s: its token stays inside pveforge", targetID, roster.ExportToken, rosterPath)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("target %q is not marked export = %q in roster %s: its token stays inside pveforge", targetID, roster.ExportToken, rosterPath))
 			}
 			if t.Token == nil {
-				return fmt.Errorf("target %q holds no API token", targetID)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("target %q holds no API token", targetID))
 			}
 			pass, err := roster.ResolvePassphraseContext(cmd.Context())
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			secret, err := execDecrypt(t, pass)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 			auth, err := authorizationValue(t.Token.ID, secret)
 			if err != nil {
-				return fmt.Errorf("target %q: %w", targetID, err)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("target %q: %w", targetID, err))
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "notice: exec: handing token %s of %s to %s\n",
 				kvjson.QuoteValue(t.Token.ID), kvjson.QuoteValue(targetID), kvjson.QuoteValue(filepath.Base(path)))

@@ -29,6 +29,7 @@ const harnessNode = "qa-pve-07"
 // harnessNode); individual fields override one response for a mutation
 // fixture.
 type hfake struct {
+	reqLog
 	mu        sync.Mutex
 	destroyed bool
 
@@ -64,6 +65,9 @@ func (f *hfake) or(v, def string) string {
 func (f *hfake) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.see(w, r) {
+		return
+	}
 	data := func(raw string) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"data":%s}`, raw)
@@ -98,6 +102,10 @@ func (f *hfake) handler(w http.ResponseWriter, r *http.Request) {
 		data(fmt.Sprintf("%q", mkUPID("qmshutdown", 690)))
 	case r.Method == http.MethodPost && strings.HasSuffix(p, "/snapshot"):
 		data(fmt.Sprintf("%q", mkUPID("qmsnapshot", 690)))
+	case r.Method == http.MethodPost && strings.Contains(p, "/snapshot/") && strings.HasSuffix(p, "/rollback"):
+		data(fmt.Sprintf("%q", mkUPID("qmrollback", 690)))
+	case r.Method == http.MethodDelete && strings.Contains(p, "/qemu/690/snapshot/"):
+		data(fmt.Sprintf("%q", mkUPID("qmdelsnapshot", 690)))
 	case r.Method == http.MethodDelete && strings.HasSuffix(p, "/qemu/690"):
 		f.destroyed = true
 		data(fmt.Sprintf("%q", f.or(f.destroyUPID, mkUPID("qmdestroy", 690))))
@@ -310,14 +318,14 @@ func TestHarness_Mutation6_GuardTagNodeMembership(t *testing.T) {
 // Guards the rollback leaf's typed-refusal → JSON reason render
 // (cmd/pveforge/harness_vm.go). A newer snapshot exists, so pve.Rollback
 // refuses with *ErrNotNewestSnapshot; the command must print
-// reason=not-newest on stdout (exit stays 1).
+// reason=not-newest on stdout (exit 4: the refusal is made before the rollback POST).
 func TestHarness_Mutation7_RollbackNotNewestReason(t *testing.T) {
 	rosterPath := newHarnessTest(t, &hfake{
 		snapshots: `[{"name":"s1","snaptime":100},{"name":"s2","snaptime":200},{"name":"current","snaptime":0}]`,
 	})
 	code, stdout, _ := runRootArgs("harness", "vm", "snapshot", "rollback", "--roster", rosterPath, "-o", "json", "h", "690", "s1")
-	if code != 1 {
-		t.Fatalf("rollback-to-not-newest exit = %d, want 1", code)
+	if code != 4 {
+		t.Fatalf("rollback-to-not-newest exit = %d, want 4", code)
 	}
 	var got map[string]any
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {

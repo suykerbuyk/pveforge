@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/harness/outer"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -89,13 +90,25 @@ func New(client *pve.RoutedClient, cfg outer.Config, ledger *outer.Ledger, p Par
 }
 
 // refuseErr / failErr carry the shell's exit-3 (precondition) / exit-4 (step)
-// distinction as a classifiable cause; runRoot collapses both to 1, so the Go
-// suite asserts the cause, not the integer.
+// distinction as a classifiable cause. The pveforge exit status is decided by
+// the run's write gate, not by these types: a refuseErr raised in preflight is
+// dispatch.Refuse'd (exit 4 while nothing was sent); a failErr keeps its cause
+// in the chain so a create/start wait that started and did not observe is exit 3.
 type refuseErr struct{ reason string }
-type failErr struct{ reason string }
+type failErr struct {
+	reason string
+	// cause is the underlying error, kept so the chain survives for exit
+	// classification (an unobserved create/start wait is exit 3 at runRoot, which
+	// reads the chain). The text stays reason: Error() is unchanged.
+	cause error
+}
 
 func (e *refuseErr) Error() string { return e.reason }
 func (e *failErr) Error() string   { return e.reason }
+func (e *failErr) Unwrap() error   { return e.cause }
+
+// failCause builds a failErr that keeps cause in its chain.
+func failCause(reason string, cause error) *failErr { return &failErr{reason: reason, cause: cause} }
 
 func (d *Driver) now() time.Time {
 	if d.p.Now != nil {
@@ -108,17 +121,19 @@ func (d *Driver) now() time.Time {
 // cleanup tears down only this run's recorded VMs (or keeps them, --keep).
 func (d *Driver) Run(ctx context.Context) (err error) {
 	if _, e := outer.RequireStorage(d.p.Storage); e != nil {
-		return &refuseErr{e.Error()}
+		return &refuseErr{e.Error()} // a usage error (no/invalid --storage): exit 1
 	}
 	site, e := LoadSite(filepath.Join(d.p.Home, ".config/pveforge/harness-build.env"))
 	if e != nil {
-		return &refuseErr{e.Error()}
+		// A precondition refusal before anything is created: exit 4 while the
+		// gate is closed (it is: nothing has been sent).
+		return dispatch.Refuse(ctx, &refuseErr{e.Error()})
 	}
 	d.site = site
 	if e := d.openEvidence(); e != nil {
-		return &failErr{e.Error()}
+		return &failErr{reason: e.Error()}
 	}
-	defer func() { d.cleanup(err) }()
+	defer func() { d.cleanup(ctx, err) }()
 
 	baseline, e := d.preflight(ctx)
 	if e != nil {
@@ -157,35 +172,35 @@ func (d *Driver) preflight(ctx context.Context) (int64, error) {
 
 	fi, e := os.Lstat(keyPub)
 	if e != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		return 0, d.refuse("the nested SSH key " + keyPub + ".pub does not exist: run prepare-iso.sh first")
+		return 0, d.refuse(ctx, "the nested SSH key "+keyPub+".pub does not exist: run prepare-iso.sh first")
 	}
 	pubRaw, e := os.ReadFile(keyPub)
 	if e != nil {
-		return 0, d.refuse("cannot read " + keyPub)
+		return 0, d.refuse(ctx, "cannot read "+keyPub)
 	}
 	pub := strings.TrimRight(string(pubRaw), "\n")
 	if !pubkeyRE.MatchString(pub) {
-		return 0, d.refuse(keyPub + " is not one ssh-ed25519 public key")
+		return 0, d.refuse(ctx, keyPub+" is not one ssh-ed25519 public key")
 	}
 
 	knownText := ""
 	if fi, e := os.Lstat(known); e == nil {
 		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-			return 0, d.refuse(known + " is not a regular file")
+			return 0, d.refuse(ctx, known+" is not a regular file")
 		}
 		if perm := fi.Mode().Perm(); perm != 0o600 {
-			return 0, d.refuse(fmt.Sprintf("%s has mode %o, want 600", known, perm))
+			return 0, d.refuse(ctx, fmt.Sprintf("%s has mode %o, want 600", known, perm))
 		}
 		b, e := os.ReadFile(known)
 		if e != nil {
-			return 0, d.refuse("cannot read " + known)
+			return 0, d.refuse(ctx, "cannot read "+known)
 		}
 		knownText = string(b)
 	}
 	if !d.p.Repin {
 		for _, v := range VMIDs {
 			if ipPinned(knownText, d.ip(v)) {
-				return 0, d.refuse(fmt.Sprintf("%s already pins a host key for %s (%s); a new build makes new host keys: run with --repin to replace the pins", known, d.ip(v), vmName[v]))
+				return 0, d.refuse(ctx, fmt.Sprintf("%s already pins a host key for %s (%s); a new build makes new host keys: run with --repin to replace the pins", known, d.ip(v), vmName[v]))
 			}
 		}
 	}
@@ -193,7 +208,7 @@ func (d *Driver) preflight(ctx context.Context) (int64, error) {
 	// None of the three addresses may be the outer host itself.
 	outerHost, e := d.p.OuterHost()
 	if e != nil {
-		return 0, d.refuse(e.Error())
+		return 0, d.refuse(ctx, e.Error())
 	}
 	var outerIPs []string
 	if ipRE.MatchString(outerHost) {
@@ -201,14 +216,14 @@ func (d *Driver) preflight(ctx context.Context) (int64, error) {
 	} else {
 		outerIPs, e = d.p.LookupHost(outerHost)
 		if e != nil {
-			return 0, d.refuse("cannot resolve the outer host " + outerHost)
+			return 0, d.refuse(ctx, "cannot resolve the outer host "+outerHost)
 		}
 	}
 	d.evidence("outer-host", outerHost+": "+strings.Join(outerIPs, " "))
 	for _, v := range VMIDs {
 		for _, a := range outerIPs {
 			if a == d.ip(v) {
-				return 0, d.refuse(fmt.Sprintf("%s's address %s is the outer host %s", vmName[v], d.ip(v), outerHost))
+				return 0, d.refuse(ctx, fmt.Sprintf("%s's address %s is the outer host %s", vmName[v], d.ip(v), outerHost))
 			}
 		}
 	}
@@ -216,7 +231,7 @@ func (d *Driver) preflight(ctx context.Context) (int64, error) {
 	for _, v := range VMIDs {
 		for _, port := range vmPorts[v] {
 			if d.p.Dial(d.ip(v), port) {
-				return 0, d.refuse(fmt.Sprintf("%s:%s already answers, before %s exists: the address is in use", d.ip(v), port, vmName[v]))
+				return 0, d.refuse(ctx, fmt.Sprintf("%s:%s already answers, before %s exists: the address is in use", d.ip(v), port, vmName[v]))
 			}
 		}
 	}
@@ -224,54 +239,54 @@ func (d *Driver) preflight(ctx context.Context) (int64, error) {
 	// Pool empty, none of 690-692 anywhere in the cluster, storage clean.
 	members, e := d.poolMembers(ctx)
 	if e != nil {
-		return 0, &failErr{e.Error()}
+		return 0, &failErr{reason: e.Error()}
 	}
 	for _, v := range VMIDs {
 		if members.has(v) {
-			return 0, d.refuse(fmt.Sprintf("VM %d already exists in pool %s: the build runs on a clean slate, and removing an earlier build's VM needs an operator ask", v, d.cfg.Pool))
+			return 0, d.refuse(ctx, fmt.Sprintf("VM %d already exists in pool %s: the build runs on a clean slate, and removing an earlier build's VM needs an operator ask", v, d.cfg.Pool))
 		}
 		if e := outer.VMIDFree(ctx, d.client, v); e != nil {
-			return 0, d.refuse(fmt.Sprintf("VMID %d is not free in the cluster: %v", v, e))
+			return 0, d.refuse(ctx, fmt.Sprintf("VMID %d is not free in the cluster: %v", v, e))
 		}
 		content, e := d.client.RawRequest(ctx, http.MethodGet, outer.ContentPath(d.cfg.Node, d.p.Storage), url.Values{"vmid": {strconv.Itoa(v)}})
 		if e != nil {
-			return 0, &failErr{fmt.Sprintf("storage %s: the content answer could not be read: %v", d.p.Storage, e)}
+			return 0, &failErr{reason: fmt.Sprintf("storage %s: the content answer could not be read: %v", d.p.Storage, e)}
 		}
 		var arr []json.RawMessage
 		if json.Unmarshal(content, &arr) != nil {
-			return 0, &failErr{fmt.Sprintf("storage %s: the content answer has an unexpected shape", d.p.Storage)}
+			return 0, &failErr{reason: fmt.Sprintf("storage %s: the content answer has an unexpected shape", d.p.Storage)}
 		}
 		if len(arr) != 0 {
-			return 0, d.refuse(fmt.Sprintf("storage %s already holds volumes of VM %d (a leftover)", d.p.Storage, v))
+			return 0, d.refuse(ctx, fmt.Sprintf("storage %s already holds volumes of VM %d (a leftover)", d.p.Storage, v))
 		}
 	}
 	if !members.empty() {
-		return 0, d.refuse(fmt.Sprintf("pool %s is not empty: the build runs on an empty harness storage", d.cfg.Pool))
+		return 0, d.refuse(ctx, fmt.Sprintf("pool %s is not empty: the build runs on an empty harness storage", d.cfg.Pool))
 	}
 	st, _, e := outer.ReadStorageStatus(ctx, d.client, d.cfg.Node, d.p.Storage)
 	if e != nil {
-		return 0, &failErr{e.Error()}
+		return 0, &failErr{reason: e.Error()}
 	}
 	baseline, e := outer.BaselineUsed(st, d.p.Storage)
 	if e != nil {
-		return 0, d.refuse(e.Error())
+		return 0, d.refuse(ctx, e.Error())
 	}
 	// Both prepared node ISOs and the import image on local.
 	isos, e := d.localContent(ctx, "iso")
 	if e != nil {
-		return 0, &failErr{e.Error()}
+		return 0, &failErr{reason: e.Error()}
 	}
 	for _, v := range []int{vmN1, vmN2} {
 		if !hasVolid(isos, "local:iso/"+vmName[v]+"-auto.iso") {
-			return 0, d.refuse("local:iso/" + vmName[v] + "-auto.iso is not on " + d.cfg.Node + ": upload prepare-iso.sh's output first")
+			return 0, d.refuse(ctx, "local:iso/"+vmName[v]+"-auto.iso is not on "+d.cfg.Node+": upload prepare-iso.sh's output first")
 		}
 	}
 	imports, e := d.localContent(ctx, "import")
 	if e != nil {
-		return 0, &failErr{e.Error()}
+		return 0, &failErr{reason: e.Error()}
 	}
 	if !hasVolid(imports, "local:import/"+d.site["NFS_IMAGE"]) {
-		return 0, d.refuse("local:import/" + d.site["NFS_IMAGE"] + " is not on " + d.cfg.Node + ": upload the Debian 13 genericcloud image first")
+		return 0, d.refuse(ctx, "local:import/"+d.site["NFS_IMAGE"]+" is not on "+d.cfg.Node+": upload the Debian 13 genericcloud image first")
 	}
 	d.pubkey = pub
 	d.knownText = knownText
@@ -321,7 +336,7 @@ func (d *Driver) createAll(ctx context.Context) error {
 			obj[k] = b
 		}
 		if e := outer.ScreenCreate(obj, d.p.Storage, harnessBridges); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: %v", v, e)}
+			return &failErr{reason: fmt.Sprintf("VM %d: %v", v, e)}
 		}
 		// pool is added AFTER the screen (lib.sh:805); tags NOT in the body (D5).
 		params := url.Values{"pool": {d.cfg.Pool}}
@@ -331,24 +346,25 @@ func (d *Driver) createAll(ctx context.Context) error {
 		d.evidence(fmt.Sprintf("create-%d.json", v), toJSON(fields, d.cfg.Pool))
 		upid, e := d.client.CreateVM(ctx, v, params)
 		if e != nil {
-			return &failErr{fmt.Sprintf("VM %d: vm create failed: %v", v, e)}
+			return failCause(fmt.Sprintf("VM %d: vm create failed: %v", v, e), e)
 		}
 		if e := d.waitTask(ctx, upid); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: vm create failed: %v", v, e)}
+			// the create wait (outcome-unknown -> exit 3): keep the chain
+			return failCause(fmt.Sprintf("VM %d: vm create failed: %v", v, e), e)
 		}
 		if d.ledger != nil {
 			if e := d.ledger.Add(v); e != nil {
-				return &failErr{e.Error()}
+				return &failErr{reason: e.Error()}
 			}
 		}
 		d.created = append(d.created, v)
 		// Tag after create, under the tag-skip guard (ModeTag): a just-created
 		// VM has no tag yet.
 		if e := outer.Guard(ctx, d.client, d.cfg, nil, v, outer.ModeTag); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: tag guard: %v", v, e)}
+			return failCause(fmt.Sprintf("VM %d: tag guard: %v", v, e), e)
 		}
 		if e := d.client.SetVMConfigField(ctx, v, "tags", d.cfg.Tag); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: tag failed: %v", v, e)}
+			return failCause(fmt.Sprintf("VM %d: tag failed: %v", v, e), e)
 		}
 		d.step(fmt.Sprintf("PASS create %d %s", v, vmName[v]))
 	}
@@ -358,7 +374,7 @@ func (d *Driver) createAll(ctx context.Context) error {
 func (d *Driver) startAll(ctx context.Context) error {
 	for _, v := range VMIDs {
 		if e := d.postLeaf(ctx, v, "status/start", nil); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: start failed: %v", v, e)}
+			return failCause(fmt.Sprintf("VM %d: start failed: %v", v, e), e)
 		}
 		d.step(fmt.Sprintf("PASS start %d", v))
 	}
@@ -414,15 +430,15 @@ func (d *Driver) ejectAll(ctx context.Context) error {
 	for _, v := range []int{vmN1, vmN2} {
 		fields := map[string]string{"ide2": "none,media=cdrom", "boot": "order=scsi0"}
 		if e := outer.ScreenConfig(fields, d.p.Storage, harnessBridges, true); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: eject screen: %v", v, e)}
+			return &failErr{reason: fmt.Sprintf("VM %d: eject screen: %v", v, e)}
 		}
 		if e := outer.Guard(ctx, d.client, d.cfg, nil, v, outer.ModeChange); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: eject guard: %v", v, e)}
+			return failCause(fmt.Sprintf("VM %d: eject guard: %v", v, e), e)
 		}
 		// One synchronous PUT config with both fields (build.sh:437); no task.
 		if _, e := d.client.RawRequest(ctx, http.MethodPut, outer.VMPath(d.cfg.Node, v, "config"),
 			url.Values{"ide2": {"none,media=cdrom"}, "boot": {"order=scsi0"}}); e != nil {
-			return &failErr{fmt.Sprintf("VM %d: eject failed: %v", v, e)}
+			return failCause(fmt.Sprintf("VM %d: eject failed: %v", v, e), e)
 		}
 		d.step(fmt.Sprintf("PASS eject %d", v))
 	}
@@ -489,7 +505,7 @@ func (d *Driver) pinAll(ctx context.Context) error {
 
 // ---- cleanup (on any exit that is not a complete build) ----
 
-func (d *Driver) cleanup(runErr error) {
+func (d *Driver) cleanup(cmdCtx context.Context, runErr error) {
 	if d.doneOK || !d.creating {
 		return
 	}
@@ -508,8 +524,12 @@ func (d *Driver) cleanup(runErr error) {
 		d.reportLeftover("kept for inspection (--keep-on-failure)", mine)
 		return
 	}
-	// Fresh detached, bounded context: a signal must not cancel the teardown.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Detached, bounded context: a signal must not cancel the teardown. It is
+	// derived from context.WithoutCancel(the command's ctx), never from
+	// context.Background(), so it keeps the command's VALUES: the write gate
+	// (internal/dispatch) stays visible to the teardown's requests, and a
+	// refusal made after them is exit 1.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(cmdCtx), 10*time.Minute)
 	defer cancel()
 
 	var left []int
@@ -750,13 +770,17 @@ func (d *Driver) writeManifest() {
 	_ = os.WriteFile(filepath.Join(d.evid, "MANIFEST.sha256"), []byte(b.String()), 0o600)
 }
 
-func (d *Driver) refuse(reason string) error {
+// refuse states a precondition refusal. Every caller is in preflight, before the
+// first create; it is dispatch.Refuse'd, so it is exit 4 while the run's gate is
+// closed and a plain error once anything was sent. The evidence directory and
+// result.txt written before it are local bookkeeping, not a mutation.
+func (d *Driver) refuse(ctx context.Context, reason string) error {
 	d.appendResult("REFUSED " + reason)
-	return &refuseErr{reason}
+	return dispatch.Refuse(ctx, &refuseErr{reason})
 }
 func (d *Driver) fail(reason string) error {
 	d.appendResult("FAILED " + reason)
-	return &failErr{reason}
+	return &failErr{reason: reason}
 }
 
 func vmidList(vmids []int) string {

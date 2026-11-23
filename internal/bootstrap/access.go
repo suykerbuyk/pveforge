@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/pve"
 	"github.com/suykerbuyk/pveforge/internal/sshexec"
@@ -554,15 +555,20 @@ func (a *RootAccess) checkNotSelf(p Principal) error {
 // entry: path, role, principal and propagate. PVE merges a repeated grant,
 // so a run that repeats one changes nothing there.
 func (a *RootAccess) GrantACL(ctx context.Context, req GrantRequest) (*GrantOutcome, error) {
+	// Every refusal below is raised before the first pveum write, while the
+	// run's write gate is closed, so dispatch.Refuse marks it exit 4 (the gate,
+	// never the error's name, decides: a refusal raised after a write is plain).
+	// A READ that fails (a role list that cannot be read, a timeout) is not a
+	// refusal and stays an ordinary error (exit 1).
 	if err := CheckPrincipal(req.Principal); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	want, err := normalizeGrants(req.Grants)
 	if err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 	if err := a.checkNotSelf(req.Principal); err != nil {
-		return nil, err
+		return nil, dispatch.Refuse(ctx, err)
 	}
 
 	rolePrivs, err := a.rolePrivs(ctx, want)
@@ -585,8 +591,8 @@ func (a *RootAccess) GrantACL(ctx context.Context, req GrantRequest) (*GrantOutc
 			continue
 		}
 		if !req.AllowEscalatingRole {
-			return nil, fmt.Errorf("%w: %s on %s confers %s; pass --allow-escalating-role to grant it anyway (nothing was granted)",
-				ErrEscalatingRole, g.Role, g.Path, strings.Join(esc, ","))
+			return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s on %s confers %s; pass --allow-escalating-role to grant it anyway (nothing was granted)",
+				ErrEscalatingRole, g.Role, g.Path, strings.Join(esc, ",")))
 		}
 		out.Escalating = append(out.Escalating, EscalatingGrant{Grant: g, Privs: esc})
 	}
@@ -637,17 +643,17 @@ func (a *RootAccess) rolePrivs(ctx context.Context, want []Grant) (map[string][]
 		if _, done := out[g.Role]; !done {
 			privs, ok := all[g.Role]
 			if !ok {
-				return nil, fmt.Errorf("%w: %q", ErrUnknownRole, g.Role)
+				return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %q", ErrUnknownRole, g.Role))
 			}
 			if len(privs) == 0 {
-				return nil, fmt.Errorf("%w: %s", ErrRoleHasNoPrivileges, g.Role)
+				return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s", ErrRoleHasNoPrivileges, g.Role))
 			}
 			out[g.Role] = privs
 		}
 		if g.Privs != nil {
 			if missing, extra := setDiff(g.Privs, out[g.Role]); len(missing) > 0 || len(extra) > 0 {
-				return nil, fmt.Errorf("%w: %s at %s: pinned but not in the role [%s], in the role but not pinned [%s]; nothing was granted",
-					ErrPinnedPrivsMismatch, g.Role, g.Path, strings.Join(missing, ","), strings.Join(extra, ","))
+				return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s at %s: pinned but not in the role [%s], in the role but not pinned [%s]; nothing was granted",
+					ErrPinnedPrivsMismatch, g.Role, g.Path, strings.Join(missing, ","), strings.Join(extra, ",")))
 			}
 		}
 	}
@@ -715,7 +721,7 @@ func (a *RootAccess) checkGroupNotSelf(ctx context.Context, groupID string) erro
 	}
 	i := slices.IndexFunc(groups, func(g pve.AccessGroup) bool { return g.GroupID == groupID })
 	if i < 0 {
-		return fmt.Errorf("%w: %q", ErrUnknownGroup, groupID)
+		return dispatch.Refuse(ctx, fmt.Errorf("%w: %q", ErrUnknownGroup, groupID))
 	}
 	own := a.ownUser()
 	if own == "" {
@@ -726,7 +732,7 @@ func (a *RootAccess) checkGroupNotSelf(ctx context.Context, groupID string) erro
 	}
 	for _, u := range groups[i].Users {
 		if strings.EqualFold(u, own) {
-			return fmt.Errorf("%w: group %s holds %s, which owns the roster's token %s", ErrSelfGrant, groupID, u, a.opts.OwnToken)
+			return dispatch.Refuse(ctx, fmt.Errorf("%w: group %s holds %s, which owns the roster's token %s", ErrSelfGrant, groupID, u, a.opts.OwnToken))
 		}
 	}
 	users, err := a.rootUsers(ctx)
@@ -738,7 +744,7 @@ func (a *RootAccess) checkGroupNotSelf(ctx context.Context, groupID string) erro
 		return fmt.Errorf("cannot tell whether group %s holds %s: the user list has no entry for it: %w", groupID, own, pve.ErrUnverifiableRead)
 	}
 	if slices.Contains(users[j].Groups, groupID) {
-		return fmt.Errorf("%w: %s, which owns the roster's token %s, is in group %s", ErrSelfGrant, users[j].UserID, a.opts.OwnToken, groupID)
+		return dispatch.Refuse(ctx, fmt.Errorf("%w: %s, which owns the roster's token %s, is in group %s", ErrSelfGrant, users[j].UserID, a.opts.OwnToken, groupID))
 	}
 	return nil
 }
@@ -766,7 +772,7 @@ type EscalatingJoin struct {
 // two commands).
 func (a *RootAccess) CheckGroupJoin(ctx context.Context, userID string, groups []string, allowEscalating bool) ([]EscalatingJoin, error) {
 	if own := a.ownUser(); own != "" && strings.EqualFold(userID, own) {
-		return nil, fmt.Errorf("%w: %s owns the roster's token %s, and joining a group grants it that group's ACLs", ErrSelfGrant, userID, a.opts.OwnToken)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s owns the roster's token %s, and joining a group grants it that group's ACLs", ErrSelfGrant, userID, a.opts.OwnToken))
 	}
 	if len(groups) == 0 {
 		return nil, nil
@@ -801,8 +807,8 @@ func (a *RootAccess) CheckGroupJoin(ctx context.Context, userID string, groups [
 		for i, j := range out {
 			held[i] = fmt.Sprintf("group %s holds %s on %s, which confers %s", j.Group, j.Entry.Role, j.Entry.Path, strings.Join(j.Privs, ","))
 		}
-		return nil, fmt.Errorf("%w: %s; joining a group grants what it holds; pass --allow-escalating-role to add %s anyway (nothing was changed)",
-			ErrEscalatingRole, strings.Join(held, "; "), userID)
+		return nil, dispatch.Refuse(ctx, fmt.Errorf("%w: %s; joining a group grants what it holds; pass --allow-escalating-role to add %s anyway (nothing was changed)",
+			ErrEscalatingRole, strings.Join(held, "; "), userID))
 	}
 	return out, nil
 }

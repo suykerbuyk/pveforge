@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	proxmox "github.com/suykerbuyk/go-proxmox"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/idempotent"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
@@ -172,6 +173,9 @@ the exit status is still 0: the create task succeeded.`,
 				// the session dialed) BEFORE the tag lock is taken, so
 				// neither a prompt nor a dial is ever made holding it.
 				if err := a.Connect(cmd.Context()); err != nil {
+					// Left at exit 1 on purpose: an unreachable root is an
+					// environment failure, not one of this verb's documented
+					// refusals (the shared root-access tests pin it as 1).
 					return fmt.Errorf("vm create: --unique-tag: connect as root: %w", err)
 				}
 				client, root = rest, a
@@ -197,11 +201,15 @@ the exit status is still 0: the create task succeeded.`,
 			if tagGuard {
 				unlockTag, err := lock.Mutation(cmd.Context(), rosterPath, lock.ObjectKey{TargetID: args[0], Kind: "vm-tag", ID: strings.ToLower(uniqueTag)})
 				if err != nil {
-					return fmt.Errorf("vm create: acquire the lock for tag %s: %w", kvjson.QuoteValue(uniqueTag), err)
+					// The lock files are bookkeeping, not a change (contract plan
+					// §3.5): the refusal is 4 while the gate is closed.
+					return dispatch.Refuse(cmd.Context(), fmt.Errorf("vm create: acquire the lock for tag %s: %w", kvjson.QuoteValue(uniqueTag), err))
 				}
 				defer func() { _ = unlockTag() }()
 				if err := checkTagUnique(cmd.Context(), root, uniqueTag); err != nil {
-					return err
+					// Every failure of the check refuses the create (it fails
+					// closed), and it runs before the create POST.
+					return dispatch.Refuse(cmd.Context(), err)
 				}
 			}
 
@@ -212,7 +220,9 @@ the exit status is still 0: the create task succeeded.`,
 			// takes.
 			resolved, err := client.NextVMID(cmd.Context(), vmid)
 			if err != nil {
-				return fmt.Errorf("vm create: %w", err)
+				// Taken, or the check could not be made (it fails closed): the
+				// create is refused before it is sent.
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("vm create: %w", err))
 			}
 
 			// THE LOCK KEY covering the resolve-then-create span is
@@ -280,7 +290,7 @@ the exit status is still 0: the create task succeeded.`,
 			// Validate() would never run and a malformed Params (an
 			// orphan ipconfigN) would pass unnoticed on that path.
 			if err := op.Validate(); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 
 			res, err := idempotent.Run(cmd.Context(), rosterPath, key, op, false)
@@ -301,7 +311,9 @@ the exit status is still 0: the create task succeeded.`,
 			// success back into the collision error the CLI contract
 			// promises.
 			if !res.Changed {
-				return fmt.Errorf("vm create: vm %d already exists on %s (it was taken between the vmid check and the create); refusing to create it at a different vmid", resolved, args[0])
+				// Run's Satisfied path never opens the write gate, so nothing was
+				// sent: a refusal (4), and only because the gate says so.
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("vm create: vm %d already exists on %s (it was taken between the vmid check and the create); refusing to create it at a different vmid", resolved, args[0]))
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: vm %d created\n", args[0], resolved)
@@ -486,7 +498,7 @@ rather than that a change was applied.`,
 			// must never reach PVE.
 			op := &idempotent.VMFieldsEnsure{VMID: vmid, Pairs: pairs, Deletes: deletes}
 			if err := op.Validate(); err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err)
 			}
 
 			client, err := resolveRoutedClient(cmd, args[0])

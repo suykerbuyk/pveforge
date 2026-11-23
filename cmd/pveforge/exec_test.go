@@ -278,8 +278,20 @@ func TestExec_X3_SecretNotInArgv(t *testing.T) {
 // refused asserts a run that must fail before the command starts.
 func refused(t *testing.T, r execRun, stderrHas string) {
 	t.Helper()
-	if code := r.state.ExitCode(); code != 1 {
-		t.Errorf("exit %d, want 1", code)
+	refusedWith(t, r, stderrHas, 1)
+}
+
+// refusedBeforeHandover is refused for a refusal raised before the handover:
+// exit 4 (refused before anything was written; exec never writes).
+func refusedBeforeHandover(t *testing.T, r execRun, stderrHas string) {
+	t.Helper()
+	refusedWith(t, r, stderrHas, 4)
+}
+
+func refusedWith(t *testing.T, r execRun, stderrHas string, wantCode int) {
+	t.Helper()
+	if code := r.state.ExitCode(); code != wantCode {
+		t.Errorf("exit %d, want %d", code, wantCode)
 	}
 	if r.record != nil {
 		t.Error("the command ran")
@@ -303,17 +315,17 @@ func refused(t *testing.T, r execRun, stderrHas string) {
 func TestExec_X4_WrongPassphrase(t *testing.T) {
 	f := newExecFixture(t)
 	r := f.runExec(t, "/nonexistent", []string{roster.PassphraseEnvVar + "=wrong"}, f.probeArgs("qa-exp", "exit:0")...)
-	refused(t, r, roster.PassphraseEnvVar)
+	refusedBeforeHandover(t, r, roster.PassphraseEnvVar)
 }
 
 // X5: a target with no token, or no such target, is refused.
 func TestExec_X5_NoTokenOrUnknownTarget(t *testing.T) {
 	f := newExecFixture(t)
 	t.Run("no token", func(t *testing.T) {
-		refused(t, f.runExec(t, "/nonexistent", nil, f.probeArgs("qa-notoken", "exit:0")...), "holds no API token")
+		refusedBeforeHandover(t, f.runExec(t, "/nonexistent", nil, f.probeArgs("qa-notoken", "exit:0")...), "holds no API token")
 	})
 	t.Run("unknown target", func(t *testing.T) {
-		refused(t, f.runExec(t, "/nonexistent", nil, f.probeArgs("qa-nope", "exit:0")...), "not found in roster")
+		refusedBeforeHandover(t, f.runExec(t, "/nonexistent", nil, f.probeArgs("qa-nope", "exit:0")...), "not found in roster")
 	})
 }
 
@@ -321,7 +333,7 @@ func TestExec_X5_NoTokenOrUnknownTarget(t *testing.T) {
 // though it holds a token and the passphrase opens it.
 func TestExec_X10_TargetNotMarkedExportable(t *testing.T) {
 	f := newExecFixture(t)
-	refused(t, f.runExec(t, "/nonexistent", nil, f.probeArgs("qa-noexp", "exit:0")...), `is not marked export = "token"`)
+	refusedBeforeHandover(t, f.runExec(t, "/nonexistent", nil, f.probeArgs("qa-noexp", "exit:0")...), `is not marked export = "token"`)
 }
 
 // dirState is every entry under dir with its size, mode and mtime.
@@ -410,6 +422,12 @@ func TestExec_X8_BadCommandLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "not in PATH" {
+				// a refusal raised before the handover: exit 4 (the others are
+				// usage errors, which stay exit 1)
+				refusedBeforeHandover(t, f.runExec(t, emptyPath, nil, tc.args...), tc.has)
+				return
+			}
 			refused(t, f.runExec(t, emptyPath, nil, tc.args...), tc.has)
 		})
 	}

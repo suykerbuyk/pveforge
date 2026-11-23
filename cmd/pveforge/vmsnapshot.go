@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	proxmox "github.com/suykerbuyk/go-proxmox"
 
+	"github.com/suykerbuyk/pveforge/internal/dispatch"
 	"github.com/suykerbuyk/pveforge/internal/kvjson"
 	"github.com/suykerbuyk/pveforge/internal/lock"
 	"github.com/suykerbuyk/pveforge/internal/pve"
@@ -190,7 +191,9 @@ adopted: the same name is not the same snapshot. The names "current" and
 		}
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, key)
 		if err != nil {
-			return fmt.Errorf("acquire lock for %s: %w", key, err)
+			// Lock files are bookkeeping, not a change: 4 while the write gate
+			// is closed, which it is until the first request below.
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock for %s: %w", key, err))
 		}
 		defer func() { _ = unlock() }()
 
@@ -236,7 +239,7 @@ names as newer than its target.` + lockNote,
 				return fmt.Errorf("delete snapshots of vm %d: a snapshot name is blank", vmid)
 			}
 			if strings.TrimSpace(n) == currentPseudoEntry {
-				return fmt.Errorf("delete snapshots of vm %d: %w", vmid, &pve.ErrReservedSnapshotName{VMID: vmid, Name: n})
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("delete snapshots of vm %d: %w", vmid, &pve.ErrReservedSnapshotName{VMID: vmid, Name: n}))
 			}
 		}
 		client, err := resolveRoutedClient(cmd, args[0])
@@ -250,13 +253,15 @@ names as newer than its target.` + lockNote,
 		}
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, key)
 		if err != nil {
-			return fmt.Errorf("acquire lock for %s: %w", key, err)
+			// Lock files are bookkeeping, not a change: 4 while the write gate
+			// is closed, which it is until the first request below.
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock for %s: %w", key, err))
 		}
 		defer func() { _ = unlock() }()
 
 		snaps, err := client.ListSnapshots(cmd.Context(), vmid)
 		if err != nil {
-			return err
+			return dispatch.Refuse(cmd.Context(), err) // a pre-state read, before any request that changes anything
 		}
 		// PVE's list, oldest first — its own order breaking a snaptime tie,
 		// as NewerSnapshots does — so newest first is this reversed, the
@@ -452,7 +457,9 @@ but could not be proven.` + lockNote,
 		// ONE hold, across the rollback and the witness.
 		unlock, err := lock.Mutation(cmd.Context(), rosterPath, key)
 		if err != nil {
-			return fmt.Errorf("acquire lock for %s: %w", key, err)
+			// Lock files are bookkeeping, not a change: 4 while the write gate
+			// is closed, which it is until the first request below.
+			return dispatch.Refuse(cmd.Context(), fmt.Errorf("acquire lock for %s: %w", key, err))
 		}
 		defer func() { _ = unlock() }()
 
@@ -466,11 +473,11 @@ but could not be proven.` + lockNote,
 		if !noWitness {
 			snaps, err := client.ListSnapshots(cmd.Context(), vmid)
 			if err != nil {
-				return err
+				return dispatch.Refuse(cmd.Context(), err) // a pre-state read, before any request that changes anything
 			}
 			plan = targetSnapshotWitnessPlan(snaps, name)
 			if plan == witnessTargetNotFound {
-				return fmt.Errorf("rollback vm %d: snapshot %q is not in the snapshot list; refusing to roll back a target that is not present", vmid, name)
+				return dispatch.Refuse(cmd.Context(), fmt.Errorf("rollback vm %d: snapshot %q is not in the snapshot list; refusing to roll back a target that is not present", vmid, name))
 			}
 		}
 

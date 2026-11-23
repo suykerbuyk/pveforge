@@ -1070,7 +1070,7 @@ func TestEnableFlow_T15_DocsDescribeTheFlow(t *testing.T) {
 	}
 	readme, prd, guide := read("../../README.md"), read("../../docs/prd.md"), read("../../docs/operations/secrets-and-keys.md")
 	for name, want := range map[string][]string{
-		"README": {"`Proceed? [y/N]`", "`--yes`", "no terminal", "carries `ready` and `verdict`", "the check did not run", "no confirmed-plan comparison", "not that every VM can be destroyed", "`acl enable-vm-destroy` also exits 1", "names this command as its `fix`", "`vm destroy`, `doctor` and `acl enable-vm-destroy` are the commands that exit 4"},
+		"README": {"`Proceed? [y/N]`", "`--yes`", "no terminal", "carries `ready` and `verdict`", "the check did not run", "no confirmed-plan comparison", "not that every VM can be destroyed", "`acl enable-vm-destroy` also exits 1", "names this command as its `fix`", "`doctor` exits 4 when any privilege is missing"},
 		"PRD":    {"`acl enable-vm-destroy` exits 1, not 4", "`ErrPlanChangedSinceConfirm`", "never across its confirmation prompt", "`doctorVerdict`"},
 		"guide":  {"Run one command", "`Proceed? [y/N]`", "Manual fallback", "`--yes` answers the question", "The report carries `ready` and `verdict`", "the check did not run", "no confirmed-plan comparison under `--yes`", "not that every VM can be destroyed"},
 	} {
