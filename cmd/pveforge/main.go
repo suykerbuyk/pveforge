@@ -190,12 +190,29 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAccessCmd())
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newSchemaCmd())
+	root.AddCommand(newVersionCmd())
+	// --version prints the same kv text as `pveforge version`. Added here, not
+	// inside Execute, so `pveforge schema` lists the flag in every run and test.
+	root.Version = versionKV()
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.InitDefaultVersionFlag()
 	// cobra adds these two only inside Execute; add them now so the walk
 	// below covers completion's group as well.
 	root.InitDefaultHelpCmd()
 	root.InitDefaultCompletionCmd()
 	refuseUnknownSubcommands(root)
 	return root
+}
+
+// groupAnnotationKey marks a command that is only a group of subcommands (set by
+// refuseUnknownSubcommands). A command with subcommands that does its own work,
+// like `schema` (which prints the schema and has `schema diff`), is not a group:
+// it is runnable, so it neither refuses a bare run nor prints group help.
+const groupAnnotationKey = "pveforge/group"
+
+// isGroup reports whether c is only a group of subcommands.
+func isGroup(c *cobra.Command) bool {
+	return c.HasSubCommands() && c.Annotations[groupAnnotationKey] == "true"
 }
 
 // refuseUnknownSubcommands makes every command group in c's tree (a command
@@ -213,6 +230,10 @@ func refuseUnknownSubcommands(c *cobra.Command) {
 	if c.HasSubCommands() && !c.Runnable() {
 		c.Args = unknownSubcommand
 		c.RunE = bareGroup
+		if c.Annotations == nil {
+			c.Annotations = map[string]string{}
+		}
+		c.Annotations[groupAnnotationKey] = "true"
 	}
 	for _, s := range c.Commands() {
 		refuseUnknownSubcommands(s)

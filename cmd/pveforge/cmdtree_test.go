@@ -28,7 +28,7 @@ func TestCommandTree_EveryGroupRefusesToRunWithoutAKnownSubcommand(t *testing.T)
 	var groups [][]string
 	var walk func(c *cobra.Command, path []string)
 	walk = func(c *cobra.Command, path []string) {
-		if c.HasSubCommands() {
+		if isGroup(c) {
 			groups = append(groups, path)
 		}
 		for _, s := range c.Commands() {
@@ -115,7 +115,7 @@ func TestCommandTree_BareGroupHelpEqualsExplicitHelp(t *testing.T) {
 	var groups [][]string
 	var walk func(c *cobra.Command, path []string)
 	walk = func(c *cobra.Command, path []string) {
-		if c.HasSubCommands() {
+		if isGroup(c) {
 			groups = append(groups, path)
 		}
 		for _, s := range c.Commands() {

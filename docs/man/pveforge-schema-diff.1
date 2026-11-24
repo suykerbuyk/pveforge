@@ -1,0 +1,46 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-schema-diff - Classify the change between two `pveforge schema` outputs as breaking or additive
+
+
+.SH SYNOPSIS
+\fBpveforge schema diff <old.json> <new.json> [--fail-on breaking] [flags]\fP
+
+
+.SH DESCRIPTION
+Compare two files written by "pveforge schema" (two releases) and print a verdict:
+none, additive, breaking, or incomparable (a file lacks a surface the other has,
+carries a schemaVersion newer than this binary compares, or holds a JSON field
+this binary does not know: nothing can be said about that part, so the verdict is
+never "none"). Every removed verb, flag,
+shorthand, alias, environment variable, output key or roster key is breaking;
+so is any change of a flag's type or default, any change of requiredness, ANY
+change of a command's mutation tier, a changed or removed argument, and any
+change of a verb's exit statuses or named states (a verb gaining exit status 3
+or 4 included). Added verbs, optional flags, optional arguments, output keys,
+environment variables and roster keys are additive. Wording changes are
+informational.
+
+.PP
+The exit status is 0 whatever the verdict, unless --fail-on breaking is given:
+then a breaking verdict is exit 1. (Exit 4 is reserved for a refusal before a
+change; this command changes nothing.)
+
+
+.SH OPTIONS
+\fB--fail-on\fP=""
+	exit 1 when the verdict is this: "breaking"
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for diff
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+
+.SH SEE ALSO
+\fBpveforge-schema(1)\fP

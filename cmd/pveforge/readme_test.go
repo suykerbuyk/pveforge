@@ -600,7 +600,7 @@ func checkDocCommand(c docCommand) string {
 		}
 		cur, rest = next, rest[1:]
 	}
-	if cur == root || !cur.Runnable() || cur.HasSubCommands() {
+	if cur == root || !cur.Runnable() || isGroup(cur) {
 		return fmt.Sprintf("%s: %q names no pveforge command (a group or nothing)", c.where, strings.Join(c.args, " "))
 	}
 	if c.span {
@@ -1345,7 +1345,7 @@ func TestPRD_TierTableMatchesTheCommandTree(t *testing.T) {
 			walk(s)
 		}
 		path := strings.TrimPrefix(c.CommandPath(), "pveforge ")
-		if !c.Runnable() || c.HasSubCommands() || !c.HasParent() || path == "help" || path == "completion" || strings.HasPrefix(path, "completion ") {
+		if !c.Runnable() || isGroup(c) || !c.HasParent() || path == "help" || path == "completion" || strings.HasPrefix(path, "completion ") {
 			return
 		}
 		code[path] = c.Annotations[mutationAnnotationKey]

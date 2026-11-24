@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -39,6 +40,7 @@ func newSchemaCmd() *cobra.Command {
 		},
 	}
 	markSafe(cmd)
+	cmd.AddCommand(newSchemaDiffCmd())
 	return cmd
 }
 
@@ -49,6 +51,11 @@ type flagSchema struct {
 	Type      string `json:"type"`
 	Usage     string `json:"usage"`
 	Default   string `json:"default,omitempty"`
+	// Required is SEMANTIC (contract plan §3.3): true when cobra marks the flag
+	// required or the command refuses to run without it (runtimeRequiredFlags);
+	// RequiredWhen states a conditional requirement.
+	Required     bool   `json:"required,omitempty"`
+	RequiredWhen string `json:"requiredWhen,omitempty"`
 }
 
 // commandSchema is one cobra command's shape in `pveforge schema`'s
@@ -74,6 +81,22 @@ type commandSchema struct {
 	Flags       []flagSchema    `json:"flags,omitempty"`
 	GlobalFlags []flagSchema    `json:"globalFlags,omitempty"`
 	Subcommands []commandSchema `json:"subcommands,omitempty"`
+
+	// Schema v2 (additive; every v1 field above is unchanged).
+	Args   []argSchema   `json:"args,omitempty"`
+	Exits  *exitsSchema  `json:"exits,omitempty"`
+	Output *outputSchema `json:"output,omitempty"`
+
+	// Root node only.
+	SchemaVersion int                `json:"schemaVersion,omitempty"`
+	Contract      *contractSchema    `json:"contract,omitempty"`
+	ExitStatuses  []exitStatusSchema `json:"exitStatuses,omitempty"`
+	Env           []envSchema        `json:"env,omitempty"`
+	Roster        *rosterSchema      `json:"roster,omitempty"`
+
+	// unknown lists the JSON fields a file carried that this binary does not
+	// know (set by readSchemaFile, never encoded).
+	unknown []string
 }
 
 // helpFlagName is cobra's own auto-injected --help/-h flag, added to
@@ -84,6 +107,10 @@ type commandSchema struct {
 // a calling agent, not information.
 const helpFlagName = "help"
 
+// versionFlagName is cobra's own --version flag on the root (version.go), which the
+// schema omits for the same reason it omits --help.
+const versionFlagName = "version"
+
 // buildCommandTreeSchema is `pveforge schema`'s entry point: it takes the
 // root's persistent flags as the global set (globalFlags), then walks the
 // tree building each node's own schema with those flags omitted from its
@@ -92,6 +119,11 @@ func buildCommandTreeSchema(root *cobra.Command) commandSchema {
 	global := globalFlags(root)
 	schema := buildNodeSchema(root, global)
 	schema.GlobalFlags = sortedFlagValues(global)
+	schema.SchemaVersion = schemaVersion
+	schema.Contract = &contractSchema{Pveforge: readVersion()}
+	schema.ExitStatuses = exitStatusTable()
+	schema.Env = envTable()
+	schema.Roster = &rosterSchema{Keys: rosterKeys()}
 	return schema
 }
 
@@ -140,6 +172,14 @@ func buildNodeSchema(cmd *cobra.Command, global map[string]flagSchema) commandSc
 	}
 	if cmd.Runnable() {
 		node.Mutation = cmd.Annotations[mutationAnnotationKey]
+		if cmd.HasParent() {
+			path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+			if cmd.Parent() != nil && !cmd.HasSubCommands() {
+				node.Args = parseUseArgs(cmd.Use)
+			}
+			node.Exits = exitsOf(path)
+			node.Output = outputOf(path)
+		}
 	}
 
 	children := cmd.Commands()
@@ -165,10 +205,17 @@ func localFlagsExcluding(cmd *cobra.Command, global map[string]flagSchema) []fla
 		if f.Name == helpFlagName {
 			return
 		}
+		// the root's --version is cobra's own flag, like --help: `pveforge version`
+		// is the contract surface for the version identity
+		if cmd.Parent() == nil && f.Name == versionFlagName {
+			return
+		}
 		if _, isGlobal := global[flagIdentity(f)]; isGlobal {
 			return
 		}
-		flags = append(flags, toFlagSchema(f))
+		fs := toFlagSchema(f)
+		fs.Required, fs.RequiredWhen = requiredOf(cmd, f)
+		flags = append(flags, fs)
 	})
 	sort.Slice(flags, func(i, j int) bool { return flags[i].Name < flags[j].Name })
 	return flags

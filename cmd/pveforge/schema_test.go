@@ -217,7 +217,7 @@ func TestNewSchemaCmd_FlagsMatchWhatEachCommandAccepts(t *testing.T) {
 		accepted := map[string]bool{}
 		for _, fs := range []*pflag.FlagSet{cmd.LocalFlags(), cmd.InheritedFlags()} {
 			fs.VisitAll(func(f *pflag.Flag) {
-				if f.Name != helpFlagName {
+				if f.Name != helpFlagName && !(cmd.Parent() == nil && f.Name == versionFlagName) {
 					accepted[f.Name] = true
 				}
 			})

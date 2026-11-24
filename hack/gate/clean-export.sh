@@ -59,7 +59,8 @@ outside_top() {
 }
 
 # TOP_LEVEL is the literal set of entries the repository root may contain,
-# copied from `git ls-tree --name-only HEAD` at b305958 (13 entries).
+# copied from `git ls-tree --name-only HEAD` at b305958 (13 entries), plus CHANGES.md
+# (the release unit, X4).
 #
 # THIS IS THE PREDICATE. It is written out rather than computed from the tree
 # under test, because a list derived from that tree would make the check and
@@ -68,7 +69,7 @@ outside_top() {
 # (update this list in the same commit), and a stray artefact dropped at the
 # repository root goes red, which is the point -- `git add -A` once swept a
 # 15 MB harness binary into an export from exactly there.
-TOP_LEVEL=".github .gitignore .vibe-palace.toml LICENSE Makefile README.md THIRD-PARTY-NOTICES.md cmd docs go.mod go.sum hack internal"
+TOP_LEVEL=".github .gitignore .vibe-palace.toml CHANGES.md LICENSE Makefile README.md THIRD-PARTY-NOTICES.md cmd docs go.mod go.sum hack internal"
 
 EXPORT=""
 IDX=""

@@ -524,6 +524,12 @@ source. Names match exactly.
 **Layer 3 — `pveforge`'s own command surface** (`pveforge-cli-self-schema`,
 built 2026-09-14). `pveforge schema` prints the full command tree — names,
 flags, short descriptions — as JSON, needing no roster and contacting no host.
+Schema version 2 (additive to version 1) also carries, for a consumer that pins a
+release: `schemaVersion`, `contract.pveforge` (the build identity `pveforge
+version` prints), per-flag `required`/`requiredWhen`, structured `args`, per-verb
+`exits` and `output` (a golden list of what each verb renders), the global
+exit-status table, `env` and the roster file's `keys`; `pveforge schema diff <old>
+<new>` classifies the change between two releases' schemas.
 Every runnable command carries a mutation tier, so a calling agent can tell
 which commands are safe to run freely and which need §3.4's guarantees or
 human confirmation, without hardcoded per-command knowledge:
@@ -600,6 +606,10 @@ command tree (`make man`) and held to it byte for byte
   once it hands over (the named state `child_status`); `api … --no-wait` with a
   UPID exits 0 (the named state `unobserved_dispatch`). A second signal kills
   the process at once; the kernel releases any lock it held.
+  The README's table is the authority for these numbers and this paragraph is a
+  summary of it; the exit-status table `pveforge schema` publishes (with each
+  verb's exit statuses) is the same set, and one test holds the README, that
+  table and the constants `runRoot` assigns to each other.
 - **`vm destroy`.** The destroy-retry-safety contract: before it dispatches,
   the verb asks PVE (never a local file) whether a destroy, migrate, clone,
   restore, stop or shutdown of the vmid is unfinished, and refuses while one
@@ -989,7 +999,7 @@ holds this table to every runnable command's annotation, both ways):
 |---|---|
 | destructive | `bootstrap`, `exec`, `roster init`, `roster import-token`, `roster rekey`, `acl grant`, `acl enable-vm-destroy`, `api post`, `api put`, `api delete`, `network bridge destroy`, `storage create`, `storage alloc`, `storage free-orphans`, `vm snapshot delete`, `vm snapshot rollback`, `vm destroy`, `harness vm stop`, `harness vm shutdown`, `harness vm destroy`, `harness vm snapshot delete`, `harness vm snapshot rollback`, `harness probe`, `harness golden`, `harness reset`, `harness build` |
 | mutating | `roster pin-tls`, `vm create`, `vm set`, `vm snapshot create`, `network set`, `network bridge create`, `storage set-content`, `user ensure`, `group ensure`, `harness vm snapshot create` |
-| safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `access keys`, `doctor`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `harness vm gone`, `harness vm snapshot list` |
+| safe | `roster validate`, `vm get`, `vm snapshot list`, `node get`, `storage get`, `storage orphans`, `network get`, `access inventory`, `access keys`, `doctor`, `api get`, `discover vm`, `discover node`, `discover storage`, `discover network`, `discover device`, `schema`, `schema diff`, `version`, `harness vm gone`, `harness vm snapshot list` |
 
 Cobra's own `help` and `completion` commands carry no tier.
 
@@ -1007,11 +1017,21 @@ exercised is 9.2.11.
   software products. Source files carry no per-file SPDX header.
 - **Repository:** standalone, its own git history and its own vibe-palace
   project space; module `github.com/suykerbuyk/pveforge`.
-- **Distribution today is source only** (operator, 2026-10-02). There are no
-  tags, no `--version` flag and no release tooling; a consumer (including
-  `quantum-ng`) builds the binary from a pinned commit and never vendors or
-  owns the source. Every library package is `internal/`, so only the binary
-  is consumable. Release and versioning policy is open (§6 item 10).
+- **Releases** (operator, 2026-11-22, fork P9; `docs/releasing.md`). pveforge is a
+  provider: a consumer pins a release and verifies it on its own hosts. A release
+  is a `v<major>.<minor>.<patch>` tag built by `make release` into a static
+  (`CGO_ENABLED=0`, `-trimpath`), byte-reproducible linux/amd64 archive with
+  `SHA256SUMS`, the full licence text of every linked module, every module
+  `NOTICE`, Go's licence, `schema.json` and the release's `CHANGES.md` section.
+  Tagging, pushing and publishing stay the operator's steps; nothing in the
+  repository tags, pushes or publishes. `pveforge version` reports the identity
+  (`release=true` only for a clean build of a semver tag with no `replace`) from
+  the toolchain's build information, with no ldflags. The contract a consumer pins
+  and diffs is `pveforge schema` (schema version 2: tree, flags, requiredness,
+  arguments, exit statuses per verb, output keys per verb, environment variables,
+  roster keys) and `pveforge schema diff`, which classifies a change as breaking
+  or additive. Source builds from a pinned commit remain possible; every library
+  package is `internal/`, so only the binary is consumable.
 - **Toolchain and build:** Go 1.27.4; a single Go binary, needing no other
   tool installed beside it. The Makefile is the interface: `make build`, `make
   test` (race detector and coverage), `make check` (lint, then test: what CI
@@ -1097,8 +1117,12 @@ exercised is 9.2.11.
 9. **Bridge port isolation on the CLI:** §3.4's canonical example exists only
    as library code. Ship a command for it, or keep it library-only and say
    why.
-10. **Release and versioning policy** (operator, 2026-10-02): tags, a
-    `--version` flag, and bundling `THIRD-PARTY-NOTICES.md` with a binary.
+10. ~~**Release and versioning policy** (operator, 2026-10-02): tags, a
+    `--version` flag, and bundling `THIRD-PARTY-NOTICES.md` with a binary.~~
+    **Resolved** (operator, 2026-11-22/23): releases start at v0.1.0 (linux/amd64,
+    static, no signing); the policy, the version rule (`release`, `prerelease`) and
+    the breaking/additive classification are `docs/releasing.md` and `pveforge
+    schema diff`.
 11. ~~**A stale roster backup** (`pveforge-stale-roster-backup-revokes-live-token`):
     restoring an old roster and re-running bootstrap revokes the live token,
     because a persistent 401 counts as a verdict.~~ **Resolved** (operator,

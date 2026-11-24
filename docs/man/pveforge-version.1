@@ -1,0 +1,32 @@
+.nh
+.TH "PVEFORGE" "1" "Sep 2026" "pveforge" "pveforge manual"
+
+.SH NAME
+pveforge-version - Print this binary's version identity: version, commit, clean or dirty, static, Go
+
+
+.SH SYNOPSIS
+\fBpveforge version [flags]\fP
+
+
+.SH DESCRIPTION
+Print what this binary is, from the build information the Go toolchain stamped
+into it (no ldflags). release=true only for a clean build of a semver tag with no
+replace directive: the check a consumer pins on. An unstamped build (a source
+export, -buildvcs=false) says stamped=false and prints no dirty field rather
+than guess; a build from a modified tree says dirty=true. commit_time is the
+commit's time, never the build's. The exit status is always 0: this is
+information, not a refusal.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for version
+
+.PP
+\fB-o\fP, \fB--output\fP="kv"
+	output format: "kv" or "json"
+
+
+.SH SEE ALSO
+\fBpveforge(1)\fP

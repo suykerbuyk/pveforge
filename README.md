@@ -35,6 +35,21 @@ There is one man page per command (`man pveforge`, `man pveforge-vm-set`),
 generated from the command tree into `docs/man`. `make man` regenerates them;
 `make test` fails while they are out of date.
 
+## Releases
+
+A release is a `v<major>.<minor>.<patch>` tag the operator creates; `make release`
+builds it into `dist/` as a static (`CGO_ENABLED=0`), byte-reproducible linux/amd64
+archive with `SHA256SUMS`, `schema.json`, the licence text of every linked module
+and `CHANGES.md`. Nothing in the repository tags, pushes or publishes. To pin and
+check a release: `pveforge version` (`release=true` only for a clean build of a
+semver tag with no `replace`), `sha256sum -c SHA256SUMS`, and
+`pveforge schema diff <previous schema.json> <this schema.json>` to see whether the
+contract (commands, flags, exit statuses, output keys, environment variables,
+roster keys) changed in a breaking way. The process, the version policy and the
+meaning of breaking are in [`docs/releasing.md`](docs/releasing.md); what changed
+is in [`CHANGES.md`](CHANGES.md). The static binary uses Go's own DNS resolver, not
+libc's (no `nsswitch` mDNS/NIS modules).
+
 ## Commands
 
 | Command | What it does |
@@ -59,7 +74,9 @@ generated from the command tree into `docs/man`. `make man` regenerates them;
 | `storage create` | Create a cluster-wide storage definition, idempotently; refuses a differing one |
 | `discover …` | Describe PVE's own object schemas, or a pveforge device type |
 | `api get` / `post` / `put` / `delete` | Raw PVE REST passthrough |
-| `schema` | pveforge's own command tree, flags and mutation levels, as JSON |
+| `version` (and `--version`) | This binary's identity: version, commit, clean or dirty, static, Go; `release=true` only for a clean build of a semver tag |
+| `schema` | pveforge's own contract as JSON (schema version 2): commands, flags, requiredness, arguments, exit statuses and output keys per verb, environment variables, roster keys |
+| `schema diff <old> <new>` | Classify the change between two releases' schemas as breaking or additive (`--fail-on breaking` for a gate) |
 | `completion` | Shell completion scripts (bash, fish, powershell, zsh) |
 
 `pveforge <command> --help` is the reference for every flag and default.
@@ -152,6 +169,9 @@ not.
 | `PVEFORGE_HARNESS_OUTER_ROSTERS` | Not read by pveforge. The nested-harness suites: every roster that reaches the OUTER cluster, absolute and colon-separated. Required: the suites refuse any nested target that shares a target id, host, node, resolved address, SSH host key or API token id with them. A harness run also refuses a set `PVEFORGE_ROSTER` (unset it: it is never unset for you) and any proxy variable (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, either case) |
 | `PVEFORGE_HARNESS_NESTED_ROOT_PASSWORD` | Not read by pveforge. Set by `unlock.sh run` from the sealed secrets: the nested harness nodes' test root password, which the harness passes to `bootstrap` as `PVEFORGE_PVE_PASSWORD` for a nested node only |
 | `PVEFORGE_PVE_AUTHORIZATION` | Set by `exec` in its command's environment, never read by pveforge: the `Authorization` header value `PVEAPIToken=<token id>=<secret>` |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and the lower-case spellings) | Honoured by the REST transport (Go's `net/http`); the nested-harness guard refuses a run with any of them set |
+| `ALL_PROXY`, `all_proxy` | Not read by pveforge; the nested-harness guard refuses a run with either set |
+| `HARNESS_STORAGE`, `HARNESS_CREATED_FILE`, `HARNESS_RESET_MIN_FREE_GIB`, `HARNESS_PROBE_MIN_FREE_GIB` | The `harness` verbs' defaults when `--storage`, the created-VMs ledger path or the free-space minimum is not given |
 
 ## Bootstrap
 
@@ -790,3 +810,4 @@ Dual-licensed under your choice of MIT or Apache-2.0. See [`LICENSE`](LICENSE).
 The compiled binary also contains third-party code under its own licenses —
 including Apache-2.0 code from `go-proxmox`, which pveforge forks. See
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+A release archive carries the full licence text of every linked module, every module `NOTICE`, and Go's licence (`licenses/`).

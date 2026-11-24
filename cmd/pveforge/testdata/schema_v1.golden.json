@@ -1,0 +1,2201 @@
+{
+  "name": "pveforge",
+  "use": "pveforge",
+  "short": "Proxmox VE cluster lifecycle management",
+  "subcommands": [
+    {
+      "name": "access",
+      "use": "access",
+      "short": "Read PVE's users, groups and ACLs (as root over SSH)",
+      "subcommands": [
+        {
+          "name": "inventory",
+          "use": "inventory \u003ctarget-id\u003e",
+          "short": "List every user, group and ACL entry, and each @pam user's account on the node",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "keys",
+          "use": "keys \u003ctarget-id\u003e",
+          "short": "List pveforge's SSH keys in root's authorized_keys, and which roster holds each (read-only)",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "also-roster",
+              "type": "stringArray",
+              "usage": "another roster whose SSH keys count as held (repeatable): every roster that can reach this cluster, so a key one of them uses is not reported as a stray",
+              "default": "[]"
+            },
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "acl",
+      "use": "acl",
+      "short": "Grant PVE ACL entries (written as root over SSH)",
+      "subcommands": [
+        {
+          "name": "enable-vm-destroy",
+          "use": "enable-vm-destroy \u003ctarget-id\u003e [--role NAME] [--dry-run] [--role-only] [--yes] [--vmid N]",
+          "short": "Give the roster's token the privileges `vm destroy` needs, without rotating it",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "dry-run",
+              "type": "bool",
+              "usage": "read and judge everything, print the commands that would be sent, write nothing",
+              "default": "false"
+            },
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "role",
+              "type": "string",
+              "usage": "the role to ensure and grant (default ForgeVMAdminAudit); its id may not start with \"pve\" in any case"
+            },
+            {
+              "name": "role-only",
+              "type": "bool",
+              "usage": "ensure and validate the role only: never read the token's permissions and never add the role to it, whatever the roster holds (the order for a fresh or rebuilt target: this, then bootstrap --grant /:ForgeVMAdminAudit::1)",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "vmid",
+              "type": "string",
+              "usage": "also check the privileges on this VM in the final verdict (a canonical decimal vmid)"
+            },
+            {
+              "name": "yes",
+              "type": "bool",
+              "usage": "confirm the write without asking (required when there is no terminal to ask on); has no effect with --dry-run",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "grant",
+          "use": "grant \u003ctarget-id\u003e (--user \u003cuserid\u003e | --group \u003cgroupid\u003e | --token \u003ctokenid\u003e) --grant PATH:ROLE[:PRIVS[:PROPAGATE]]...",
+          "short": "Grant a role on a path to a user, group or token",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "allow-escalating-role",
+              "type": "bool",
+              "usage": "allow a role conferring an escalating privilege: Permissions.Modify, User.Modify, Sys.Modify, Realm.Allocate, Sys.Console, VM.Monitor, Realm.AllocateUser, Datastore.Allocate, Mapping.Modify",
+              "default": "false"
+            },
+            {
+              "name": "grant",
+              "type": "stringArray",
+              "usage": "a grant PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; PROPAGATE defaults to 0)",
+              "default": "[]"
+            },
+            {
+              "name": "group",
+              "type": "string",
+              "usage": "grant to this group"
+            },
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "token",
+              "type": "string",
+              "usage": "grant to this API token (\u003cname\u003e@\u003crealm\u003e!\u003ctokenname\u003e)"
+            },
+            {
+              "name": "user",
+              "type": "string",
+              "usage": "grant to this user (\u003cname\u003e@\u003crealm\u003e)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "api",
+      "use": "api",
+      "short": "Raw PVE REST API passthrough for paths with no dedicated command yet",
+      "subcommands": [
+        {
+          "name": "delete",
+          "use": "delete \u003cpath\u003e \u003ctarget-id\u003e",
+          "short": "Raw PVE REST DELETE against \u003cpath\u003e",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "data",
+              "type": "stringArray",
+              "usage": "a key=value request parameter (repeatable)",
+              "default": "[]"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time. A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given",
+              "default": "0s"
+            },
+            {
+              "name": "no-wait",
+              "type": "bool",
+              "usage": "if PVE returns a task id (UPID), print it and exit without waiting for the task; the object lock is released before the task finishes",
+              "default": "false"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "unsafe-no-lock",
+              "type": "bool",
+              "usage": "proceed without internal/lock protection when \u003cpath\u003e doesn't match a known pveforge-managed object type",
+              "default": "false"
+            },
+            {
+              "name": "wait-timeout",
+              "type": "duration",
+              "usage": "give up waiting for a returned task after this long (0 = the 10m0s ceiling; may not exceed it)",
+              "default": "0s"
+            }
+          ]
+        },
+        {
+          "name": "get",
+          "use": "get \u003cpath\u003e \u003ctarget-id\u003e",
+          "short": "Raw PVE REST GET against \u003cpath\u003e",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "data",
+              "type": "stringArray",
+              "usage": "a key=value request parameter (repeatable)",
+              "default": "[]"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time. A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "unsafe-no-lock",
+              "type": "bool",
+              "usage": "proceed without internal/lock protection when \u003cpath\u003e doesn't match a known pveforge-managed object type",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "post",
+          "use": "post \u003cpath\u003e \u003ctarget-id\u003e",
+          "short": "Raw PVE REST POST against \u003cpath\u003e",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "data",
+              "type": "stringArray",
+              "usage": "a key=value request parameter (repeatable)",
+              "default": "[]"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time. A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given",
+              "default": "0s"
+            },
+            {
+              "name": "no-wait",
+              "type": "bool",
+              "usage": "if PVE returns a task id (UPID), print it and exit without waiting for the task; the object lock is released before the task finishes",
+              "default": "false"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "unsafe-no-lock",
+              "type": "bool",
+              "usage": "proceed without internal/lock protection when \u003cpath\u003e doesn't match a known pveforge-managed object type",
+              "default": "false"
+            },
+            {
+              "name": "wait-timeout",
+              "type": "duration",
+              "usage": "give up waiting for a returned task after this long (0 = the 10m0s ceiling; may not exceed it)",
+              "default": "0s"
+            }
+          ]
+        },
+        {
+          "name": "put",
+          "use": "put \u003cpath\u003e \u003ctarget-id\u003e",
+          "short": "Raw PVE REST PUT against \u003cpath\u003e",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "data",
+              "type": "stringArray",
+              "usage": "a key=value request parameter (repeatable)",
+              "default": "[]"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time. A path that names a pveforge-managed object is always locked, with or without --unsafe-no-lock. On any other path no lock is taken and this flag has no effect; there, post, put and delete are refused unless --unsafe-no-lock is given",
+              "default": "0s"
+            },
+            {
+              "name": "no-wait",
+              "type": "bool",
+              "usage": "if PVE returns a task id (UPID), print it and exit without waiting for the task; the object lock is released before the task finishes",
+              "default": "false"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "unsafe-no-lock",
+              "type": "bool",
+              "usage": "proceed without internal/lock protection when \u003cpath\u003e doesn't match a known pveforge-managed object type",
+              "default": "false"
+            },
+            {
+              "name": "wait-timeout",
+              "type": "duration",
+              "usage": "give up waiting for a returned task after this long (0 = the 10m0s ceiling; may not exceed it)",
+              "default": "0s"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "bootstrap",
+      "use": "bootstrap \u003ctarget-id\u003e",
+      "short": "Bootstrap a target from PAM/realm username+password to a fully token-authenticated roster entry",
+      "mutation": "destructive",
+      "flags": [
+        {
+          "name": "api-port",
+          "type": "int",
+          "usage": "PVE API port (default 8006)",
+          "default": "0"
+        },
+        {
+          "name": "capture-port",
+          "type": "int",
+          "usage": "pveproxy's port ON THE NODE, where an insecure_tls target's TLS key is captured over SSH (default 8006); give it when --api-port reaches the node through a forward. It is not stored: repeat it on a later run that captures again",
+          "default": "0"
+        },
+        {
+          "name": "grant",
+          "type": "stringArray",
+          "usage": "an ACL grant for the token, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable; at least one is required, there is no default): ROLE on PATH, PRIVS an optional comma-separated privilege list pinning exactly the role's privileges, PROPAGATE 0 or 1 (default 0), e.g. /pool/p:PVEVMUser or /:PVEVMAdmin::1; if a grant's path, or its privileges, differ from the held token's effective grants, re-running bootstrap revokes that token on PVE (for every holder) and then tries to mint a replacement",
+          "default": "[]"
+        },
+        {
+          "name": "host",
+          "type": "string",
+          "usage": "target host/IP (required unless the target already exists in the roster)"
+        },
+        {
+          "name": "host-key-fingerprint",
+          "type": "string",
+          "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: the password connection (the key install's, or --no-ssh-key's) must present that key, checked before the password is sent, instead of trusting the host key on first use. For a target that already holds a pinned key, a different value is refused before any connection. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+        },
+        {
+          "name": "insecure-tls",
+          "type": "bool",
+          "usage": "skip the API's certificate chain check and pin its key instead: every run captures the key over the SSH session and stores it as the target's TLS pin (a password session needs --host-key-fingerprint or --ssh-tofu), and REST to an insecure_tls target without a pin is refused",
+          "default": "false"
+        },
+        {
+          "name": "lock-wait",
+          "type": "duration",
+          "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+          "default": "0s"
+        },
+        {
+          "name": "no-ssh-key",
+          "type": "bool",
+          "usage": "authenticate this run with the PVE password for its own duration only: no key is installed on the target and none is stored in the roster, so no SSH host key pin is stored either. Every such run is a fresh password connection: give --host-key-fingerprint on each one (an insecure_tls target requires it, or --ssh-tofu, since each such run captures its TLS pin), or the host key is trusted on first use; the accepted fingerprint is reported as host_key_fingerprint. A target bootstrapped this way needs this flag on every later run, and the flag is refused against a target whose roster entry holds an SSH keypair",
+          "default": "false"
+        },
+        {
+          "name": "node",
+          "type": "string",
+          "usage": "PVE node name (required unless the target already exists in the roster)"
+        },
+        {
+          "name": "output",
+          "shorthand": "o",
+          "type": "string",
+          "usage": "output format: \"kv\" or \"json\"",
+          "default": "kv"
+        },
+        {
+          "name": "pve-user",
+          "type": "string",
+          "usage": "PAM/realm username to bootstrap with: the SSH LOGIN (must be an @pam user); the token's owner is --token-owner. In keyless mode this login's password is used on every run",
+          "default": "root@pam"
+        },
+        {
+          "name": "reprovisioned",
+          "type": "bool",
+          "usage": "the node was rebuilt: replace its stored SSH host key pin, the keypair installed on it, and its TLS pin, together. Needs --host-key-fingerprint with the NEW key, read on the node's CONSOLE (ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub), never the key a failing connection presented. Every run still needs --grant (the roster stores none), --no-ssh-key for a keyless target, --capture-port if one was used, and the PVE password. Where the stored pins already match the node it runs as a plain bootstrap, so repeating it is safe. A non-root token owner, its ACLs, pools and roles do not survive a rebuild: recreate them first",
+          "default": "false"
+        },
+        {
+          "name": "roster",
+          "type": "string",
+          "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+        },
+        {
+          "name": "ssh-port",
+          "type": "int",
+          "usage": "SSH port on the target host",
+          "default": "22"
+        },
+        {
+          "name": "ssh-tofu",
+          "type": "bool",
+          "usage": "accept trust on first use of the SSH host key for a run whose password session captures an insecure_tls target's TLS pin (a first run, or --no-ssh-key); without it such a run needs --host-key-fingerprint. The pin is recorded with tls_pin_source ssh-tofu, only as good as that first connection",
+          "default": "false"
+        },
+        {
+          "name": "token-id",
+          "type": "string",
+          "usage": "name of the scoped API token to create",
+          "default": "pveforge"
+        },
+        {
+          "name": "token-owner",
+          "type": "string",
+          "usage": "PVE principal that will own the token, as name@realm (default: --pve-user). It is not the SSH login and needs no SSH account. A non-root owner must itself hold the whole role at each granted path, or bootstrap refuses before touching anything. Changing it deliberately leaves the previous token live on PVE, held by nobody (orphaned_token), never revoked; omitting it when the roster holds another owner's token is refused"
+        }
+      ]
+    },
+    {
+      "name": "completion",
+      "use": "completion",
+      "short": "Generate the autocompletion script for the specified shell",
+      "subcommands": [
+        {
+          "name": "bash",
+          "use": "bash",
+          "short": "Generate the autocompletion script for bash",
+          "flags": [
+            {
+              "name": "no-descriptions",
+              "type": "bool",
+              "usage": "disable completion descriptions",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "fish",
+          "use": "fish",
+          "short": "Generate the autocompletion script for fish",
+          "flags": [
+            {
+              "name": "no-descriptions",
+              "type": "bool",
+              "usage": "disable completion descriptions",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "powershell",
+          "use": "powershell",
+          "short": "Generate the autocompletion script for powershell",
+          "flags": [
+            {
+              "name": "no-descriptions",
+              "type": "bool",
+              "usage": "disable completion descriptions",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "zsh",
+          "use": "zsh",
+          "short": "Generate the autocompletion script for zsh",
+          "flags": [
+            {
+              "name": "no-descriptions",
+              "type": "bool",
+              "usage": "disable completion descriptions",
+              "default": "false"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "discover",
+      "use": "discover",
+      "short": "Describe PVE's own object schema (layer 1) or a pveforge device type (layer 2)",
+      "subcommands": [
+        {
+          "name": "device",
+          "use": "device [type]",
+          "short": "Describe a pveforge device-semantic resolver's schema (layer 2, purely local — no target/roster needed)",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            }
+          ]
+        },
+        {
+          "name": "network",
+          "use": "network \u003ctarget-id\u003e",
+          "short": "Describe a network interface's schema, per PVE's own API-doc tree",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "node",
+          "use": "node \u003ctarget-id\u003e",
+          "short": "Describe a node's status schema, per PVE's own API-doc tree",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "storage",
+          "use": "storage \u003ctarget-id\u003e",
+          "short": "Describe a storage backend's config or status schema, per PVE's own API-doc tree",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "verb",
+              "type": "string",
+              "usage": "which storage sub-resource to describe: \"config\" (cluster-wide definition, default) or \"status\" (per-node runtime status)",
+              "default": "config"
+            }
+          ]
+        },
+        {
+          "name": "vm",
+          "use": "vm \u003ctarget-id\u003e",
+          "short": "Describe a VM's config or status schema, per PVE's own API-doc tree",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "verb",
+              "type": "string",
+              "usage": "which VM sub-resource to describe: \"config\" or \"status\"",
+              "default": "config"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "doctor",
+      "use": "doctor \u003ctarget-id\u003e",
+      "short": "Report which privileges `vm destroy` needs and which the token holds",
+      "mutation": "safe",
+      "flags": [
+        {
+          "name": "lock-wait",
+          "type": "duration",
+          "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+          "default": "0s"
+        },
+        {
+          "name": "output",
+          "shorthand": "o",
+          "type": "string",
+          "usage": "output format: \"kv\" or \"json\"",
+          "default": "kv"
+        },
+        {
+          "name": "roster",
+          "type": "string",
+          "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+        },
+        {
+          "name": "vmid",
+          "type": "string",
+          "usage": "also check the privileges on this VM (a canonical decimal vmid)"
+        }
+      ]
+    },
+    {
+      "name": "exec",
+      "use": "exec \u003ctarget\u003e -- \u003ccommand\u003e [args...]",
+      "short": "Run a command with the target's API token in its environment",
+      "mutation": "destructive",
+      "flags": [
+        {
+          "name": "roster",
+          "type": "string",
+          "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+        }
+      ]
+    },
+    {
+      "name": "group",
+      "use": "group",
+      "short": "Ensure PVE groups (written as root over SSH)",
+      "subcommands": [
+        {
+          "name": "ensure",
+          "use": "ensure \u003ctarget-id\u003e \u003cgroupid\u003e",
+          "short": "Create a PVE group, or set its comment",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "comment",
+              "type": "string",
+              "usage": "set the group's comment"
+            },
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "harness",
+      "use": "harness",
+      "short": "Outer test-harness VM lifecycle (operator-driven)",
+      "subcommands": [
+        {
+          "name": "build",
+          "use": "build \u003ctarget-id\u003e",
+          "short": "Build the nested cluster's three outer VMs (690-692)",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "created-file",
+              "type": "string",
+              "usage": "path to this run's created-VM ledger (default $HARNESS_CREATED_FILE)"
+            },
+            {
+              "name": "keep-on-failure",
+              "type": "bool",
+              "usage": "on failure, leave this run's VMs for inspection instead of destroying them",
+              "default": "false"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "pool",
+              "type": "string",
+              "usage": "harness pool a VM must be a member of",
+              "default": "pveforge-harness"
+            },
+            {
+              "name": "repin",
+              "type": "bool",
+              "usage": "replace existing host-key pins for the three addresses (a new build makes new keys)",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "storage",
+              "type": "string",
+              "usage": "the outer storage id (or $HARNESS_STORAGE)"
+            },
+            {
+              "name": "tag",
+              "type": "string",
+              "usage": "harness tag a VM must carry",
+              "default": "pveforge-harness"
+            }
+          ]
+        },
+        {
+          "name": "golden",
+          "use": "golden \u003ctarget-id\u003e",
+          "short": "Take the nested harness's golden point (690-692)",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "pool",
+              "type": "string",
+              "usage": "harness pool a VM must be a member of",
+              "default": "pveforge-harness"
+            },
+            {
+              "name": "replace-golden",
+              "type": "bool",
+              "usage": "delete any existing golden first (never a mix of old and new)",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "storage",
+              "type": "string",
+              "usage": "the outer storage id (or $HARNESS_STORAGE)"
+            },
+            {
+              "name": "tag",
+              "type": "string",
+              "usage": "harness tag a VM must carry",
+              "default": "pveforge-harness"
+            }
+          ]
+        },
+        {
+          "name": "probe",
+          "use": "probe \u003ctarget-id\u003e",
+          "short": "Probe an outer storage's capability (creates and destroys VM 690)",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "created-file",
+              "type": "string",
+              "usage": "path to this run's created-VM ledger (default $HARNESS_CREATED_FILE)"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "min-free-gib",
+              "type": "int",
+              "usage": "minimum free GiB the storage must have (0 = $HARNESS_PROBE_MIN_FREE_GIB, else 520)",
+              "default": "0"
+            },
+            {
+              "name": "pool",
+              "type": "string",
+              "usage": "harness pool a VM must be a member of",
+              "default": "pveforge-harness"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "static-only",
+              "type": "bool",
+              "usage": "run the static layer alone (no VM is created)",
+              "default": "false"
+            },
+            {
+              "name": "storage",
+              "type": "string",
+              "usage": "the outer storage id (or $HARNESS_STORAGE)"
+            },
+            {
+              "name": "tag",
+              "type": "string",
+              "usage": "harness tag a VM must carry",
+              "default": "pveforge-harness"
+            }
+          ]
+        },
+        {
+          "name": "reset",
+          "use": "reset \u003ctarget-id\u003e",
+          "short": "Reset the nested harness to its golden point (690-692)",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "pool",
+              "type": "string",
+              "usage": "harness pool a VM must be a member of",
+              "default": "pveforge-harness"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "storage",
+              "type": "string",
+              "usage": "the outer storage id (or $HARNESS_STORAGE)"
+            },
+            {
+              "name": "tag",
+              "type": "string",
+              "usage": "harness tag a VM must carry",
+              "default": "pveforge-harness"
+            }
+          ]
+        },
+        {
+          "name": "vm",
+          "use": "vm",
+          "short": "Harness VM lifecycle verbs (stop, shutdown, destroy, gone, snapshot)",
+          "subcommands": [
+            {
+              "name": "destroy",
+              "use": "destroy \u003ctarget-id\u003e \u003cvmid\u003e",
+              "short": "Destroy a harness VM and prove it is gone",
+              "mutation": "destructive",
+              "flags": [
+                {
+                  "name": "created-file",
+                  "type": "string",
+                  "usage": "path to this run's created-VM ledger (default $HARNESS_CREATED_FILE)"
+                },
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "pool",
+                  "type": "string",
+                  "usage": "harness pool a VM must be a member of",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                },
+                {
+                  "name": "tag",
+                  "type": "string",
+                  "usage": "harness tag a VM must carry",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "yes",
+                  "type": "bool",
+                  "usage": "confirm this irreversible destroy (required; does NOT bypass the created-by-this-run ledger gate)",
+                  "default": "false"
+                }
+              ]
+            },
+            {
+              "name": "gone",
+              "use": "gone \u003ctarget-id\u003e \u003cvmid\u003e",
+              "short": "Prove a destroyed harness VM is gone",
+              "mutation": "safe",
+              "flags": [
+                {
+                  "name": "destroy-task",
+                  "type": "string",
+                  "usage": "the destroy task's UPID (required)"
+                },
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "pool",
+                  "type": "string",
+                  "usage": "harness pool a VM must be a member of",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                },
+                {
+                  "name": "tag",
+                  "type": "string",
+                  "usage": "harness tag a VM must carry",
+                  "default": "pveforge-harness"
+                }
+              ]
+            },
+            {
+              "name": "shutdown",
+              "use": "shutdown \u003ctarget-id\u003e \u003cvmid\u003e",
+              "short": "Gracefully shut down a harness VM",
+              "mutation": "destructive",
+              "flags": [
+                {
+                  "name": "force-stop",
+                  "type": "bool",
+                  "usage": "let PVE hard-stop the VM if the graceful shutdown times out",
+                  "default": "false"
+                },
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "pool",
+                  "type": "string",
+                  "usage": "harness pool a VM must be a member of",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                },
+                {
+                  "name": "tag",
+                  "type": "string",
+                  "usage": "harness tag a VM must carry",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "timeout",
+                  "type": "int",
+                  "usage": "seconds PVE waits for the guest before giving up (0 = PVE default)",
+                  "default": "0"
+                }
+              ]
+            },
+            {
+              "name": "snapshot",
+              "use": "snapshot",
+              "short": "Harness VM snapshot verbs (list, create, delete, rollback)",
+              "subcommands": [
+                {
+                  "name": "create",
+                  "use": "create \u003ctarget-id\u003e \u003cvmid\u003e \u003cname\u003e",
+                  "short": "Create a harness VM snapshot (disk-only with --vmstate 0)",
+                  "mutation": "mutating",
+                  "flags": [
+                    {
+                      "name": "description",
+                      "type": "string",
+                      "usage": "the snapshot's description"
+                    },
+                    {
+                      "name": "lock-wait",
+                      "type": "duration",
+                      "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                      "default": "0s"
+                    },
+                    {
+                      "name": "output",
+                      "shorthand": "o",
+                      "type": "string",
+                      "usage": "output format: \"kv\" or \"json\"",
+                      "default": "kv"
+                    },
+                    {
+                      "name": "pool",
+                      "type": "string",
+                      "usage": "harness pool a VM must be a member of",
+                      "default": "pveforge-harness"
+                    },
+                    {
+                      "name": "roster",
+                      "type": "string",
+                      "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                    },
+                    {
+                      "name": "tag",
+                      "type": "string",
+                      "usage": "harness tag a VM must carry",
+                      "default": "pveforge-harness"
+                    },
+                    {
+                      "name": "vmstate",
+                      "type": "int",
+                      "usage": "capture RAM state (1) or disk-only (0)",
+                      "default": "1"
+                    }
+                  ]
+                },
+                {
+                  "name": "delete",
+                  "use": "delete \u003ctarget-id\u003e \u003cvmid\u003e \u003cname\u003e...",
+                  "short": "Delete harness VM snapshots, newest first",
+                  "mutation": "destructive",
+                  "flags": [
+                    {
+                      "name": "lock-wait",
+                      "type": "duration",
+                      "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                      "default": "0s"
+                    },
+                    {
+                      "name": "output",
+                      "shorthand": "o",
+                      "type": "string",
+                      "usage": "output format: \"kv\" or \"json\"",
+                      "default": "kv"
+                    },
+                    {
+                      "name": "pool",
+                      "type": "string",
+                      "usage": "harness pool a VM must be a member of",
+                      "default": "pveforge-harness"
+                    },
+                    {
+                      "name": "roster",
+                      "type": "string",
+                      "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                    },
+                    {
+                      "name": "tag",
+                      "type": "string",
+                      "usage": "harness tag a VM must carry",
+                      "default": "pveforge-harness"
+                    }
+                  ]
+                },
+                {
+                  "name": "list",
+                  "use": "list \u003ctarget-id\u003e \u003cvmid\u003e",
+                  "short": "List a harness VM's snapshots, oldest first",
+                  "mutation": "safe",
+                  "flags": [
+                    {
+                      "name": "lock-wait",
+                      "type": "duration",
+                      "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                      "default": "0s"
+                    },
+                    {
+                      "name": "output",
+                      "shorthand": "o",
+                      "type": "string",
+                      "usage": "output format: \"kv\" or \"json\"",
+                      "default": "kv"
+                    },
+                    {
+                      "name": "pool",
+                      "type": "string",
+                      "usage": "harness pool a VM must be a member of",
+                      "default": "pveforge-harness"
+                    },
+                    {
+                      "name": "roster",
+                      "type": "string",
+                      "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                    },
+                    {
+                      "name": "tag",
+                      "type": "string",
+                      "usage": "harness tag a VM must carry",
+                      "default": "pveforge-harness"
+                    }
+                  ]
+                },
+                {
+                  "name": "rollback",
+                  "use": "rollback \u003ctarget-id\u003e \u003cvmid\u003e \u003cname\u003e",
+                  "short": "Roll a harness VM back to its newest snapshot",
+                  "mutation": "destructive",
+                  "flags": [
+                    {
+                      "name": "lock-wait",
+                      "type": "duration",
+                      "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                      "default": "0s"
+                    },
+                    {
+                      "name": "output",
+                      "shorthand": "o",
+                      "type": "string",
+                      "usage": "output format: \"kv\" or \"json\"",
+                      "default": "kv"
+                    },
+                    {
+                      "name": "pool",
+                      "type": "string",
+                      "usage": "harness pool a VM must be a member of",
+                      "default": "pveforge-harness"
+                    },
+                    {
+                      "name": "roster",
+                      "type": "string",
+                      "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                    },
+                    {
+                      "name": "tag",
+                      "type": "string",
+                      "usage": "harness tag a VM must carry",
+                      "default": "pveforge-harness"
+                    },
+                    {
+                      "name": "witness",
+                      "type": "bool",
+                      "usage": "prove the guest is running after the rollback via the guest agent",
+                      "default": "false"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "stop",
+              "use": "stop \u003ctarget-id\u003e \u003cvmid\u003e",
+              "short": "Hard-stop a harness VM",
+              "mutation": "destructive",
+              "flags": [
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "pool",
+                  "type": "string",
+                  "usage": "harness pool a VM must be a member of",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                },
+                {
+                  "name": "tag",
+                  "type": "string",
+                  "usage": "harness tag a VM must carry",
+                  "default": "pveforge-harness"
+                },
+                {
+                  "name": "timeout",
+                  "type": "int",
+                  "usage": "seconds PVE waits before forcing the stop (0 = PVE default)",
+                  "default": "0"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "help",
+      "use": "help [command]",
+      "short": "Help about any command"
+    },
+    {
+      "name": "network",
+      "use": "network",
+      "short": "Inspect node-level network interfaces",
+      "subcommands": [
+        {
+          "name": "bridge",
+          "use": "bridge",
+          "short": "Create or destroy a node-level network bridge (two-phase stage/commit)",
+          "subcommands": [
+            {
+              "name": "create",
+              "use": "create \u003ctarget-id\u003e \u003ciface\u003e [field=value ...]",
+              "short": "Stage and commit a new node-level network bridge",
+              "mutation": "mutating",
+              "flags": [
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "management-bridge",
+                  "type": "string",
+                  "usage": "the node's own management bridge (e.g. vmbr0) — required, no default; see this command's --help for why"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                }
+              ]
+            },
+            {
+              "name": "destroy",
+              "use": "destroy \u003ctarget-id\u003e \u003ciface\u003e",
+              "short": "Stage and commit the removal of a node-level network bridge",
+              "mutation": "destructive",
+              "flags": [
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "management-bridge",
+                  "type": "string",
+                  "usage": "the node's own management bridge (e.g. vmbr0) — required, no default; see this command's --help for why"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "get",
+          "use": "get \u003ctarget-id\u003e \u003ciface\u003e",
+          "short": "Get one network interface's config",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "set",
+          "use": "set \u003ctarget-id\u003e \u003ciface\u003e field=value [field=value ...]",
+          "short": "Set one or more fields on an existing node-level network interface",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "node",
+      "use": "node",
+      "short": "Inspect nodes",
+      "subcommands": [
+        {
+          "name": "get",
+          "use": "get \u003ctarget-id\u003e",
+          "short": "Get a node's detailed status",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "roster",
+      "use": "roster",
+      "short": "Inspect and initialize the target roster file",
+      "flags": [
+        {
+          "name": "roster",
+          "type": "string",
+          "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+        }
+      ],
+      "subcommands": [
+        {
+          "name": "import-token",
+          "use": "import-token \u003ctarget-id\u003e",
+          "short": "Put an API token minted outside pveforge into the roster, once PVE proves its grants",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "api-port",
+              "type": "int",
+              "usage": "the target's API port (default 8006)",
+              "default": "0"
+            },
+            {
+              "name": "expect",
+              "type": "string",
+              "usage": "for a target the roster holds no TLS pin for: the pin you verified, sha256//\u003cbase64\u003e; the validation's connection must present exactly that key, and it is written (source expect) after the token validates. Required for an insecure_tls target; for a CA-verified one it is optional and pins it as well"
+            },
+            {
+              "name": "grant",
+              "type": "stringArray",
+              "usage": "a scope the token must hold, PATH:ROLE[:PRIVS[:PROPAGATE]] (repeatable, at least one; the token must hold exactly these)",
+              "default": "[]"
+            },
+            {
+              "name": "host",
+              "type": "string",
+              "usage": "the target's API host (defaults to the roster's, required for a new target)"
+            },
+            {
+              "name": "insecure-tls",
+              "type": "bool",
+              "usage": "skip a new target's API certificate chain check and pin its key instead: the target then needs a TLS pin, the roster's or --expect's, or the import is refused before the secret is read",
+              "default": "false"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "node",
+              "type": "string",
+              "usage": "the target's node name (defaults to the roster's, required for a new target)"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "replace",
+              "type": "bool",
+              "usage": "replace a different token the target already holds (the old token is not revoked)",
+              "default": "false"
+            },
+            {
+              "name": "token-id",
+              "type": "string",
+              "usage": "the full token id, \u003cuser\u003e@\u003crealm\u003e!\u003ctoken name\u003e (required)"
+            }
+          ]
+        },
+        {
+          "name": "init",
+          "use": "init [path]",
+          "short": "Create a new, empty roster file",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "force",
+              "type": "bool",
+              "usage": "overwrite an existing roster file",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "pin-tls",
+          "use": "pin-tls \u003ctarget-id\u003e",
+          "short": "Pin a target's TLS key without touching its token",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "capture-port",
+              "type": "int",
+              "usage": "pveproxy's port ON THE NODE, where the key is captured over SSH (default 8006)",
+              "default": "0"
+            },
+            {
+              "name": "expect",
+              "type": "string",
+              "usage": "for a target without SSH auth: the pin you verified, sha256//\u003cbase64\u003e; the target's address must serve exactly that key"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "print",
+              "type": "bool",
+              "usage": "capture and check the pin, and write nothing",
+              "default": "false"
+            },
+            {
+              "name": "repin",
+              "type": "bool",
+              "usage": "replace a different stored pin (a target with SSH auth only: its pinned session vouches for the new key)",
+              "default": "false"
+            },
+            {
+              "name": "ssh-port",
+              "type": "int",
+              "usage": "SSH port on the target host (default: the port pveforge dials a target's stored SSH pin on, 22; the roster stores none)",
+              "default": "0"
+            }
+          ]
+        },
+        {
+          "name": "rekey",
+          "use": "rekey",
+          "short": "Change the roster's passphrase: re-encrypt every secret in it under a new one",
+          "mutation": "destructive"
+        },
+        {
+          "name": "validate",
+          "use": "validate [path]",
+          "short": "Parse and validate the roster file",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "require-tls-pins",
+              "type": "bool",
+              "usage": "fail when any insecure_tls target has no [targets.tls] pin, naming each",
+              "default": "false"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "schema",
+      "use": "schema",
+      "short": "Print pveforge's own command tree — names, flags, and mutation levels — as JSON",
+      "mutation": "safe"
+    },
+    {
+      "name": "storage",
+      "use": "storage",
+      "short": "Inspect and create storage backends",
+      "subcommands": [
+        {
+          "name": "alloc",
+          "use": "alloc \u003ctarget-id\u003e \u003cstorage\u003e \u003cfilename\u003e \u003csize\u003e \u003cvmid\u003e [--format F]",
+          "short": "Allocate a convention-named raw volume, idempotently",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "force",
+              "type": "bool",
+              "usage": "re-run Apply even if the volume already exists (PVE then refuses the duplicate)",
+              "default": "false"
+            },
+            {
+              "name": "format",
+              "type": "string",
+              "usage": "the volume format (raw, qcow2, ...); optional, PVE infers from the storage type when omitted"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "create",
+          "use": "create \u003ctarget-id\u003e \u003cname\u003e --type \u003ctype\u003e [--data key=value ...]",
+          "short": "Create a storage definition, idempotently, refusing a differing one",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "data",
+              "type": "stringArray",
+              "usage": "a raw PVE create parameter, key=value (repeatable): pool=..., content=..., nodes=...",
+              "default": "[]"
+            },
+            {
+              "name": "force",
+              "type": "bool",
+              "usage": "re-POST even if the storage already matches (PVE refuses the duplicate); still refuses a differing definition",
+              "default": "false"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "type",
+              "type": "string",
+              "usage": "the PVE storage type to create (zfspool, dir, lvmthin, nfs, ...); required"
+            }
+          ]
+        },
+        {
+          "name": "free-orphans",
+          "use": "free-orphans \u003ctarget-id\u003e \u003cstorage\u003e \u003cvmid\u003e",
+          "short": "Free orphan volumes matching a destroyed VM's naming convention (DESTRUCTIVE)",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "force",
+              "type": "bool",
+              "usage": "re-run Apply even when the determination reports no orphans",
+              "default": "false"
+            },
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "get",
+          "use": "get \u003ctarget-id\u003e \u003cstorage-name\u003e",
+          "short": "Get one storage backend's status",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "orphans",
+          "use": "orphans \u003ctarget-id\u003e [storage-name]",
+          "short": "Diff claimed-vs-actual storage volumes for orphans",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "set-content",
+          "use": "set-content \u003ctarget-id\u003e \u003cstorage\u003e \u003ccontent-type\u003e",
+          "short": "Ensure a storage's content list includes a content type, idempotently",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "force",
+              "type": "bool",
+              "usage": "re-run the write even when the content type is already present",
+              "default": "false"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "user",
+      "use": "user",
+      "short": "Ensure PVE users (written as root over SSH)",
+      "subcommands": [
+        {
+          "name": "ensure",
+          "use": "ensure \u003ctarget-id\u003e \u003cuserid\u003e",
+          "short": "Create a PVE user, or bring it to the state asked for",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "allow-escalating-role",
+              "type": "bool",
+              "usage": "allow joining a group that holds a role conferring an escalating privilege: Permissions.Modify, User.Modify, Sys.Modify, Realm.Allocate, Sys.Console, VM.Monitor, Realm.AllocateUser, Datastore.Allocate, Mapping.Modify",
+              "default": "false"
+            },
+            {
+              "name": "comment",
+              "type": "string",
+              "usage": "set the user's comment"
+            },
+            {
+              "name": "disable",
+              "type": "bool",
+              "usage": "disable the user: it can no longer log in or use its API tokens",
+              "default": "false"
+            },
+            {
+              "name": "email",
+              "type": "string",
+              "usage": "set the user's email"
+            },
+            {
+              "name": "enable",
+              "type": "bool",
+              "usage": "enable the user",
+              "default": "false"
+            },
+            {
+              "name": "group",
+              "type": "stringArray",
+              "usage": "add the user to this group (repeatable; membership is only added)",
+              "default": "[]"
+            },
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "vm",
+      "use": "vm",
+      "short": "Inspect and modify VMs",
+      "subcommands": [
+        {
+          "name": "create",
+          "use": "create \u003ctarget-id\u003e \u003cvmid\u003e [field=value ...]",
+          "short": "Create a VM at an explicitly requested VMID, refusing a collision",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "host-key-fingerprint",
+              "type": "string",
+              "usage": "with --unique-tag: the target's SSH host key fingerprint as you verified it, SHA256:\u003cbase64\u003e exactly as ssh-keygen -l -E sha256 prints it: for a target holding no pin, the --no-ssh-key password connection must present that key, checked before the password is sent, instead of trusting the host key on first use; for a target holding a pin it must equal that pin, or nothing is dialed. It must be the fingerprint of the key type pveforge's SSH client negotiates: ECDSA when the host serves one (PVE does by default), so pinning the host's ED25519 key is refused there (fail-closed); ssh-keyscan and ssh-keygen -lf list every type the host serves."
+            },
+            {
+              "name": "json",
+              "type": "string",
+              "usage": "JSON object of create parameters (values must be JSON strings)"
+            },
+            {
+              "name": "json-file",
+              "type": "string",
+              "usage": "path to a JSON file of create parameters (values must be JSON strings)"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "no-ssh-key",
+              "type": "bool",
+              "usage": "with --unique-tag: connect as root with the PVE password (PVEFORGE_PVE_PASSWORD, else a prompt) for this run only, as bootstrap --no-ssh-key does; the connection is checked against the target's stored host key pin, else --host-key-fingerprint, else the host key is trusted on first use; required for a target that holds no SSH key",
+              "default": "false"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "unique-tag",
+              "type": "string",
+              "usage": "refuse the create if any VM or container in the cluster already carries this tag (one of this create's own tags); the guests are listed as root over SSH"
+            }
+          ]
+        },
+        {
+          "name": "destroy",
+          "use": "destroy \u003ctarget-id\u003e \u003cvmid\u003e",
+          "short": "Destroy a VM, with its disks, and prove it is gone",
+          "mutation": "destructive",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            },
+            {
+              "name": "yes",
+              "type": "bool",
+              "usage": "confirm this irreversible destroy (required)",
+              "default": "false"
+            }
+          ]
+        },
+        {
+          "name": "get",
+          "use": "get \u003ctarget-id\u003e \u003cvmid\u003e",
+          "short": "Get a VM's status and config",
+          "mutation": "safe",
+          "flags": [
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "output",
+              "shorthand": "o",
+              "type": "string",
+              "usage": "output format: \"kv\" or \"json\"",
+              "default": "kv"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "set",
+          "use": "set \u003ctarget-id\u003e \u003cvmid\u003e [field=value ...] [--delete field ...]",
+          "short": "Set or delete one or more VM config fields",
+          "mutation": "mutating",
+          "flags": [
+            {
+              "name": "delete",
+              "type": "stringArray",
+              "usage": "remove this config key entirely (PVE's delete parameter), rather than writing it empty; repeatable",
+              "default": "[]"
+            },
+            {
+              "name": "json",
+              "type": "string",
+              "usage": "JSON object of field=value pairs (values must be JSON strings, or null to delete the key as --delete does)"
+            },
+            {
+              "name": "json-file",
+              "type": "string",
+              "usage": "path to a JSON file of field=value pairs (values must be JSON strings, or null to delete the key as --delete does)"
+            },
+            {
+              "name": "lock-wait",
+              "type": "duration",
+              "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+              "default": "0s"
+            },
+            {
+              "name": "roster",
+              "type": "string",
+              "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+            }
+          ]
+        },
+        {
+          "name": "snapshot",
+          "use": "snapshot",
+          "short": "List, create, delete and roll back VM snapshots",
+          "subcommands": [
+            {
+              "name": "create",
+              "use": "create \u003ctarget-id\u003e \u003cvmid\u003e \u003cname\u003e",
+              "short": "Create a snapshot of a VM, with its RAM state",
+              "mutation": "mutating",
+              "flags": [
+                {
+                  "name": "description",
+                  "type": "string",
+                  "usage": "the snapshot's description"
+                },
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                }
+              ]
+            },
+            {
+              "name": "delete",
+              "use": "delete \u003ctarget-id\u003e \u003cvmid\u003e \u003cname\u003e...",
+              "short": "Delete one or more of a VM's snapshots, newest first",
+              "mutation": "destructive",
+              "flags": [
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                }
+              ]
+            },
+            {
+              "name": "list",
+              "use": "list \u003ctarget-id\u003e \u003cvmid\u003e",
+              "short": "List a VM's snapshots, oldest first",
+              "mutation": "safe",
+              "flags": [
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                }
+              ]
+            },
+            {
+              "name": "rollback",
+              "use": "rollback \u003ctarget-id\u003e \u003cvmid\u003e \u003cname\u003e",
+              "short": "Roll a VM back to its newest snapshot, then prove the guest is running when it is expected to be",
+              "mutation": "destructive",
+              "flags": [
+                {
+                  "name": "lock-wait",
+                  "type": "duration",
+                  "usage": "how long to wait for another pveforge process's lock on this object before giving up (0 = the 15m0s default; at most 1h0m0s). The default exceeds the 10m0s ceiling on waiting for a PVE task because a legitimate lock holder may be in such a wait the whole time",
+                  "default": "0s"
+                },
+                {
+                  "name": "no-witness",
+                  "type": "bool",
+                  "usage": "do not run the witness command after the rollback",
+                  "default": "false"
+                },
+                {
+                  "name": "output",
+                  "shorthand": "o",
+                  "type": "string",
+                  "usage": "output format: \"kv\" or \"json\"",
+                  "default": "kv"
+                },
+                {
+                  "name": "roster",
+                  "type": "string",
+                  "usage": "path to the roster file (overrides PVEFORGE_ROSTER and the default ./pveforge.toml)"
+                },
+                {
+                  "name": "witness-command",
+                  "type": "stringArray",
+                  "usage": "the witness command to run in the guest, one argument per flag (needs --witness-marker)",
+                  "default": "[]"
+                },
+                {
+                  "name": "witness-marker",
+                  "type": "string",
+                  "usage": "text the witness command's output must contain"
+                },
+                {
+                  "name": "witness-timeout",
+                  "type": "duration",
+                  "usage": "how long the witness may wait for the guest agent (at most 30m0s)",
+                  "default": "2m0s"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
