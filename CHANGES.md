@@ -8,7 +8,7 @@ breaking is in [`docs/releasing.md`](docs/releasing.md); what a consumer pins
 and diffs is `pveforge version`, `pveforge schema` and the exit-status table in
 the README.
 
-## v0.1.0 (not yet tagged; the operator tags it)
+## v0.1.0 (2026-11-26)
 
 The first release. Before it, pveforge was distributed only as source, pinned by
 commit. Everything below is relative to that source distribution (up to commit

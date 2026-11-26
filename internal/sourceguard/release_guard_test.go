@@ -945,7 +945,21 @@ func TestRelease_Refusals(t *testing.T) {
 		// the CHANGES section is for the tag: add it
 		changes := filepath.Join(repo, "CHANGES.md")
 		b, _ := os.ReadFile(changes)
-		_ = os.WriteFile(changes, append([]byte(strings.Replace(string(b), "## v0.1.0 (not yet tagged; the operator tags it)", "## v0.1.0-rc.1\n\n### Breaking\n\n- none\n\n### Added\n\n- none\n\n### Fixed\n\n- none\n\n### Contract\n\n- none\n\n## v0.1.0 (x)", 1)), nil...), 0o644)
+		// the `## v0.1.0` heading is found by a line-anchored regexp, whatever its suffix (a date,
+		// a note), and its absence FAILS: a literal Replace would silently no-op on a changed heading
+		headingRE := regexp.MustCompile(`(?m)^## v0\.1\.0\b.*$`)
+		loc := headingRE.FindIndex(b)
+		if loc == nil {
+			t.Fatalf("CHANGES.md has no `## v0.1.0` heading line: the fixture cannot add the rc section before it")
+		}
+		rcSection := "## v0.1.0-rc.1\n\n### Breaking\n\n- none\n\n### Added\n\n- none\n\n### Fixed\n\n- none\n\n### Contract\n\n- none\n\n"
+		edited := string(b[:loc[0]]) + rcSection + string(b[loc[0]:])
+		if edited == string(b) || !strings.Contains(edited, "## v0.1.0-rc.1\n") {
+			t.Fatalf("the rc section was not added to CHANGES.md")
+		}
+		if err := os.WriteFile(changes, []byte(edited), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		mustRun(t, repo, relGitEnv(), "git", "add", "-A")
 		mustRun(t, repo, relGitEnv(), "git", "commit", "-q", "-m", "changes")
 		mustRun(t, repo, relGitEnv(), "git", "tag", "-d", "v0.1.0-rc.1")
